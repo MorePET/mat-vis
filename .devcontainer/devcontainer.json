@@ -9,6 +9,6 @@
             ]
         }
     },
-    "postCreateCommand": "uv pip install --system -e '.[baker,dev]'",
+    "postCreateCommand": "uv pip install --system -e '.[baker,dev]' && uv pip install --system pre-commit && pre-commit install",
     "remoteUser": "root"
 }

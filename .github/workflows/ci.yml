@@ -6,33 +6,35 @@ on:
   push:
     branches: [main, dev]
 
-permissions:
-  contents: read
-
 jobs:
-  test:
-    name: Test
+  ci:
+    name: Lint + Test + Container smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: dagger/dagger-for-github@v8
         with:
-          python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
-      # [materialx] extra intentionally excluded — only needed for
-      # gpuopen layered graphs, tested separately in the baker container.
-      - run: uv pip install --system -e '.[baker,dev]'
-      - run: ruff check src/ tests/
-      - run: pytest tests/ -v
+          verb: call
+          module: .dagger
+          args: test-all --src=.
 
-  container:
-    name: Container build
+  push:
+    name: Push baker image to GHCR
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: ci
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
-      - name: Build baker image
-        run: docker build -f Containerfile -t ghcr.io/morepet/mat-vis-baker:test .
-      - name: Smoke test
-        run: |
-          docker run --rm ghcr.io/morepet/mat-vis-baker:test \
-            python -c "import pyarrow; import MaterialX; print('ok')"
+      - uses: dagger/dagger-for-github@v8
+        with:
+          verb: call
+          module: .dagger
+          args: >-
+            push --src=.
+            --registry-user=${{ github.actor }}
+            --registry-pass=env:GITHUB_TOKEN
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

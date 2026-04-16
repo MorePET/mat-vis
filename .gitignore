@@ -40,3 +40,12 @@ scripts/bootstrap.sh
 # UV / Hatch
 uv.lock
 .python-version
+
+# Nix / devenv
+.devenv/
+.devenv.flake.nix
+result
+
+# Dagger (generated SDK, not tracked)
+.dagger/sdk/
+.dagger/uv.lock
