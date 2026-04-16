@@ -1,15 +1,16 @@
-# Baker image — pre-installs materialx + pyarrow so CI doesn't rebuild every run.
+# Slim baker — python + pyarrow + pillow + requests + uv.
+# Used for: devcontainer, lint, test, ambientcg/polyhaven/physicallybased baking.
+# No C++ compilation, builds in seconds.
+#
 # Build:  podman build -t ghcr.io/morepet/mat-vis-baker:latest .
 # Push:   podman push ghcr.io/morepet/mat-vis-baker:latest
-# Use in CI: container: ghcr.io/morepet/mat-vis-baker:latest
 
 FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
-COPY pyproject.toml .
-RUN pip install --no-cache-dir .[baker,materialx]
+COPY pyproject.toml README.md ./
+COPY src/ src/
+RUN uv pip install --system --no-cache .[baker]
 
 WORKDIR /workspace

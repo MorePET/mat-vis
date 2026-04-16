@@ -108,6 +108,8 @@ normal             BINARY       -- PNG bytes, UNCOMPRESSED
 roughness          BINARY       -- PNG bytes, UNCOMPRESSED
 metalness          BINARY       -- PNG bytes, nullable, UNCOMPRESSED
 ao                 BINARY       -- PNG bytes, nullable, UNCOMPRESSED
+displacement       BINARY       -- PNG-16 bytes, nullable, UNCOMPRESSED
+emission           BINARY       -- PNG bytes, nullable, UNCOMPRESSED
 
 source_url         STRING       -- upstream page URL
 source_mtlx_url    STRING       -- nullable, upstream .mtlx URL
@@ -116,7 +118,10 @@ baker_version      STRING
 baked_at           STRING       -- ISO timestamp
 ```
 
-Future HDR columns (`displacement`, `displacement_hdr`,
+All 7 channel columns are present from v1 (matching the rowmap
+and index schemas). `displacement` and `emission` are nullable —
+most materials will have null values initially. Future HDR
+variants (`displacement_hdr`, `emission_hdr` as EXR bytes) can be
 `emission`, `emission_hdr`) can be added without breaking
 existing consumers — Parquet schemas are forwards-compatible.
 
