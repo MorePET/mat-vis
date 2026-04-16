@@ -159,6 +159,42 @@ shapes. Not worth optimizing at the format layer. The decoded-
 image caching flag (`cache_decoded=True`, default off, see
 ADR-0004) covers the pathological repeat-load cases locally.
 
+## Companion rowmap for lightweight client access
+
+`release.yml` publishes a `<source>-<tier>-rowmap.json` alongside
+each Parquet file as a GitHub Release asset. The rowmap maps each
+material ID to byte offset + length per binary column:
+
+```json
+{
+  "Metal064": {
+    "color":     {"offset": 102400, "length": 51200},
+    "normal":    {"offset": 153600, "length": 48000},
+    "roughness": {"offset": 201600, "length": 12800}
+  }
+}
+```
+
+This enables mat's built-in texture client to fetch textures via
+pure-Python HTTP range reads (`urllib.request` with `Range` header)
+without requiring `pyarrow` or any binary dependency. The client
+loads the JSON index (~10 MB) for filtering (a list comprehension,
+not a database query) and the rowmap (~few hundred KB) for
+byte-level access to the Parquet file's binary columns.
+
+**Binary texture columns use UNCOMPRESSED encoding** in the Parquet
+file. Because the column values are raw PNG bytes (already
+compressed internally by PNG's deflate), applying Parquet-level
+compression (e.g. ZSTD) on top saves only ~2-5% and would require
+a decompressor on the client side. Leaving them uncompressed means
+the range-read bytes are raw PNG — the client writes them directly
+to the cache with no decompression step.
+
+Scalar and string columns (metadata, tags, color hex, etc.) still
+use **ZSTD** compression. These columns are only read by
+pyarrow/DuckDB power users who already have decompression support
+built in, not by the default lightweight client.
+
 ## DuckDB-file format not chosen
 
 We considered shipping the data as a DuckDB native `.duckdb`
@@ -171,10 +207,11 @@ DuckDB-only.
 Users who want SQL ergonomics get them for free against our
 Parquet files — DuckDB CLI or `duckdb` Python can
 `SELECT * FROM 'https://.../mat-vis-ambientcg-1k.parquet'`
-directly. No hosting of `.duckdb` files as endpoints needed.
-Each client package ships a small URL-table shim that registers
-the parquet Release URLs as DuckDB views at runtime; see
-ADR-0005.
+directly. No hosting of `.duckdb` files as endpoints needed;
+no client-side shim or embedded DuckDB required. The Parquet
+files are valid, self-describing, industry-standard Parquet —
+DuckDB and pyarrow users query them directly with their own
+tooling. Documentation (not code) shows them how.
 
 ## Upgrade trigger
 

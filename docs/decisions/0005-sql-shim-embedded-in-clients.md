@@ -1,8 +1,16 @@
 # 0005. SQL shim embedded in clients; optional GH Pages DuckDB-WASM shell
 
-- Status: Accepted
+- Status: Superseded by ADR-0001 (rowmap amendment)
 - Date: 2026-04-16
 - Deciders: @gerchowl
+
+> **Superseded (2026-04-16).** The embedded DuckDB shim described
+> below was over-engineered. The JSON index handles corpus filtering
+> (a list comprehension over ~3100 materials), the companion rowmap
+> (see ADR-0001) handles byte-level texture access via pure-Python
+> HTTP range reads, and DuckDB/pyarrow power users query the Parquet
+> files directly with their own tooling. No client-side SQL
+> infrastructure is needed.
 
 ## Context
 

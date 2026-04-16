@@ -52,26 +52,28 @@ architecture:
    `~/.cache/mat-vis/`; eager prefetch and pure-remote modes are
    opt-in.
 5. [**ADR-0005**](docs/decisions/0005-sql-shim-embedded-in-clients.md)
-   — SQL ergonomics via a small DuckDB URL-table shim embedded
-   in each client; optional GitHub Pages DuckDB-WASM explorer.
+   — ~~SQL ergonomics via a small DuckDB URL-table shim embedded
+   in each client.~~ **Superseded**: DuckDB/pyarrow users query
+   the Parquet files directly; no client-side shim needed.
 
 Typical user journeys are documented in [`docs/user-stories.md`](docs/user-stories.md).
 
 ## Intended usage (once released)
 
 ```python
-import mat_vis
+from pymat import Material
 
 # Default: lazy local cache, range-reads on first access.
-mv = mat_vis.open(source="ambientcg", tier="1k")
-steel = mv.get("Metal064")      # first call: HTTP range read + cache write
-steel = mv.get("Metal064")      # second call: served from ~/.cache/mat-vis/
+steel = Material("ambientcg/Metal064", tier="1k")  # first call: HTTP range read + cache write
+steel = Material("ambientcg/Metal064", tier="1k")  # second call: served from ~/.cache/mat-vis/
 
-# Filter queries (Parquet predicate pushdown)
-woods = mv.filter(category="wood")
+# Filter via the JSON index (list comprehension over ~3100 materials)
+woods = Material.filter(category="wood")
 ```
 
-Rust and JS clients will mirror this shape.
+mat's built-in texture client is pure Python (~150-300 lines),
+ships inside the `mat` wheel, and requires no pyarrow or other
+binary dependencies. Rust and JS clients will mirror this shape.
 
 ## License
 
