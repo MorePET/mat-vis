@@ -127,6 +127,11 @@
         "type": "string",
         "format": "date",
         "description": "ISO 8601 date (YYYY-MM-DD) when the upstream source last changed this material."
+      },
+      "status": {
+        "type": "string",
+        "description": "Bake status. Present only when bake failed.",
+        "enum": ["ok", "failed"]
       }
     }
   }
