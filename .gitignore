@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[codz]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local mat-vis cache (downloaded / baked artifacts during dev)
+.cache/
+cache/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tool configs (local-only)
+.cursor/
+
+# Pre-commit cache
+.pre-commit-cache/
+
+# Staged release artifacts (built by release.yml before upload)
+release-staging/
+*.parquet
+
+# UV / Hatch
+uv.lock
+.python-version
