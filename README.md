@@ -1,95 +1,126 @@
 # mat-vis
 
-**Pre-baked PBR material indexes + textures** for the [MorePET/mat][mat]
-family: `py-materials`, `rs-materials`, and the build123d integration.
+**PBR texture mirror for [MorePET/mat][mat].**
 
-Consolidates the four major open MaterialX / PBR libraries
-(ambientcg, polyhaven, gpuopen, physicallybased.info) into a
-single versioned, auditable, language-agnostic data distribution.
+Curates ~3100 PBR materials from four open MaterialX sources, bakes
+them to flat PNGs in CI, and hosts the output as Parquet files on
+GitHub Releases. Users never install this repo — they
+`pip install mat` and textures are available automatically via a
+pure-Python client (~150 lines, zero binary deps).
 
-## Status
+## How it works
 
-🚧 **Bootstrap phase.** Design is captured in
-[`docs/decisions/`](docs/decisions/); data pipelines are not yet
-implemented. See the ADRs for the architecture rationale.
-
-Expected first data release: once the build pipeline and
-watch-and-PR workflow are in place. No ETA yet.
-
-## Why this exists
-
-The [MorePET/mat][mat] ecosystem needs rendering-grade PBR data for:
-
-- **build123d shapes** rendered in `ocp_vscode` (via `threejs-materials`)
-- **CAD/MC pipelines** that want material appearance alongside physics
-- **Web viewers** (`three-cad-viewer` and others) consuming PBR JSON
-- **Headless renderers** that need offline-available textures
-
-The source libraries aren't directly consumable by all of these —
-`ambientcg` / `polyhaven` / `gpuopen` ship MaterialX `.mtlx` files
-with procedural graph baking required before rendering;
-`physicallybased.info` is scalar-only (no textures). `mat-vis`
-bakes once at data-publish time and distributes the flat output,
-so downstream consumers never need the MaterialX SDK and its
-compile-time dependencies.
-
-## Design
-
-Five ADRs under [`docs/decisions/`](docs/decisions/) capture the
-architecture:
-
-1. [**ADR-0001**](docs/decisions/0001-storage-architecture-json-index-parquet-textures.md)
-   — Two-tier storage: diffable JSON indexes in-repo, Parquet
-   texture bundles as Release assets.
-2. [**ADR-0002**](docs/decisions/0002-hosting-github-releases-watch-and-pr.md)
-   — GitHub Releases for hosting (free, versioned, CDN-backed);
-   daily watch-and-PR flow for upstream change detection.
-3. [**ADR-0003**](docs/decisions/0003-resolution-tiers-and-partitioning.md)
-   — Per (source × resolution tier) Parquet files; category
-   partitioning at 4K+ to fit GitHub's 2 GB per-asset limit.
-4. [**ADR-0004**](docs/decisions/0004-access-modes-lazy-local-cache-default.md)
-   — Clients default to lazy local caching under
-   `~/.cache/mat-vis/`; eager prefetch and pure-remote modes are
-   opt-in.
-5. [**ADR-0005**](docs/decisions/0005-sql-shim-embedded-in-clients.md)
-   — ~~SQL ergonomics via a small DuckDB URL-table shim embedded
-   in each client.~~ **Superseded**: DuckDB/pyarrow users query
-   the Parquet files directly; no client-side shim needed.
-
-Typical user journeys are documented in [`docs/user-stories.md`](docs/user-stories.md).
-
-## Intended usage (once released)
-
-```python
-from pymat import Material
-
-# Default: lazy local cache, range-reads on first access.
-steel = Material("ambientcg/Metal064", tier="1k")  # first call: HTTP range read + cache write
-steel = Material("ambientcg/Metal064", tier="1k")  # second call: served from ~/.cache/mat-vis/
-
-# Filter via the JSON index (list comprehension over ~3100 materials)
-woods = Material.filter(category="wood")
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  IN GIT (this repo, ~40 MB, reviewable)                        │
+│                                                                 │
+│  index/*.json        — scalar metadata per source               │
+│  mtlx/<source>/*.mtlx — flattened MaterialX XML per material    │
+│                                                                 │
+│  .github/workflows/                                             │
+│    watch.yml   — daily: poll upstream, open PR on change        │
+│    release.yml — on tag: bake .mtlx → PNG, pack Parquet, upload │
+└─────────────────────────────────────────────────────────────────┘
+        │
+        ▼  CI runner (materialx + pyarrow — never on user machines)
+┌─────────────────────────────────────────────────────────────────┐
+│  ON GITHUB RELEASES (5–300 GB, derived artifacts)              │
+│                                                                 │
+│  mat-vis-<source>-<tier>.parquet  — PNG bytes per material      │
+│  <source>-<tier>-rowmap.json      — id → byte offset lookup     │
+│  release-manifest.json            — master URL table            │
+└─────────────────────────────────────────────────────────────────┘
+        │
+        ▼  pure-Python HTTP range reads (stdlib urllib)
+┌─────────────────────────────────────────────────────────────────┐
+│  USER'S MACHINE                                                │
+│                                                                 │
+│  pip install mat  (~2 MB, no extras needed)                     │
+│                                                                 │
+│  from pymat import Material                                     │
+│  steel = Material("Stainless Steel 316L")                       │
+│  steel.density                        # from TOML (in wheel)    │
+│  steel.properties.pbr.textures.color  # PNG bytes (from Release)│
+│  steel.properties.pbr.textures.normal # cached at ~/.cache/mat/ │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-mat's built-in texture client is pure Python (~150-300 lines),
-ships inside the `mat` wheel, and requires no pyarrow or other
-binary dependencies. Rust and JS clients will mirror this shape.
+## Sources
+
+| Source | Materials | License | Textures |
+|---|---|---|---|
+| [ambientcg](https://ambientcg.com) | ~2000 | CC0 | PNG (pre-baked) |
+| [polyhaven](https://polyhaven.com) | ~752 | CC0 | PNG + EXR |
+| [gpuopen](https://matlib.gpuopen.com) | ~300 | TBV | MaterialX (some need baking) |
+| [physicallybased.info](https://physicallybased.info) | ~86 | CC0 | scalar-only |
+
+## Resolution tiers
+
+| Tier | Per material | Corpus total | GitHub hosting |
+|---|---|---|---|
+| 1K | ~2 MB | ~5 GB | GitHub Releases |
+| 2K | ~10 MB | ~25 GB | GitHub Releases |
+| 4K | ~35 MB | ~80 GB | GitHub Releases (partitioned by category) |
+| 8K | ~130 MB | ~300 GB | Hugging Face Datasets (too large for GH) |
+
+Future: KTX2/Basis Universal tier (~5× smaller, GPU-native) once
+the baker emits it.
+
+## Key design decisions
+
+Architecture is captured in [`docs/decisions/`](docs/decisions/):
+
+1. [**ADR-0001**](docs/decisions/0001-storage-architecture-json-index-parquet-textures.md)
+   — Three-layer storage: JSON indexes + .mtlx sources in git,
+   Parquet texture bundles as Release assets, companion rowmap
+   for pure-Python byte-level access.
+2. [**ADR-0002**](docs/decisions/0002-hosting-github-releases-watch-and-pr.md)
+   — GitHub Releases hosting (free, CDN-backed); daily
+   watch-and-PR flow for upstream change detection.
+3. [**ADR-0003**](docs/decisions/0003-resolution-tiers-and-partitioning.md)
+   — Per (source × tier) Parquet files; category partitioning
+   at 4K+ to fit GitHub's 2 GB per-asset limit.
+4. [**ADR-0004**](docs/decisions/0004-access-modes-lazy-local-cache-default.md)
+   — Lazy local cache at `~/.cache/mat-vis/` as default;
+   prefetch and no-cache modes opt-in.
+
+## Relationship to mat
+
+mat-vis is the **data factory**. [MorePET/mat][mat] is the
+**user-facing library**.
+
+| | mat (py-materials) | mat-vis (this repo) |
+|---|---|---|
+| What | Python API + material data | Data pipeline + hosting |
+| Source data | TOML (physical properties) | .mtlx + JSON (appearance) |
+| Artifact | PyPI wheel (~2 MB) | Parquet on GH Releases (GB) |
+| Versioning | semver (API-driven) | calver (upstream-driven) |
+| User installs? | yes (`pip install mat`) | no (CI-only) |
+
+mat's built-in texture client reads mat-vis's Release assets
+directly — rowmap JSON for offsets, stdlib HTTP for range reads,
+local cache for persistence. No pyarrow, no DuckDB, no binary deps.
+
+Power users who want SQL can query the Parquet files directly
+with their own DuckDB/pyarrow install:
+
+```sql
+SELECT * FROM 'https://github.com/MorePET/mat-vis/releases/download/v2026.04.0/mat-vis-ambientcg-2k.parquet'
+WHERE category = 'wood' AND roughness < 0.4
+```
 
 ## License
 
-- **Code** (index schemas, build scripts, client wrappers): MIT —
-  see [`LICENSE`](LICENSE).
-- **Data** (indexes + textures): license inherits from each
-  upstream source. The three of four that we mirror today are
-  **CC0 1.0 Universal** (public domain dedication) — see
-  [`LICENSES.md`](LICENSES.md) for the per-source breakdown once
-  data starts shipping.
+- **Code** (build scripts, workflows, schemas): MIT — see
+  [`LICENSE`](LICENSE).
+- **Data**: license inherits from each upstream source. Three of
+  four are **CC0 1.0** (public domain). gpuopen license TBV.
 
 ## Links
 
-- **[MorePET/mat][mat]** — py-materials + rs-materials (physics + scalar PBR)
-- **[bernhard-42/threejs-materials](https://github.com/bernhard-42/threejs-materials)** — the MaterialX baker that produces the data we redistribute
-- **[gumyr/build123d](https://github.com/gumyr/build123d)** — primary CAD consumer
-- **Collaboration thread**: [MorePET/mat#3](https://github.com/MorePET/mat/issues/3)
+- [MorePET/mat][mat] — the user-facing library (physical props + PBR + textures)
+- [bernhard-42/threejs-materials](https://github.com/bernhard-42/threejs-materials) — the MaterialX baker used in CI
+- [gumyr/build123d](https://github.com/gumyr/build123d) — primary CAD consumer
+- [build123d#598](https://github.com/gumyr/build123d/issues/598) — material system roadmap thread
 
 [mat]: https://github.com/MorePET/mat
