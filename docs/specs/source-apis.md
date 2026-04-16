@@ -1,5 +1,11 @@
 # Upstream Source API Reference
 
+> **Canonical enums.** The authoritative definitions for source names,
+> category values, channel names, and tier names live in the JSON
+> Schemas (`index-schema.json`, `rowmap-schema.json`,
+> `release-manifest-schema.json`). If this document or the ADRs
+> diverge from the schemas, the schemas win.
+
 Best-effort documentation of each upstream material source's API.
 The implementation must verify endpoints at runtime, handle pagination and errors gracefully,
 and log cleanly if a source is unreachable.
@@ -157,6 +163,8 @@ GET https://api.physicallybased.info/materials
 - Materials from this source will have `available_tiers: []` and `maps: []` in the index.
 - Useful for: IOR lookups, representative color computation, metalness/roughness ground truth.
 
+> **No Parquet output.** physicallybased materials are scalar-only — they appear in `index/physicallybased.json` but never in any Parquet file or rowmap. The `available_tiers` and `maps` arrays are empty. Consumers access these materials purely through the JSON index.
+
 ### Color conversion
 
 - The `color` field is an RGB tuple in [0,1] range. Convert to `#RRGGBB` hex:
@@ -177,3 +185,45 @@ GET https://api.physicallybased.info/materials
 3. **Format normalization**: Upstream map names vary. Each fetcher must normalize to the canonical channel names: `color`, `normal`, `roughness`, `metalness`, `ao`, `displacement`, `emission`.
 4. **Category normalization**: Upstream categories are freeform strings. Each fetcher must map them to the canonical set: `metal`, `wood`, `stone`, `fabric`, `plastic`, `concrete`, `ceramic`, `glass`, `organic`, `other`.
 5. **watch.yml behavior**: The watch workflow should log clearly which sources succeeded/failed and exit 0 even if a source is down (to avoid blocking the entire pipeline). Failed sources should be retried on the next scheduled run.
+
+---
+
+## Error handling and partial failures
+
+### Fetch failures
+
+If a single material fails to download (HTTP error, corrupt ZIP,
+missing .mtlx inside ZIP), the baker:
+
+1. Logs the failure with material ID, source, and error.
+2. Skips the material.
+3. Continues processing remaining materials.
+4. At the end, exits with code 0 if ≥95% of materials succeeded,
+   code 1 otherwise.
+
+The Parquet and rowmap only contain successfully baked materials.
+The index JSON includes all materials (including failed ones),
+with a `"status": "failed"` field on entries that couldn't be
+baked. This lets consumers see what exists upstream even if the
+bake failed.
+
+### Bake failures
+
+Same policy — skip, log, continue. Common causes:
+- MaterialX graph uses unsupported node types (gpuopen layered
+  materials without materialx installed)
+- EXR file corrupt or unsupported pixel format
+- .mtlx references a texture file not present in the download
+
+### Source-level failures
+
+If an entire source is unreachable (API down, DNS failure), the
+baker:
+
+1. Logs the failure.
+2. Skips the entire source.
+3. Exits with code 1 (source-level failure is always an error).
+
+The watch.yml workflow handles this gracefully — if a source is
+down during the daily poll, it logs and exits cleanly without
+opening a PR. No partial-release.
