@@ -89,7 +89,7 @@ Architecture is captured in [`docs/decisions/`](docs/decisions/):
 mat-vis is the **data factory**. [MorePET/mat][mat] is the
 **user-facing library**.
 
-| | mat (py-materials) | mat-vis (this repo) |
+| | mat | mat-vis (this repo) |
 |---|---|---|
 | What | Python API + material data | Data pipeline + hosting |
 | Source data | TOML (physical properties) | .mtlx + JSON (appearance) |
@@ -102,11 +102,14 @@ directly — rowmap JSON for offsets, stdlib HTTP for range reads,
 local cache for persistence. No pyarrow, no DuckDB, no binary deps.
 
 Power users who want SQL can query the Parquet files directly
-with their own DuckDB/pyarrow install:
+with their own DuckDB/pyarrow install (scalar metadata columns
+like `category` are queryable; binary texture columns are opaque
+blobs):
 
 ```sql
-SELECT * FROM 'https://github.com/MorePET/mat-vis/releases/download/v2026.04.0/mat-vis-ambientcg-2k.parquet'
-WHERE category = 'wood' AND roughness < 0.4
+SELECT id, source, category FROM
+  'https://github.com/MorePET/mat-vis/releases/download/v2026.04.0/mat-vis-ambientcg-2k.parquet'
+WHERE category = 'wood'
 ```
 
 ## License
