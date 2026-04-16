@@ -24,3 +24,15 @@ jobs:
       - run: uv pip install --system -e '.[baker,dev]'
       - run: ruff check src/ tests/
       - run: pytest tests/ -v
+
+  container:
+    name: Container build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build baker image
+        run: docker build -f Containerfile -t ghcr.io/morepet/mat-vis-baker:test .
+      - name: Smoke test
+        run: |
+          docker run --rm ghcr.io/morepet/mat-vis-baker:test \
+            python -c "import pyarrow; import materialx; print('ok')"
