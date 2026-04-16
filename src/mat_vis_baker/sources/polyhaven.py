@@ -1,0 +1,1 @@
+"""Fetcher for polyhaven.com"""

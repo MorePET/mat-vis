@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MorePET/mat-vis/docs/specs/rowmap-schema.json",
+  "title": "Rowmap File",
+  "description": "Schema for <source>-<tier>-rowmap.json files. A rowmap provides byte-level offsets into a Parquet file so that individual PNG texture maps can be extracted by direct byte-range reads without parsing Parquet framing. IMPORTANT: The offset/length pairs point PAST the Parquet page headers directly to the raw PNG payload bytes. The bytes at [offset, offset+length) ARE the raw PNG — no Parquet framing needs to be stripped. This is guaranteed by the Parquet writer using UNCOMPRESSED page encoding and the rowmap generator reading actual data page offsets (after the page header) from Parquet metadata.",
+  "type": "object",
+  "required": ["version", "release_tag", "source", "tier", "parquet_file", "materials"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "description": "Schema version. Currently 1.",
+      "const": 1
+    },
+    "release_tag": {
+      "type": "string",
+      "description": "Calver release tag this rowmap belongs to, e.g. \"v2026.04.0\".",
+      "pattern": "^v\\d{4}\\.\\d{2}\\.\\d+$"
+    },
+    "source": {
+      "type": "string",
+      "description": "Upstream source identifier. Redundant with filename but explicit for self-describing files.",
+      "enum": ["ambientcg", "polyhaven", "gpuopen", "physicallybased"]
+    },
+    "tier": {
+      "type": "string",
+      "description": "Resolution tier. Redundant with filename but explicit for self-describing files.",
+      "enum": ["1k", "2k", "4k", "8k"]
+    },
+    "parquet_file": {
+      "type": "string",
+      "description": "Filename of the Parquet file this rowmap indexes into, e.g. \"mat-vis-ambientcg-1k.parquet\".",
+      "pattern": "^mat-vis-.+-\\d+k\\.parquet$"
+    },
+    "materials": {
+      "type": "object",
+      "description": "Object keyed by material ID. Each value maps channel names to byte-range descriptors pointing into the Parquet file.",
+      "additionalProperties": {
+        "$ref": "#/$defs/materialEntry"
+      }
+    }
+  },
+  "$defs": {
+    "materialEntry": {
+      "type": "object",
+      "description": "Channels available for a single material. Keys are channel names, values are byte-range descriptors.",
+      "additionalProperties": {
+        "$ref": "#/$defs/channelRange"
+      },
+      "propertyNames": {
+        "enum": ["color", "normal", "roughness", "metalness", "ao", "displacement", "emission"]
+      },
+      "minProperties": 1
+    },
+    "channelRange": {
+      "type": "object",
+      "description": "Byte range within the Parquet file that contains the raw PNG bytes for this channel. The offset points PAST the Parquet data page header — the bytes at [offset, offset+length) are the uncompressed PNG payload with zero Parquet framing to strip.",
+      "required": ["offset", "length"],
+      "additionalProperties": false,
+      "properties": {
+        "offset": {
+          "type": "integer",
+          "description": "Byte offset from the start of the Parquet file to the first byte of the raw PNG payload (after the Parquet page header).",
+          "minimum": 0
+        },
+        "length": {
+          "type": "integer",
+          "description": "Number of bytes of the raw PNG payload.",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}
