@@ -33,6 +33,9 @@ Thumbs.db
 release-staging/
 *.parquet
 
+# One-shot local bootstrap script — not tracked (rerunnable, idempotent)
+scripts/bootstrap.sh
+
 # UV / Hatch
 uv.lock
 .python-version
