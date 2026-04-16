@@ -9,6 +9,6 @@
             ]
         }
     },
-    "postCreateCommand": "pip install -e '.[baker,dev]'",
+    "postCreateCommand": "uv pip install --system -e '.[baker,dev]'",
     "remoteUser": "root"
 }

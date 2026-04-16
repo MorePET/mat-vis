@@ -18,8 +18,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
       # [materialx] extra intentionally excluded — only needed for
       # gpuopen layered graphs, tested separately in the baker container.
-      - run: pip install -e '.[baker,dev]'
+      - run: uv pip install --system -e '.[baker,dev]'
       - run: ruff check src/ tests/
       - run: pytest tests/ -v
