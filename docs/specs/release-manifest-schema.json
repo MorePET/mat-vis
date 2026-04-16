@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MorePET/mat-vis/docs/specs/release-manifest-schema.json",
+  "title": "Release Manifest",
+  "description": "Schema for release-manifest.json, published as the first Release asset of every calver tag. Maps each (source × tier) to its base URL and asset filenames. Clients fetch this once to discover where to find rowmaps and Parquet files.",
+  "type": "object",
+  "required": ["version", "release_tag", "tiers"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "description": "Schema version. Currently 1.",
+      "const": 1
+    },
+    "release_tag": {
+      "type": "string",
+      "description": "Calver release tag, e.g. \"v2026.04.0\".",
+      "pattern": "^v\\d{4}\\.\\d{2}\\.\\d+$"
+    },
+    "tiers": {
+      "type": "object",
+      "description": "Keyed by tier name (\"1k\", \"2k\", \"4k\", \"8k\").",
+      "propertyNames": {
+        "enum": ["1k", "2k", "4k", "8k"]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/tierEntry"
+      }
+    }
+  },
+  "$defs": {
+    "tierEntry": {
+      "type": "object",
+      "required": ["base_url", "sources"],
+      "additionalProperties": false,
+      "properties": {
+        "base_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Base URL for this tier's assets. GitHub Releases for 1K-4K, Hugging Face for 8K."
+        },
+        "sources": {
+          "type": "object",
+          "description": "Keyed by source name.",
+          "additionalProperties": {
+            "$ref": "#/$defs/sourceEntry"
+          }
+        }
+      }
+    },
+    "sourceEntry": {
+      "type": "object",
+      "required": ["parquet_files", "rowmap_file"],
+      "additionalProperties": false,
+      "properties": {
+        "parquet_files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of Parquet filenames for this source × tier. One file at 1K/2K, multiple at 4K+ (partitioned by category)."
+        },
+        "rowmap_file": {
+          "type": "string",
+          "description": "Rowmap JSON filename for this source × tier."
+        }
+      }
+    }
+  }
+}

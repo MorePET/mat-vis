@@ -51,13 +51,22 @@ each Parquet as a Release asset:
 
 ```json
 {
-  "Metal064": {
-    "color":     {"offset": 102400, "length": 51200},
-    "normal":    {"offset": 153600, "length": 48000},
-    "roughness": {"offset": 201600, "length": 12800}
+  "version": 1,
+  "release_tag": "v2026.04.0",
+  "source": "ambientcg",
+  "tier": "1k",
+  "parquet_file": "mat-vis-ambientcg-1k.parquet",
+  "materials": {
+    "Metal064": {
+      "color":     {"offset": 102400, "length": 51200},
+      "normal":    {"offset": 153600, "length": 48000},
+      "roughness": {"offset": 201600, "length": 12800}
+    }
   }
 }
 ```
+
+(Full schema: `docs/specs/rowmap-schema.json`)
 
 mat's built-in texture client fetches the rowmap (~few hundred KB,
 cached), then does pure-Python HTTP range reads (`urllib.request`
@@ -117,13 +126,19 @@ Power users query the Parquet files directly with their own
 tooling:
 
 ```sql
-SELECT * FROM 'https://.../mat-vis-ambientcg-1k.parquet'
-WHERE category = 'wood' AND roughness < 0.4
+SELECT id, source, category FROM 'https://.../mat-vis-ambientcg-1k.parquet'
+WHERE category = 'wood'
 ```
 
+Note: scalar columns (`id`, `source`, `category`, `source_license`)
+are queryable. Binary texture columns (`color`, `normal`, etc.)
+are opaque blobs — filter on scalars, then fetch texture bytes
+via the rowmap for matching materials. Numeric PBR scalars
+(`roughness`, `metalness`) live in the JSON index, not in the
+Parquet.
+
 No hosted DuckDB. No client-side shim. The files are valid,
-self-describing, industry-standard Parquet — any tool that reads
-Parquet works.
+self-describing, industry-standard Parquet.
 
 ## Consequences
 

@@ -34,11 +34,11 @@ at 4K+ to respect the 2 GB limit.**
 mat-vis-<source>-1k.parquet              # one file per source
 mat-vis-<source>-2k.parquet
 
-mat-vis-<source>-4k-metals.parquet       # split by category
-mat-vis-<source>-4k-woods.parquet
+mat-vis-<source>-4k-metal.parquet        # split by category (singular)
+mat-vis-<source>-4k-wood.parquet
 
-mat-vis-<source>-8k-metals-A-M.parquet   # category + alphabetic
-mat-vis-<source>-8k-metals-N-Z.parquet
+mat-vis-<source>-8k-metal-A-M.parquet   # category + alphabetic
+mat-vis-<source>-8k-metal-N-Z.parquet
 ```
 
 | Tier | Materials per 2 GB | Partition? |
