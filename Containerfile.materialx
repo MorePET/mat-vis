@@ -1,25 +1,13 @@
-# MaterialX baker — multi-stage: compile in builder, copy into slim baker.
-# Final image has no build-essential / gcc — same slim base + materialx binaries.
+# MaterialX baker — extends slim baker with materialx + openexr.
+# Used only for gpuopen layered graph baking.
+# Prebuilt amd64 wheels exist — no compilation, builds in seconds.
 #
 # Build:  podman build -f Containerfile.materialx -t ghcr.io/morepet/mat-vis-baker:materialx .
-# Push:   podman push ghcr.io/morepet/mat-vis-baker:materialx
 
-# ── stage 1: compile materialx ──────────────────────────────
-FROM ghcr.io/morepet/mat-vis-baker:latest AS builder
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libgl1 libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN uv pip install --system --no-cache materialx>=1.39 openexr>=3.3
-
-# ── stage 2: slim final image ───────────────────────────────
 FROM ghcr.io/morepet/mat-vis-baker:latest
 
-# Runtime libs for materialx (no compiler)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy compiled materialx + openexr from builder
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+RUN uv pip install --system --no-cache materialx>=1.39 openexr>=3.3

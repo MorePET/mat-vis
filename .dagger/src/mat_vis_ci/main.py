@@ -150,14 +150,20 @@ class MatVisCi:
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
         registry_user: Annotated[str, Doc("GHCR username")] = "",
         registry_pass: Annotated[dagger.Secret | None, Doc("GHCR token")] = None,
-        tag: Annotated[str, Doc("Image tag")] = "latest",
+        tag: Annotated[str, Doc("Semver tag, e.g. v0.1.0")] = "latest",
     ) -> str:
-        """Preflight, build slim + materialx, push both to GHCR."""
+        """Preflight, build slim + materialx, push both to GHCR.
+
+        Tags pushed per image:
+          baker:  :<version> + :latest
+          materialx: :<version>-materialx + :materialx
+        """
         # Fail fast on auth issues
         pre = await self.preflight(registry_user, registry_pass)
         if "SKIP" in pre:
             return pre
 
+        version = tag.lstrip("v") if tag != "latest" else "latest"
         context = src or dag.host().directory(".")
         results = []
 
@@ -165,14 +171,20 @@ class MatVisCi:
         slim = self.build(context)
         if registry_pass is not None:
             slim = slim.with_registry_auth("ghcr.io", registry_user, registry_pass)
-        slim_ref = await slim.publish(f"{IMAGE}:{tag}")
+        slim_ref = await slim.publish(f"{IMAGE}:{version}")
         results.append(f"slim: {slim_ref}")
+        if version != "latest":
+            await slim.publish(f"{IMAGE}:latest")
+            results.append(f"slim: {IMAGE}:latest")
 
         # Push materialx variant
         heavy = self.build_materialx(context)
         if registry_pass is not None:
             heavy = heavy.with_registry_auth("ghcr.io", registry_user, registry_pass)
-        heavy_ref = await heavy.publish(f"{IMAGE}:materialx")
+        heavy_ref = await heavy.publish(f"{IMAGE}:{version}-materialx")
         results.append(f"materialx: {heavy_ref}")
+        if version != "latest":
+            await heavy.publish(f"{IMAGE}:materialx")
+            results.append(f"materialx: {IMAGE}:materialx")
 
         return "\n".join(results)

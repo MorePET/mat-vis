@@ -1,10 +1,11 @@
 name: CI
 
-on:
+on:  # yamllint disable-line rule:truthy
   pull_request:
     branches: [main, dev]
   push:
     branches: [main, dev]
+    tags: ["v*"]
 
 jobs:
   ci:
@@ -20,7 +21,7 @@ jobs:
 
   push:
     name: Push baker image to GHCR
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: ci
     runs-on: ubuntu-latest
     permissions:
@@ -34,6 +35,7 @@ jobs:
           module: .dagger
           args: >-
             push --src=.
+            --tag=${{ github.ref_name }}
             --registry-user=${{ github.actor }}
             --registry-pass=env:GITHUB_TOKEN
         env:
