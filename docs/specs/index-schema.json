@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MorePET/mat-vis/docs/specs/index-schema.json",
+  "title": "Material Index File",
+  "description": "Schema for index/<source>.json files. Each file is an array of material entries from a single upstream source.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "id",
+      "source",
+      "name",
+      "category",
+      "source_url",
+      "source_license",
+      "available_tiers",
+      "maps",
+      "last_updated"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Unique identifier within the source, e.g. \"Metal064\", \"rusty_metal\". Must be unique per source file.",
+        "minLength": 1
+      },
+      "source": {
+        "type": "string",
+        "description": "Upstream source identifier.",
+        "enum": ["ambientcg", "polyhaven", "gpuopen", "physicallybased"]
+      },
+      "name": {
+        "type": "string",
+        "description": "Human-readable display name, e.g. \"Brushed Stainless Steel\".",
+        "minLength": 1
+      },
+      "category": {
+        "type": "string",
+        "description": "Normalized material category.",
+        "enum": [
+          "metal",
+          "wood",
+          "stone",
+          "fabric",
+          "plastic",
+          "concrete",
+          "ceramic",
+          "glass",
+          "organic",
+          "other"
+        ]
+      },
+      "tags": {
+        "type": "array",
+        "description": "Freeform tags from the upstream source. May be empty.",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "color_hex": {
+        "type": ["string", "null"],
+        "description": "Representative color as a hex string, e.g. \"#A0522D\". Null if not available.",
+        "pattern": "^#[0-9A-Fa-f]{6}$"
+      },
+      "roughness": {
+        "type": ["number", "null"],
+        "description": "Roughness value in the range [0.0, 1.0]. Null if not available.",
+        "minimum": 0.0,
+        "maximum": 1.0
+      },
+      "metalness": {
+        "type": ["number", "null"],
+        "description": "Metalness value in the range [0.0, 1.0]. Null if not available.",
+        "minimum": 0.0,
+        "maximum": 1.0
+      },
+      "ior": {
+        "type": ["number", "null"],
+        "description": "Index of refraction. Null if not available. Typical range 1.0-3.0 but not constrained.",
+        "minimum": 0.0
+      },
+      "source_url": {
+        "type": "string",
+        "format": "uri",
+        "description": "URL to the material's page on the upstream source."
+      },
+      "source_mtlx_url": {
+        "type": ["string", "null"],
+        "format": "uri",
+        "description": "Direct URL to the upstream .mtlx file, if one is available. Null otherwise."
+      },
+      "source_license": {
+        "type": "string",
+        "description": "SPDX license identifier for this material, e.g. \"CC0-1.0\", \"Apache-2.0\".",
+        "minLength": 1
+      },
+      "available_tiers": {
+        "type": "array",
+        "description": "Resolution tiers available for this material.",
+        "items": {
+          "type": "string",
+          "enum": ["1k", "2k", "4k", "8k"]
+        },
+        "minItems": 0,
+        "uniqueItems": true
+      },
+      "maps": {
+        "type": "array",
+        "description": "Texture map channels available for this material.",
+        "items": {
+          "type": "string",
+          "enum": [
+            "color",
+            "normal",
+            "roughness",
+            "metalness",
+            "ao",
+            "displacement",
+            "emission"
+          ]
+        },
+        "minItems": 0,
+        "uniqueItems": true
+      },
+      "last_updated": {
+        "type": "string",
+        "format": "date",
+        "description": "ISO 8601 date (YYYY-MM-DD) when the upstream source last changed this material."
+      }
+    }
+  }
+}

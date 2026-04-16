@@ -1,0 +1,35 @@
+[project]
+name = "mat-vis"
+version = "0.0.0"
+description = "PBR texture mirror — baker + data pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+baker = [
+    "pyarrow>=15",
+    "requests>=2.31",
+    "pillow>=10.0",
+]
+materialx = [
+    "materialx>=1.39",
+    "openexr>=3.3",
+]
+dev = [
+    "pytest>=7",
+    "pytest-cov>=4",
+    "ruff>=0.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
