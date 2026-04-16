@@ -22,7 +22,7 @@ pure-Python client (~150 lines, zero binary deps).
 │    release.yml — on tag: bake .mtlx → PNG, pack Parquet, upload │
 └─────────────────────────────────────────────────────────────────┘
         │
-        ▼  CI runner (materialx + pyarrow — never on user machines)
+        ▼  CI runner (pure Python for ~90%; materialx for layered gpuopen only)
 ┌─────────────────────────────────────────────────────────────────┐
 │  ON GITHUB RELEASES (5–300 GB, derived artifacts)              │
 │                                                                 │
@@ -119,8 +119,8 @@ WHERE category = 'wood' AND roughness < 0.4
 ## Links
 
 - [MorePET/mat][mat] — the user-facing library (physical props + PBR + textures)
-- [bernhard-42/threejs-materials](https://github.com/bernhard-42/threejs-materials) — the MaterialX baker used in CI
 - [gumyr/build123d](https://github.com/gumyr/build123d) — primary CAD consumer
+- [bernhard-42/threejs-materials](https://github.com/bernhard-42/threejs-materials) — consumer-side PBR dataclass + Three.js adapter (used by ocp_vscode, not by our bake pipeline)
 - [build123d#598](https://github.com/gumyr/build123d/issues/598) — material system roadmap thread
 
 [mat]: https://github.com/MorePET/mat
