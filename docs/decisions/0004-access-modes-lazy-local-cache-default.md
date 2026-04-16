@@ -41,21 +41,23 @@ users. Option 3 is the right default.
 **Client libraries default to lazy local cache mode, with
 opt-ins for the other two strategies.**
 
-Concretely for the Python client (`py-materials` /
-`mat-vis` — analogous shape in Rust/JS clients):
+Concretely for mat's built-in texture client (`py-materials`
+— analogous shape in Rust/JS clients):
 
 ```python
+from pymat import Material
+
 # Default — lazy cache at ~/.cache/mat-vis/
-material = mat_vis.get("ambientcg/Metal064", tier="2k")
+steel = Material("ambientcg/Metal064", tier="2k")
 
 # Explicit cache directory
-material = mat_vis.get(..., cache_dir="/data/mat-cache")
+steel = Material("ambientcg/Metal064", tier="2k", cache_dir="/data/mat-cache")
 
 # Prefetch the whole tier (CI, air-gapped)
-mat_vis.prefetch(source="ambientcg", tier="2k")
+Material.prefetch(source="ambientcg", tier="2k")
 
 # Direct range-read, no cache write (low-disk environments)
-material = mat_vis.get(..., cache=False)
+steel = Material("ambientcg/Metal064", tier="2k", cache=False)
 ```
 
 Cache layout:
@@ -85,7 +87,7 @@ There's also a separate decoded-image cache
 of reloading the same material 100× in the same process:
 
 ```python
-material = mat_vis.get(..., cache_decoded=True)
+steel = Material("ambientcg/Metal064", tier="2k", cache_decoded=True)
 # Also stores the numpy array alongside the PNG bytes
 # — saves ~5 ms × number of reloads, costs 8× disk per material
 ```
@@ -125,7 +127,7 @@ same materials — Monte Carlo sweeps, parametric studies.
 
 - **Cache invalidation is the user's problem.** Old release
   tags accumulate over time. Mitigation: ship
-  `mat_vis.cache.prune(keep_tags=["current", "previous"])`
+  `Material.cache_prune(keep_tags=["current", "previous"])`
   and document it.
 - **First-access latency.** The first fetch of a material
   pays the range-read RTT (~200–500 ms on a typical

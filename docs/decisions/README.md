@@ -18,7 +18,7 @@ sequential number.
 2. [0002 — Hosting via GitHub Releases; updates via watch-and-PR](0002-hosting-github-releases-watch-and-pr.md)
 3. [0003 — Resolution tiers + category partitioning at 4K+](0003-resolution-tiers-and-partitioning.md)
 4. [0004 — Lazy local cache as the default client access mode](0004-access-modes-lazy-local-cache-default.md)
-5. [0005 — SQL shim embedded in clients; optional GH Pages DuckDB-WASM shell](0005-sql-shim-embedded-in-clients.md)
+5. [~~0005 — SQL shim embedded in clients; optional GH Pages DuckDB-WASM shell~~](0005-sql-shim-embedded-in-clients.md) — **Superseded by ADR-0001 (rowmap amendment)**
 
 ## Statuses
 
