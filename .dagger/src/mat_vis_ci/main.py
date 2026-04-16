@@ -15,6 +15,7 @@ import dagger
 from dagger import Doc, dag, function, object_type
 
 IMAGE = "ghcr.io/morepet/mat-vis-baker"
+TARGET_PLATFORM = dagger.Platform("linux/amd64")
 
 
 @object_type
@@ -26,9 +27,9 @@ class MatVisCi:
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
     ) -> dagger.Container:
-        """Build the baker container image from Containerfile."""
+        """Build the baker container image from Containerfile (always linux/amd64)."""
         context = src or dag.host().directory(".")
-        return context.docker_build(dockerfile="Containerfile")
+        return context.docker_build(dockerfile="Containerfile", platform=TARGET_PLATFORM)
 
     @function
     async def lint(

@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dagger/dagger-for-github@v8
+      - uses: dagger/dagger-for-github@v8.4.1
         with:
           verb: call
           module: .dagger
@@ -28,7 +28,7 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - uses: dagger/dagger-for-github@v8
+      - uses: dagger/dagger-for-github@v8.4.1
         with:
           verb: call
           module: .dagger
