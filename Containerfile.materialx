@@ -1,0 +1,13 @@
+# MaterialX baker — extends slim baker with materialx + openexr.
+# Used only for gpuopen layered graph baking.
+# Prebuilt amd64 wheels exist — no compilation, builds in seconds.
+#
+# Build:  podman build -f Containerfile.materialx -t ghcr.io/morepet/mat-vis-baker:materialx .
+
+FROM ghcr.io/morepet/mat-vis-baker:latest
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN uv pip install --system --no-cache materialx>=1.39 openexr>=3.3

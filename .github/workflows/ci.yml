@@ -1,25 +1,42 @@
 name: CI
 
-on:
+on:  # yamllint disable-line rule:truthy
   pull_request:
     branches: [main, dev]
   push:
     branches: [main, dev]
-
-permissions:
-  contents: read
+    tags: ["v*"]
 
 jobs:
-  test:
-    name: Test
+  ci:
+    name: Lint + Test + Container smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: dagger/dagger-for-github@v8.4.1
         with:
-          python-version: "3.12"
-      # [materialx] extra intentionally excluded — only needed for
-      # gpuopen layered graphs, tested separately in the baker container.
-      - run: pip install -e '.[baker,dev]'
-      - run: ruff check src/ tests/
-      - run: pytest tests/ -v
+          verb: call
+          module: .dagger
+          args: test-all --src=.
+
+  push:
+    name: Push baker image to GHCR
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dagger/dagger-for-github@v8.4.1
+        with:
+          verb: call
+          module: .dagger
+          args: >-
+            push --src=.
+            --tag=${{ github.ref_name }}
+            --registry-user=${{ github.actor }}
+            --registry-pass=env:GITHUB_TOKEN
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
