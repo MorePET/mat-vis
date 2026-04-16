@@ -35,4 +35,4 @@ jobs:
       - name: Smoke test
         run: |
           docker run --rm ghcr.io/morepet/mat-vis-baker:test \
-            python -c "import pyarrow; import materialx; print('ok')"
+            python -c "import pyarrow; import MaterialX; print('ok')"
