@@ -25,6 +25,7 @@ Thumbs.db
 
 # Tool configs (local-only)
 .cursor/
+.playwright-mcp/
 
 # Pre-commit cache
 .pre-commit-cache/
