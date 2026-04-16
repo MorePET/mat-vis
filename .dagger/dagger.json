@@ -1,0 +1,6 @@
+{
+  "name": "mat-vis-ci",
+  "sdk": "python",
+  "source": ".",
+  "root": ".."
+}
