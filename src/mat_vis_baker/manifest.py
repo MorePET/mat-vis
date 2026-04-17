@@ -1,5 +1,9 @@
 """Generate release-manifest.json for client auto-discovery.
 
+Two modes:
+1. From bake output dir (single source) — used during bake
+2. From release assets (all sources) — used to rebuild after all bakes complete
+
 Schema: docs/specs/release-manifest-schema.json
 See issue #22 for context.
 """
@@ -8,6 +12,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import subprocess
 from pathlib import Path
 
 log = logging.getLogger("mat-vis-baker.manifest")
@@ -21,10 +27,7 @@ def generate_manifest(
     sources: list[str],
     tiers: list[str],
 ) -> dict:
-    """Build a release manifest from the bake output directory.
-
-    Scans for parquet and rowmap files to populate the manifest.
-    """
+    """Build a release manifest from the bake output directory."""
     manifest: dict = {
         "version": 1,
         "release_tag": release_tag,
@@ -40,11 +43,9 @@ def generate_manifest(
         }
 
         for source in sources:
-            # Find partitioned parquet files for this source+tier
             pattern = f"mat-vis-{source}-{tier}-*.parquet"
             pq_files = sorted(output_dir.glob(pattern))
             if not pq_files:
-                # Try non-partitioned (legacy)
                 single = output_dir / f"mat-vis-{source}-{tier}.parquet"
                 if single.exists():
                     pq_files = [single]
@@ -52,7 +53,6 @@ def generate_manifest(
             if not pq_files:
                 continue
 
-            # Find rowmap files
             rowmap_pattern = f"{source}-{tier}-*-rowmap.json"
             rowmap_files = sorted(output_dir.glob(rowmap_pattern))
             if not rowmap_files:
@@ -68,6 +68,58 @@ def generate_manifest(
         if tier_entry["sources"]:
             manifest["tiers"][tier] = tier_entry
 
+    return manifest
+
+
+def rebuild_manifest_from_release(release_tag: str) -> dict:
+    """Build manifest from actual release assets on GitHub.
+
+    Uses `gh release view` to list assets, then parses filenames
+    to discover all source × tier combos. This is the authoritative
+    manifest — call after all bakes for a release are complete.
+    """
+    result = subprocess.run(
+        ["gh", "release", "view", release_tag, "--json", "assets", "--jq", ".assets[].name"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to list release assets: {result.stderr}")
+
+    asset_names = result.stdout.strip().split("\n")
+    base_url = f"{GITHUB_BASE}/{release_tag}/"
+
+    manifest: dict = {"version": 1, "release_tag": release_tag, "tiers": {}}
+
+    pq_re = re.compile(r"^mat-vis-(\w+)-(\w+)-(\w+)\.parquet$")
+    rm_re = re.compile(r"^(\w+)-(\w+)-(\w+)-rowmap\.json$")
+
+    parquets: dict[tuple[str, str], list[str]] = {}
+    rowmaps: dict[tuple[str, str], list[str]] = {}
+
+    for name in asset_names:
+        m = pq_re.match(name)
+        if m:
+            source, tier, _cat = m.groups()
+            parquets.setdefault((source, tier), []).append(name)
+        m = rm_re.match(name)
+        if m:
+            source, tier, _cat = m.groups()
+            rowmaps.setdefault((source, tier), []).append(name)
+
+    for (source, tier), pq_files in sorted(parquets.items()):
+        if tier not in manifest["tiers"]:
+            manifest["tiers"][tier] = {"base_url": base_url, "sources": {}}
+        manifest["tiers"][tier]["sources"][source] = {
+            "parquet_files": sorted(pq_files),
+            "rowmap_files": sorted(rowmaps.get((source, tier), [])),
+        }
+
+    log.info(
+        "manifest rebuilt from release: %d tiers, %d source×tier combos",
+        len(manifest["tiers"]),
+        len(parquets),
+    )
     return manifest
 
 
