@@ -9,6 +9,11 @@ Usage:
     dagger call smoke-materialx      # verify MaterialX import (heavy)
     dagger call probe-sources        # verify upstream API connectivity
     dagger call test-all             # lint + test + smoke + probe
+    dagger call test-client-python   # pytest on Python reference client
+    dagger call test-client-js       # node --test on JS reference client
+    dagger call test-client-shell    # bash tests for shell reference client
+    dagger call test-client-rust     # cargo test for Rust reference client
+    dagger call test-clients         # all 4 client tests in parallel
     dagger call preflight            # verify GHCR auth before push
     dagger call push                 # preflight + build + push to GHCR
 """
@@ -250,6 +255,115 @@ class MatVisCi:
             f"=== test ===\n{test_out}\n"
             f"=== smoke ===\n{smoke_out}\n"
             f"=== probe ===\n{probe_out}"
+        )
+
+    # ── reference client tests ─────────────────────────────────────
+
+    @function
+    async def test_client_python(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+    ) -> str:
+        """Run pytest on the Python reference client against a live release."""
+        context = src or dag.host().directory(".")
+        pip_cache = dag.cache_volume("pip-cache")
+        return await (
+            dag.container()
+            .from_("python:3.12-slim")
+            .with_mounted_cache("/root/.cache/pip", pip_cache)
+            .with_mounted_directory("/app", context)
+            .with_workdir("/app/clients/python")
+            .with_exec(["pip", "install", "--quiet", "pytest"])
+            .with_env_variable("MAT_VIS_TAG", tag)
+            .with_exec(["pytest", "test_client.py", "-v"])
+            .stdout()
+        )
+
+    @function
+    async def test_client_js(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+    ) -> str:
+        """Run node --test on the JS reference client against a live release."""
+        context = src or dag.host().directory(".")
+        return await (
+            dag.container()
+            .from_("node:22-slim")
+            .with_mounted_directory("/app", context)
+            .with_workdir("/app/clients/js")
+            .with_env_variable("MAT_VIS_TAG", tag)
+            .with_exec(["node", "--test", "test_client.mjs"])
+            .stdout()
+        )
+
+    @function
+    async def test_client_shell(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+    ) -> str:
+        """Run bash test script for the shell reference client against a live release."""
+        context = src or dag.host().directory(".")
+        return await (
+            dag.container()
+            .from_("alpine:3.20")
+            .with_exec(["apk", "add", "--no-cache", "bash", "curl", "jq", "vim"])
+            .with_mounted_directory("/app", context)
+            .with_workdir("/app/clients")
+            .with_env_variable("MAT_VIS_TAG", tag)
+            .with_exec(["bash", "test_client.sh"])
+            .stdout()
+        )
+
+    @function
+    async def test_client_rust(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+    ) -> str:
+        """Run cargo test for the Rust reference client against a live release."""
+        context = src or dag.host().directory(".")
+        cargo_cache = dag.cache_volume("cargo-registry")
+        target_cache = dag.cache_volume("cargo-target")
+        return await (
+            dag.container()
+            .from_("rust:1.80-slim")
+            .with_exec(["apt-get", "update", "-qq"])
+            .with_exec(["apt-get", "install", "-y", "-qq", "pkg-config", "libssl-dev"])
+            .with_mounted_cache("/usr/local/cargo/registry", cargo_cache)
+            .with_mounted_cache("/app/clients/rust/target", target_cache)
+            .with_mounted_directory("/app", context)
+            .with_workdir("/app/clients/rust")
+            .with_env_variable("MAT_VIS_TAG", tag)
+            .with_exec(["cargo", "test", "--", "--test-threads=1"])
+            .stdout()
+        )
+
+    @function
+    async def test_clients(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+    ) -> str:
+        """Run all 4 reference client test suites in parallel."""
+        context = src or dag.host().directory(".")
+
+        import asyncio
+
+        py_task = asyncio.ensure_future(self.test_client_python(context, tag))
+        js_task = asyncio.ensure_future(self.test_client_js(context, tag))
+        sh_task = asyncio.ensure_future(self.test_client_shell(context, tag))
+        rs_task = asyncio.ensure_future(self.test_client_rust(context, tag))
+
+        py_out, js_out, sh_out, rs_out = await asyncio.gather(py_task, js_task, sh_task, rs_task)
+
+        return (
+            f"=== python ===\n{py_out}\n"
+            f"=== js ===\n{js_out}\n"
+            f"=== shell ===\n{sh_out}\n"
+            f"=== rust ===\n{rs_out}"
         )
 
     # ── integration test ──────────────────────────────────────────

@@ -1,0 +1,96 @@
+---
+# Promote a data release from pre-release to latest.
+#
+# Flow:
+#   1. Bake workflow uploads parquet+rowmap to a pre-release (downloadable, testable)
+#   2. Data PRs (index+mtlx+thumbnails) reviewed and merged to dev
+#   3. This workflow: validates assets exist, clears pre-release flag
+#
+# Trigger: manual dispatch after data PR review.
+
+name: Promote data release
+
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: 'Calver tag to promote (e.g. v2026.04.0)'
+        required: true
+        type: string
+      dry-run:
+        description: 'Dry run — validate only, do not promote'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    name: Promote ${{ inputs.release-tag }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate release exists and is pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.release-tag }}"
+          RELEASE=$(gh release view "$TAG" --json tagName,isDraft,isPrerelease,assets --jq '.')
+
+          IS_DRAFT=$(echo "$RELEASE" | jq -r '.isDraft')
+          IS_PRE=$(echo "$RELEASE" | jq -r '.isPrerelease')
+          ASSET_COUNT=$(echo "$RELEASE" | jq '.assets | length')
+
+          echo "Tag: $TAG"
+          echo "Draft: $IS_DRAFT"
+          echo "Pre-release: $IS_PRE"
+          echo "Assets: $ASSET_COUNT"
+
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "ERROR: Release is still a draft. Bake workflow should create pre-releases."
+            exit 1
+          fi
+
+          if [ "$IS_PRE" != "true" ]; then
+            echo "ERROR: Release is not a pre-release. Already promoted?"
+            exit 1
+          fi
+
+          if [ "$ASSET_COUNT" -lt 2 ]; then
+            echo "ERROR: Release has fewer than 2 assets. Bake may not have completed."
+            exit 1
+          fi
+
+          echo "Assets:"
+          echo "$RELEASE" | jq -r '.assets[].name'
+          echo ""
+          echo "✓ Release $TAG is a valid pre-release with $ASSET_COUNT assets"
+
+      - name: Validate data PRs merged
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check for open bake PRs — all should be merged before promote
+          OPEN=$(gh pr list --search "data: bake" --state open --json number,title --jq '.[].title')
+          if [ -n "$OPEN" ]; then
+            echo "WARNING: Open data PRs found:"
+            echo "$OPEN"
+            echo ""
+            echo "Consider merging these before promoting."
+          else
+            echo "✓ No open data PRs"
+          fi
+
+      - name: Promote release
+        if: inputs.dry-run == false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.release-tag }}"
+          gh release edit "$TAG" --prerelease=false
+          echo "✓ Release $TAG promoted — no longer pre-release"
+          echo ""
+          echo "Release URL: https://github.com/MorePET/mat-vis/releases/tag/$TAG"
