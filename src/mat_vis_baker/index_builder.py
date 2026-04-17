@@ -37,6 +37,8 @@ def build_index(records: list[MaterialRecord], source: str) -> list[dict]:
             entry["ior"] = rec.ior
         if rec.source_mtlx_url is not None:
             entry["source_mtlx_url"] = rec.source_mtlx_url
+        if rec.texture_hashes:
+            entry["texture_hashes"] = rec.texture_hashes
         if rec.status == "failed":
             entry["status"] = "failed"
 

@@ -100,6 +100,7 @@ def fetch(
     *,
     limit: int | None = None,
     session: requests.Session | None = None,
+    mtlx_dir: Path | None = None,  # polyhaven has no mtlx, param for interface consistency
 ) -> list[MaterialRecord]:
     """Fetch polyhaven materials for a given tier."""
     s = session or requests.Session()

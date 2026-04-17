@@ -128,6 +128,30 @@
         "format": "date",
         "description": "ISO 8601 date (YYYY-MM-DD) when the upstream source last changed this material."
       },
+      "texture_hashes": {
+        "type": "object",
+        "description": "SHA-256 hashes and sizes of the full-resolution baked PNGs per channel. Used for integrity verification and upstream change detection. Keys are channel names, values are {sha256, size} objects.",
+        "additionalProperties": {
+          "type": "object",
+          "required": ["sha256", "size"],
+          "additionalProperties": false,
+          "properties": {
+            "sha256": {
+              "type": "string",
+              "description": "Hex-encoded SHA-256 hash of the full-resolution PNG bytes.",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "size": {
+              "type": "integer",
+              "description": "Size of the PNG file in bytes.",
+              "minimum": 1
+            }
+          }
+        },
+        "propertyNames": {
+          "enum": ["color", "normal", "roughness", "metalness", "ao", "displacement", "emission"]
+        }
+      },
       "status": {
         "type": "string",
         "description": "Bake status. Present only when bake failed.",

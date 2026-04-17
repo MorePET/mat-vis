@@ -1,4 +1,8 @@
 # Typos configuration — domain-specific words that are correct.
+[default.extend-identifiers]
+# PNG plural — typos incorrectly "corrects" PNGs to ONGs
+PNGs = "PNGs"
+
 [default.extend-words]
 # PBR standard term for metallic property (0-1 scalar)
 metalness = "metalness"

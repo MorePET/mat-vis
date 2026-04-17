@@ -66,16 +66,36 @@ def _fetch_package_detail(package_id: str, *, session: requests.Session | None =
 _IMG_RE = re.compile(r"\.(png|jpg|jpeg|tif|tiff|exr)$", re.IGNORECASE)
 
 
+def _inject_mtlx_comment(mtlx_bytes: bytes, material_id: str, source_url: str) -> bytes:
+    """Inject source attribution comment into mtlx XML."""
+    comment = (
+        f"<!-- source: {source_url} -->\n"
+        f"<!-- license: TBV -->\n"
+        f"<!-- material: {material_id} -->\n"
+        f"<!-- fetched-by: mat-vis-baker -->\n"
+    ).encode()
+    text = mtlx_bytes
+    if text.startswith(b"<?xml"):
+        end = text.find(b"?>")
+        if end >= 0:
+            return text[: end + 2] + b"\n" + comment + text[end + 2 :]
+    return comment + text
+
+
 def _extract_from_zip(
     zip_bytes: bytes,
     material_id: str,
     output_dir: Path,
+    *,
+    mtlx_dir: Path | None = None,
 ) -> tuple[Path | None, dict[str, Path]]:
     """Extract .mtlx and texture files from a ZIP. Returns (mtlx_path, {channel: path})."""
     mat_dir = output_dir / material_id
     mat_dir.mkdir(parents=True, exist_ok=True)
     mtlx_path: Path | None = None
     textures: dict[str, Path] = {}
+
+    source_url = f"https://matlib.gpuopen.com/main/materials/all?material={material_id}"
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         for name in zf.namelist():
@@ -84,8 +104,15 @@ def _extract_from_zip(
             basename = name.rsplit("/", 1)[-1].lower()
 
             if basename.endswith(".mtlx"):
+                # Save to working dir for bake pipeline
                 mtlx_path = mat_dir / "material.mtlx"
-                mtlx_path.write_bytes(zf.read(name))
+                raw = zf.read(name)
+                mtlx_path.write_bytes(raw)
+                # Also save attributed copy to mtlx_dir for git
+                if mtlx_dir:
+                    git_mtlx = mtlx_dir / "gpuopen" / material_id / "material.mtlx"
+                    git_mtlx.parent.mkdir(parents=True, exist_ok=True)
+                    git_mtlx.write_bytes(_inject_mtlx_comment(raw, material_id, source_url))
                 continue
 
             if _IMG_RE.search(basename):
@@ -116,6 +143,7 @@ def fetch(
     *,
     limit: int | None = None,
     session: requests.Session | None = None,
+    mtlx_dir: Path | None = None,
 ) -> list[MaterialRecord]:
     """Fetch gpuopen materials. Layered mtlx graphs are flagged for baking."""
     s = session or requests.Session()
@@ -145,7 +173,9 @@ def fetch(
                 continue
 
             resp = retry_request(dl_url, session=s)
-            mtlx_path, textures = _extract_from_zip(resp.content, mid, output_dir)
+            mtlx_path, textures = _extract_from_zip(
+                resp.content, mid, output_dir, mtlx_dir=mtlx_dir
+            )
 
             # If no flat textures but we have mtlx, flag for baking
             needs_bake = bool(mtlx_path) and not textures
