@@ -21,6 +21,7 @@ from mat_vis_baker.common import BAKER_VERSION, CANONICAL_CHANNELS, MaterialReco
 log = logging.getLogger("mat-vis-baker.parquet")
 
 PNG_MAGIC = b"\x89PNG"
+KTX2_MAGIC = b"\xabKTX 20\xbb\r\n\x1a\n"  # 12 bytes
 
 CHANNEL_COLS = frozenset(CANONICAL_CHANNELS)
 
@@ -351,32 +352,34 @@ def generate_rowmap_from_parquet(
             page_offset = col_meta.data_page_offset
             fh.seek(page_offset)
             window = fh.read(_MAX_PAGE_HEADER_SIZE)
+
+            # Try PNG magic first, then KTX2
             png_idx = window.find(PNG_MAGIC)
-            if png_idx < 0:
+            ktx2_idx = window.find(KTX2_MAGIC) if png_idx < 0 else -1
+
+            if png_idx >= 0:
+                data_start = page_offset + png_idx
+                data_size = col_meta.total_compressed_size
+                fh.seek(data_start)
+                data = fh.read(data_size)
+
+                iend_pos = data.find(b"IEND")
+                if iend_pos < 0:
+                    log.warning("%s/%s: IEND not found, skipping", mid, col_name)
+                    continue
+                data_length = iend_pos + 4 + 4  # IEND marker + CRC
+
+            elif ktx2_idx >= 0:
+                data_start = page_offset + ktx2_idx
+                # KTX2 has no end marker like IEND. Use total_compressed_size
+                # minus the page header as the data length.
+                data_length = col_meta.total_compressed_size - ktx2_idx
+            else:
                 continue
-
-            png_start = page_offset + png_idx
-
-            # Read enough data to find the PNG IEND chunk and determine length.
-            # The total_compressed_size gives an upper bound on the data.
-            data_size = col_meta.total_compressed_size
-            fh.seek(png_start)
-            png_data = fh.read(data_size)
-
-            # Find IEND chunk: the 8-byte trailer is 4-byte CRC + 0x00000000 IEND + 4-byte CRC
-            # IEND marker is b'IEND' preceded by a 4-byte length (always 0)
-            iend_marker = b"IEND"
-            iend_pos = png_data.find(iend_marker)
-            if iend_pos < 0:
-                log.warning("%s/%s: IEND not found, skipping", mid, col_name)
-                continue
-
-            # PNG length = up to and including IEND chunk + its 4-byte CRC
-            png_length = iend_pos + len(iend_marker) + 4  # +4 for CRC after IEND
 
             channels[col_name] = {
-                "offset": png_start,
-                "length": png_length,
+                "offset": data_start,
+                "length": data_length,
             }
 
         if channels:
