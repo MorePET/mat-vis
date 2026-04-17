@@ -445,7 +445,7 @@ class MatVisCi:
             .with_mounted_cache("/root/.cache/pip", pip_cache)
             .with_mounted_directory("/app", context)
             .with_workdir("/app/clients/python")
-            .with_exec(["pip", "install", "--quiet", "pytest"])
+            .with_exec(["pip", "install", "--quiet", "pytest", "."])
             .with_env_variable("MAT_VIS_TAG", tag)
             .with_exec(["pytest", "test_client.py", "-v"])
             .stdout()
