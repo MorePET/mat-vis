@@ -31,9 +31,9 @@ CANONICAL_CATEGORIES = frozenset(
 
 CANONICAL_CHANNELS = ["color", "normal", "roughness", "metalness", "ao", "displacement", "emission"]
 
-VALID_TIERS = ["1k", "2k", "4k", "8k"]
+VALID_TIERS = ["128", "256", "512", "1k", "2k", "4k", "8k"]
 
-TIER_TO_PX = {"1k": 1024, "2k": 2048, "4k": 4096, "8k": 8192}
+TIER_TO_PX = {"128": 128, "256": 256, "512": 512, "1k": 1024, "2k": 2048, "4k": 4096, "8k": 8192}
 
 BAKER_VERSION = "0.1.0"
 
