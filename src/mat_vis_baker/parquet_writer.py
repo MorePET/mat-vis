@@ -105,10 +105,23 @@ def write_parquet(
 # ── rowmap generation ───────────────────────────────────────────
 
 
-def _find_png_offset(data: bytes, start: int) -> int | None:
-    """Find the first PNG magic bytes at or after `start`."""
-    idx = data.find(PNG_MAGIC, start)
-    return idx if idx >= 0 else None
+_MAX_PAGE_HEADER_SIZE = 100  # Thrift page header is typically 13-50 bytes
+
+
+def _find_png_in_page(data: bytes, page_offset: int, png_length: int) -> int | None:
+    """Find PNG magic within the first bytes after a data page offset.
+
+    Only scans a small window after the page offset to avoid false positives
+    from PNG magic bytes inside other columns' binary data.
+    """
+    search_end = min(page_offset + _MAX_PAGE_HEADER_SIZE, len(data))
+    idx = data.find(PNG_MAGIC, page_offset, search_end)
+    if idx is None or idx < 0:
+        return None
+    # Verify we have enough bytes for the full PNG
+    if idx + png_length > len(data):
+        return None
+    return idx
 
 
 def generate_rowmap(
@@ -120,9 +133,9 @@ def generate_rowmap(
 ) -> dict:
     """Generate a rowmap JSON from a Parquet file.
 
-    Uses the PNG magic byte scan approach: for each binary column in each
-    row group, find the PNG start after the data page offset and use the
-    known PNG byte length from the records.
+    For each binary column, scans a small window after the data page offset
+    for the PNG magic bytes. The window is limited to avoid false positives
+    from PNG magic appearing inside other columns' compressed data.
     """
     pf = pq.ParquetFile(parquet_path)
     file_bytes = parquet_path.read_bytes()
@@ -150,10 +163,14 @@ def generate_rowmap(
                 continue
 
             page_offset = col_meta.data_page_offset
-            png_start = _find_png_offset(file_bytes, page_offset)
+            png_start = _find_png_in_page(file_bytes, page_offset, len(png_bytes))
             if png_start is None:
                 log.warning(
-                    "%s/%s: PNG magic not found after offset %d", rec.id, col_name, page_offset
+                    "%s/%s: PNG magic not found within %d bytes of page offset %d",
+                    rec.id,
+                    col_name,
+                    _MAX_PAGE_HEADER_SIZE,
+                    page_offset,
                 )
                 continue
 

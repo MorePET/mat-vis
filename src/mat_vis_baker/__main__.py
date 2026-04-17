@@ -26,7 +26,18 @@ def _get_fetcher(source: str):
         from mat_vis_baker.sources.ambientcg import fetch
 
         return fetch
-    # TODO: polyhaven, gpuopen, physicallybased
+    if source == "polyhaven":
+        from mat_vis_baker.sources.polyhaven import fetch
+
+        return fetch
+    if source == "gpuopen":
+        from mat_vis_baker.sources.gpuopen import fetch
+
+        return fetch
+    if source == "physicallybased":
+        from mat_vis_baker.sources.physicallybased import fetch
+
+        return fetch
     raise NotImplementedError(f"Source {source!r} not yet implemented")
 
 
@@ -43,7 +54,10 @@ def cmd_all(args: argparse.Namespace) -> int:
 
     log.info("=== fetch %s %s ===", source, tier)
     fetch = _get_fetcher(source)
-    records = fetch(tier, output_dir / "textures", limit=args.limit)
+    if source == "physicallybased":
+        records = fetch()  # scalar only, no tier/output_dir
+    else:
+        records = fetch(tier, output_dir / "textures", limit=args.limit)
 
     log.info("=== bake ===")
     records = bake_batch(records, output_dir / "baked", tier)
