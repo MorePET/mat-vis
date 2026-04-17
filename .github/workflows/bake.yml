@@ -1,0 +1,78 @@
+---
+# Bake workflow — runs the baker pipeline for a source+tier.
+# Triggered manually. Uploads artifacts for release attachment.
+
+name: Bake
+
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Source to bake'
+        required: true
+        default: 'ambientcg'
+        type: choice
+        options:
+          - ambientcg
+          - polyhaven
+          - gpuopen
+          - physicallybased
+      tier:
+        description: 'Resolution tier'
+        required: true
+        default: '1k'
+        type: choice
+        options:
+          - 1k
+          - 2k
+      limit:
+        description: 'Max materials (0 = all)'
+        required: false
+        default: '50'
+        type: string
+      release-tag:
+        description: 'Release tag for rowmap metadata'
+        required: false
+        default: 'v0.1.0'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  bake:
+    name: Bake ${{ inputs.source }} ${{ inputs.tier }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - run: uv pip install --system -e '.[baker]'
+
+      - name: Run baker
+        run: |
+          ARGS="mat-vis-baker all ${{ inputs.source }} ${{ inputs.tier }} /tmp/bake-out"
+          ARGS="$ARGS --release-tag ${{ inputs.release-tag }}"
+          if [ "${{ inputs.limit }}" != "0" ] && [ -n "${{ inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+          fi
+          $ARGS
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bake-${{ inputs.source }}-${{ inputs.tier }}
+          path: /tmp/bake-out/
+          retention-days: 30
+
+      - name: Attach to release
+        if: inputs.release-tag != 'v0000.00.0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd /tmp/bake-out
+          for f in *.parquet *-rowmap.json *.json; do
+            [ -f "$f" ] && gh release upload "${{ inputs.release-tag }}" "$f" --clobber || true
+          done
