@@ -246,11 +246,10 @@ def generate_rowmap(
             if col_name not in CHANNEL_COLS:
                 continue
 
-            png_bytes = _read_png_bytes(rec.texture_paths.get(col_name))
-            if png_bytes is None:
+            if not rec.texture_paths.get(col_name):
                 continue
 
-            # Read only a small window around the page offset (not the whole file)
+            # Find PNG start: scan a small window after the data page header
             page_offset = col_meta.data_page_offset
             fh.seek(page_offset)
             window = fh.read(_MAX_PAGE_HEADER_SIZE)
@@ -266,9 +265,19 @@ def generate_rowmap(
                 )
                 continue
 
+            # Find PNG end: scan for IEND chunk within the column's data
+            data_size = col_meta.total_compressed_size
+            fh.seek(png_start)
+            png_data = fh.read(data_size)
+            iend_pos = png_data.find(b"IEND")
+            if iend_pos < 0:
+                log.warning("%s/%s: IEND not found, skipping", rec.id, col_name)
+                continue
+            png_length = iend_pos + 4 + 4  # IEND marker + CRC
+
             channels[col_name] = {
                 "offset": png_start,
-                "length": len(png_bytes),
+                "length": png_length,
             }
 
         if channels:
