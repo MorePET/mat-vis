@@ -514,7 +514,7 @@ class MatVisCi:
         target_cache = dag.cache_volume("cargo-target")
         return await (
             dag.container()
-            .from_("rust:1.80-slim")
+            .from_("rust:1.85-slim")
             .with_exec(["apt-get", "update", "-qq"])
             .with_exec(["apt-get", "install", "-y", "-qq", "pkg-config", "libssl-dev"])
             .with_mounted_cache("/usr/local/cargo/registry", cargo_cache)
