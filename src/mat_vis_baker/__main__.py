@@ -78,7 +78,11 @@ def cmd_all(args: argparse.Namespace) -> int:
     log.info("=== phase 1: fetch %s %s ===", source, tier)
     t0 = time.monotonic()
     fetch = _get_fetcher(source)
-    records = fetch(tier, output_dir / "textures", limit=args.limit, mtlx_dir=mtlx_dir)
+    # offset+limit enables batched processing across parallel Dagger containers
+    fetch_limit = (args.offset + args.limit) if args.limit else None
+    records = fetch(tier, output_dir / "textures", limit=fetch_limit, mtlx_dir=mtlx_dir)
+    if args.offset > 0:
+        records = records[args.offset :]
     t_fetch = time.monotonic() - t0
     n_fetched = sum(1 for r in records if r.status == "ok")
     log.info(
@@ -325,12 +329,9 @@ def main() -> int:
     p_all.add_argument("source", choices=SOURCES)
     p_all.add_argument("tier", choices=VALID_TIERS)
     p_all.add_argument("output_dir")
+    p_all.add_argument("--offset", type=int, default=0, help="Skip first N materials")
     p_all.add_argument("--limit", type=int, default=None)
     p_all.add_argument("--release-tag", default="v0000.00.0")
-    p_all.add_argument(
-        "--also-derive",
-        help="Comma-separated smaller tiers to derive (e.g. 128,256,512)",
-    )
 
     p_derive = sub.add_parser("derive", help="Derive smaller tier from existing bake output")
     p_derive.add_argument("source", choices=SOURCES)
@@ -350,24 +351,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "all":
-        rc = cmd_all(args)
-        if rc == 0 and args.also_derive:
-            for dtier in args.also_derive.split(","):
-                dtier = dtier.strip()
-                log.info("=== deriving tier %s ===", dtier)
-                import argparse as _ap
-
-                dargs = _ap.Namespace(
-                    source=args.source,
-                    tier=dtier,
-                    source_dir=args.output_dir,
-                    output_dir=str(Path(args.output_dir).parent / f"{args.source}-{dtier}"),
-                    release_tag=args.release_tag,
-                )
-                drc = cmd_derive(dargs)
-                if drc != 0:
-                    log.error("derive %s failed", dtier)
-        return rc
+        return cmd_all(args)
     if args.command == "derive":
         return cmd_derive(args)
     if args.command == "fetch":
