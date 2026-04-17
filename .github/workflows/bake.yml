@@ -98,9 +98,30 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ inputs.release-tag }}"
-          for f in /tmp/bake-out/*.parquet /tmp/bake-out/*-rowmap.json /tmp/bake-out/release-manifest.json /tmp/bake-out/*.json; do
+          # Upload parquet, rowmaps, index JSON (not the per-bake manifest)
+          for f in /tmp/bake-out/*.parquet /tmp/bake-out/*-rowmap.json; do
             [ -f "$f" ] && gh release upload "$TAG" "$f" --clobber || true
           done
+          # Upload index JSON separately (skip manifest — rebuilt below)
+          for f in /tmp/bake-out/*.json; do
+            case "$(basename "$f")" in
+              release-manifest.json|*-rowmap.json) ;; # skip
+              *) gh release upload "$TAG" "$f" --clobber || true ;;
+            esac
+          done
+
+      - name: Rebuild manifest from all release assets
+        if: inputs.release-tag != 'v0000.00.0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.release-tag }}"
+          python3 -c "
+          from mat_vis_baker.manifest import rebuild_manifest_from_release, write_manifest
+          manifest = rebuild_manifest_from_release('$TAG')
+          write_manifest(manifest, '/tmp/release-manifest.json')
+          "
+          gh release upload "$TAG" /tmp/release-manifest.json --clobber
 
       - name: Generate app token for PR
         id: app-token
