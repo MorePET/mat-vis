@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -257,6 +258,7 @@ class MaterialRecord:
     available_tiers: list[str] = field(default_factory=list)
     maps: list[str] = field(default_factory=list)
     texture_paths: dict[str, Path] = field(default_factory=dict)
+    texture_hashes: dict[str, dict[str, str | int]] = field(default_factory=dict)
     status: str = "ok"
     needs_mtlx_bake: bool = False
 
@@ -297,3 +299,25 @@ def retry_request(
     if last_exc:
         raise last_exc
     raise requests.HTTPError(f"Failed after {max_retries} retries: {url}")
+
+
+# ── hashing ─────────────────────────────────────────────────────
+
+
+def hash_png(path: Path) -> dict[str, str | int]:
+    """Compute SHA-256 and size of a PNG file. Returns {"sha256": ..., "size": ...}."""
+    data = path.read_bytes()
+    return {
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": len(data),
+    }
+
+
+def hash_textures(record: MaterialRecord) -> MaterialRecord:
+    """Populate texture_hashes for all channels in a record."""
+    for channel, path in record.texture_paths.items():
+        if channel.startswith("_"):  # skip _mtlx
+            continue
+        if path.exists():
+            record.texture_hashes[channel] = hash_png(path)
+    return record

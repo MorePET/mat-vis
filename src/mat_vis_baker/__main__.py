@@ -52,12 +52,14 @@ def cmd_all(args: argparse.Namespace) -> int:
     output_dir = Path(args.output_dir)
     resolution_px = TIER_TO_PX[tier]
 
+    mtlx_dir = output_dir / "mtlx"
+
     log.info("=== fetch %s %s ===", source, tier)
     fetch = _get_fetcher(source)
     if source == "physicallybased":
         records = fetch()  # scalar only, no tier/output_dir
     else:
-        records = fetch(tier, output_dir / "textures", limit=args.limit)
+        records = fetch(tier, output_dir / "textures", limit=args.limit, mtlx_dir=mtlx_dir)
 
     if source == "physicallybased":
         # Scalar only — no bake, no parquet, just index
@@ -68,7 +70,8 @@ def cmd_all(args: argparse.Namespace) -> int:
         return 0
 
     log.info("=== bake ===")
-    records = bake_batch(records, output_dir / "baked", tier)
+    thumb_dir = output_dir / "mtlx"
+    records = bake_batch(records, output_dir / "baked", tier, thumb_dir=thumb_dir)
 
     ok = [r for r in records if r.status == "ok"]
     total = len(records)
@@ -88,6 +91,12 @@ def cmd_all(args: argparse.Namespace) -> int:
     log.info("=== index ===")
     index_data = build_index(records, source)
     write_index(index_data, output_dir / f"{source}.json")
+
+    log.info("=== catalog ===")
+    from mat_vis_baker.catalog import generate_catalog, write_catalog
+
+    catalog_md = generate_catalog(output_dir, output_dir / "mtlx")
+    write_catalog(catalog_md, output_dir / "catalog.md")
 
     log.info("=== done: %d ok, %d failed ===", len(ok), total - len(ok))
     return 0
