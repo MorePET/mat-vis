@@ -1,0 +1,136 @@
+---
+# Watch upstream sources for changes.
+# Runs daily, compares upstream material hashes against index/*.json.
+# Opens a PR if changes are detected.
+#
+# Per ADR-0002: fires only on actual upstream change, not calendar rebuilds.
+
+name: Watch upstream sources
+
+on:  # yamllint disable-line rule:truthy
+  schedule:
+    - cron: "37 6 * * *"  # daily 06:37 UTC (off-minute to avoid thundering herd)
+  workflow_dispatch:
+    inputs:
+      sources:
+        description: 'Comma-separated sources to check (default: all)'
+        required: false
+        default: 'ambientcg,polyhaven,gpuopen,physicallybased'
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  watch:
+    name: Check upstream changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - run: uv pip install --system -e '.[baker]'
+
+      - name: Probe sources and detect changes
+        id: detect
+        run: |
+          python3 << 'PYEOF'
+          import json
+          import sys
+          from pathlib import Path
+
+          from mat_vis_baker.common import retry_request
+
+          SOURCES = {
+              "ambientcg": {
+                  "url": "https://ambientcg.com/api/v2/full_json?type=Material&limit=1&offset=0&include=downloadData",
+                  "count_key": lambda d: len(d.get("foundAssets", [])),
+                  "id_key": lambda d: d.get("foundAssets", [{}])[0].get("assetId", ""),
+              },
+              "polyhaven": {
+                  "url": "https://api.polyhaven.com/assets?t=textures",
+                  "count_key": lambda d: len(d),
+                  "id_key": lambda d: next(iter(d.keys()), ""),
+              },
+              "gpuopen": {
+                  "url": "https://api.matlib.gpuopen.com/api/packages?limit=1&offset=0",
+                  "count_key": lambda d: d.get("count", len(d.get("results", []))),
+                  "id_key": lambda d: d.get("results", [{}])[0].get("id", ""),
+              },
+              "physicallybased": {
+                  "url": "https://api.physicallybased.info/materials",
+                  "count_key": lambda d: len(d),
+                  "id_key": lambda d: d[0].get("name", "") if d else "",
+              },
+          }
+
+          input_sources = "${{ inputs.sources || 'ambientcg,polyhaven,gpuopen,physicallybased' }}"
+          check_sources = [s.strip() for s in input_sources.split(",")]
+
+          changes = []
+          for name in check_sources:
+              if name not in SOURCES:
+                  continue
+              src = SOURCES[name]
+
+              # Check upstream count
+              try:
+                  resp = retry_request(src["url"])
+                  data = resp.json()
+                  upstream_count = src["count_key"](data)
+              except Exception as e:
+                  print(f"WARN {name}: failed to reach upstream ({e})")
+                  continue
+
+              # Compare against local index
+              index_path = Path(f"index/{name}.json")
+              if index_path.exists():
+                  local_index = json.loads(index_path.read_text())
+                  local_count = len(local_index)
+                  if upstream_count != local_count:
+                      changes.append(name)
+                      print(f"CHANGE {name}: local={local_count}, upstream={upstream_count}")
+                  else:
+                      print(f"OK {name}: {local_count} materials (unchanged)")
+              else:
+                  changes.append(name)
+                  print(f"NEW {name}: no local index, upstream has {upstream_count}")
+
+          # Write output
+          with open("$GITHUB_OUTPUT" if "$GITHUB_OUTPUT" else "/dev/null", "a") as f:
+              f.write(f"changed={'true' if changes else 'false'}\n")
+              f.write(f"sources={','.join(changes)}\n")
+
+          if changes:
+              print(f"\nChanges detected: {', '.join(changes)}")
+          else:
+              print("\nNo changes detected.")
+          PYEOF
+
+      - name: Open PR for changed sources
+        if: steps.detect.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGED: ${{ steps.detect.outputs.sources }}
+        run: |
+          echo "Changes detected in: $CHANGED"
+          echo "Triggering bake workflows for changed sources..."
+
+          IFS=',' read -ra SOURCES <<< "$CHANGED"
+          for src in "${SOURCES[@]}"; do
+            echo "Dispatching bake for $src at 1k..."
+            gh workflow run bake.yml \
+              -f source="$src" \
+              -f tier=1k \
+              -f limit=0 \
+              -f release-tag=v0000.00.0
+          done
