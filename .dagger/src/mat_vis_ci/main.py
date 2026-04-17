@@ -410,18 +410,18 @@ class MatVisCi:
 
     @function
     def _baker_container(self, context: dagger.Directory) -> dagger.Container:
-        """Baker container with code + gh CLI."""
+        """Baker container with code + gh CLI + git."""
         pip_cache = dag.cache_volume("pip-cache")
-        gh_cache = dag.cache_volume("gh-install")
         return (
             dag.container()
             .from_("python:3.12-slim")
-            .with_mounted_cache("/opt/gh-cache", gh_cache)
+            .with_exec(["apt-get", "update", "-qq"])
+            .with_exec(["apt-get", "install", "-y", "-qq", "git", "curl"])
             .with_exec(
                 [
                     "sh",
                     "-c",
-                    "if [ ! -f /usr/local/bin/gh ]; then apt-get update -qq && apt-get install -y -qq curl && curl -fsSL https://github.com/cli/cli/releases/download/v2.74.1/gh_2.74.1_linux_amd64.tar.gz | tar xz -C /opt/gh-cache && cp /opt/gh-cache/gh_2.74.1_linux_amd64/bin/gh /usr/local/bin/gh; fi",
+                    "curl -fsSL https://github.com/cli/cli/releases/download/v2.74.1/gh_2.74.1_linux_amd64.tar.gz | tar xz --strip-components=2 -C /usr/local/bin gh_2.74.1_linux_amd64/bin/gh",
                 ]
             )
             .with_mounted_cache("/root/.cache/pip", pip_cache)
