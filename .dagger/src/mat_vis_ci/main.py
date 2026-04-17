@@ -246,11 +246,17 @@ class MatVisCi:
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
     ) -> str:
-        """End-to-end: fetch 2 ambientcg materials → bake → pack → rowmap → range-read verify."""
+        """End-to-end: fetch 2 ambientcg materials → bake → pack → rowmap → range-read verify.
+
+        Runs native (no platform override) — tests pipeline logic, not the amd64 image.
+        """
         context = src or dag.host().directory(".")
-        ctr = self.build(context)
+        pip_cache = dag.cache_volume("pip-cache")
         return await (
-            ctr.with_mounted_directory("/app", context)
+            dag.container()
+            .from_("python:3.12-slim")
+            .with_mounted_cache("/root/.cache/pip", pip_cache)
+            .with_mounted_directory("/app", context)
             .with_workdir("/app")
             .with_exec(["pip", "install", "--quiet", "-e", ".[baker]"])
             .with_exec(
