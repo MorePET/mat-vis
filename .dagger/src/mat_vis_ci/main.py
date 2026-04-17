@@ -120,14 +120,27 @@ materials = rowmap["materials"]
 assert len(materials) > 0, "Rowmap has no materials"
 
 verified = 0
+errors = []
 for mid, channels in materials.items():
     for ch, rng in channels.items():
         offset = rng["offset"]
         length = rng["length"]
         chunk = file_bytes[offset : offset + length]
-        assert chunk[:4] == b"\\x89PNG", f"{mid}/{ch}: not PNG at offset {offset}"
-        assert len(chunk) == length, f"{mid}/{ch}: length mismatch"
+        if chunk[:4] != b"\\x89PNG":
+            errors.append(f"{mid}/{ch}: not PNG at offset {offset} (got {chunk[:4]!r})")
+            continue
+        if len(chunk) != length:
+            errors.append(
+                f"{mid}/{ch}: length mismatch at offset {offset}"
+                f" (expected {length}, got {len(chunk)}, file_size={len(file_bytes)})"
+            )
+            continue
         verified += 1
+
+if errors:
+    for e in errors:
+        print(f"  FAIL {e}")
+    sys.exit(1)
 
 print(f"  OK parquet: {pq_path.name} ({len(file_bytes)} bytes)")
 print(f"  OK rowmap: {len(materials)} materials")
