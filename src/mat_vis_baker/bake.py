@@ -27,7 +27,7 @@ def _validate_and_resize_png(path: Path, target_px: int | None = None) -> bool:
                 log.warning("%s: not PNG (got %s)", path, img.format)
                 return False
             if target_px and (img.width > target_px or img.height > target_px):
-                resized = img.copy()
+                resized = img.convert("RGB").copy()
                 resized.thumbnail((target_px, target_px), Image.LANCZOS)
                 resized.save(path, "PNG")
                 log.debug(

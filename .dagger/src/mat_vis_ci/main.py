@@ -409,46 +409,127 @@ class MatVisCi:
     # ── bake pipeline ─────────────────────────────────────────────
 
     @function
+    def _baker_container(self, context: dagger.Directory) -> dagger.Container:
+        """Baker container with code + gh CLI + git."""
+        pip_cache = dag.cache_volume("pip-cache")
+        return (
+            dag.container()
+            .from_("python:3.12-slim")
+            .with_exec(["apt-get", "update", "-qq"])
+            .with_exec(["apt-get", "install", "-y", "-qq", "git", "curl"])
+            .with_exec(
+                [
+                    "sh",
+                    "-c",
+                    "curl -fsSL https://github.com/cli/cli/releases/download/v2.74.1/gh_2.74.1_linux_amd64.tar.gz | tar xz --strip-components=2 -C /usr/local/bin gh_2.74.1_linux_amd64/bin/gh",
+                ]
+            )
+            .with_mounted_cache("/root/.cache/pip", pip_cache)
+            .with_mounted_directory("/app", context)
+            .with_workdir("/app")
+            .with_exec(["pip", "install", "--quiet", "-e", ".[baker]"])
+        )
+
+    @function
+    async def bake_and_release(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        source: Annotated[str, Doc("Source name")] = "ambientcg",
+        tier: Annotated[str, Doc("Resolution tier")] = "1k",
+        release_tag: Annotated[str, Doc("Release tag")] = "v0000.00.0",
+        limit: Annotated[int, Doc("Max materials (0 = all)")] = 0,
+        registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
+    ) -> str:
+        """Bake all materials → upload to release → rebuild manifest.
+
+        Single container. Streaming parquet writer — constant memory.
+        No OOM regardless of source size.
+        """
+        context = src or dag.host().directory(".")
+        baker = self._baker_container(context)
+
+        bake_cmd = [
+            "mat-vis-baker",
+            "all",
+            source,
+            tier,
+            "/tmp/out",
+            "--release-tag",
+            release_tag,
+        ]
+        if limit > 0:
+            bake_cmd.extend(["--limit", str(limit)])
+
+        baker = baker.with_exec(bake_cmd)
+
+        # Upload to release
+        if release_tag != "v0000.00.0" and registry_pass is not None:
+            baker = baker.with_secret_variable("GH_TOKEN", registry_pass)
+            baker = baker.with_exec(
+                [
+                    "sh",
+                    "-c",
+                    f"""
+                for f in /tmp/out/*.parquet /tmp/out/*-rowmap.json /tmp/out/*.json; do
+                    [ -f "$f" ] || continue
+                    case "$(basename "$f")" in
+                        release-manifest.json) ;;
+                        *) gh release upload {release_tag} "$f" --clobber || true ;;
+                    esac
+                done
+            """,
+                ]
+            )
+
+            # Rebuild manifest from all release assets
+            baker = baker.with_exec(
+                [
+                    "python3",
+                    "-c",
+                    f"""
+from pathlib import Path
+from mat_vis_baker.manifest import rebuild_manifest_from_release, write_manifest
+manifest = rebuild_manifest_from_release('{release_tag}')
+write_manifest(manifest, Path('/tmp/release-manifest.json'))
+""",
+                ]
+            )
+            baker = baker.with_exec(
+                [
+                    "sh",
+                    "-c",
+                    f"gh release upload {release_tag} /tmp/release-manifest.json --clobber",
+                ]
+            )
+
+        return await baker.stdout()
+
+    @function
     async def bake_source(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
         source: Annotated[str, Doc("Source name")] = "ambientcg",
         tier: Annotated[str, Doc("Resolution tier")] = "1k",
         release_tag: Annotated[str, Doc("Release tag for rowmap")] = "v0000.00.0",
+        limit: Annotated[int, Doc("Max materials (0 = all)")] = 0,
     ) -> dagger.Directory:
-        """Run full baker pipeline for one source+tier. Returns directory with artifacts.
-
-        Output directory contains:
-        - mat-vis-<source>-<tier>.parquet
-        - <source>-<tier>-rowmap.json
-        - <source>.json (index)
-        """
+        """Bake single batch, return output directory (no upload)."""
         context = src or dag.host().directory(".")
-        pip_cache = dag.cache_volume("pip-cache")
+        baker = self._baker_container(context)
 
-        ctr = (
-            dag.container()
-            .from_("python:3.12-slim")
-            .with_mounted_cache("/root/.cache/pip", pip_cache)
-            .with_mounted_directory("/app", context)
-            .with_workdir("/app")
-            .with_exec(["pip", "install", "--quiet", "-e", ".[baker]"])
-            .with_exec(
-                [
-                    "mat-vis-baker",
-                    "all",
-                    source,
-                    tier,
-                    "/tmp/out",
-                    "--release-tag",
-                    release_tag,
-                    "--also-derive",
-                    "128,256,512",
-                ]
-            )
-        )
+        bake_cmd = [
+            "mat-vis-baker",
+            "all",
+            source,
+            tier,
+            "/tmp/out",
+            "--release-tag",
+            release_tag,
+        ]
+        if limit > 0:
+            bake_cmd.extend(["--limit", str(limit)])
 
-        return ctr.directory("/tmp/out")
+        return baker.with_exec(bake_cmd).directory("/tmp/out")
 
     # ── source probes ─────────────────────────────────────────────
 

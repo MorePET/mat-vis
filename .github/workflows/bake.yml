@@ -1,10 +1,5 @@
 ---
-# Bake workflow — runs the baker pipeline for a source+tier.
-# Triggered manually.
-#
-# Outputs:
-#   - Parquet + rowmap + index JSON → uploaded to GitHub Release
-#   - Index JSON + mtlx + thumbnails + catalog → committed to git via PR
+# Bake workflow — thin Dagger wrapper.
 
 name: Bake
 
@@ -27,12 +22,15 @@ on:  # yamllint disable-line rule:truthy
         default: '1k'
         type: choice
         options:
+          - 128
+          - 256
+          - 512
           - 1k
           - 2k
       limit:
         description: 'Max materials (0 = all)'
         required: false
-        default: '50'
+        default: '0'
         type: string
       release-tag:
         description: 'Calver data release tag (e.g. v2026.04.0)'
@@ -42,140 +40,26 @@ on:  # yamllint disable-line rule:truthy
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   bake:
     name: Bake ${{ inputs.source }} ${{ inputs.tier }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dagger/dagger-for-github@v8.4.1
         with:
-          ref: dev
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: astral-sh/setup-uv@v6
-
-      - run: uv pip install --system -e '.[baker]'
-
-      - name: Run baker
-        run: |
-          ARGS="mat-vis-baker all ${{ inputs.source }} ${{ inputs.tier }} /tmp/bake-out"
-          ARGS="$ARGS --release-tag ${{ inputs.release-tag }}"
-          ARGS="$ARGS --also-derive 128,256,512"
-          if [ "${{ inputs.limit }}" != "0" ] && [ -n "${{ inputs.limit }}" ]; then
-            ARGS="$ARGS --limit ${{ inputs.limit }}"
-          fi
-          $ARGS
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: bake-${{ inputs.source }}-${{ inputs.tier }}
-          path: /tmp/bake-out/
-          retention-days: 30
-
-      - name: Ensure pre-release exists
-        if: inputs.release-tag != 'v0000.00.0'
+          verb: call
+          module: .dagger
+          args: >-
+            bake-and-release
+            --src=.
+            --source=${{ inputs.source }}
+            --tier=${{ inputs.tier }}
+            --limit=${{ inputs.limit }}
+            --release-tag=${{ inputs.release-tag }}
+            --registry-pass=env:GITHUB_TOKEN
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ inputs.release-tag }}"
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Creating pre-release $TAG..."
-            gh release create "$TAG" \
-              --title "$TAG — data release (pre-release)" \
-              --prerelease \
-              --notes "Data release. Assets attached by bake workflow. Promote with promote-data-release workflow."
-          fi
-
-      - name: Attach assets to pre-release
-        if: inputs.release-tag != 'v0000.00.0'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ inputs.release-tag }}"
-          SOURCE="${{ inputs.source }}"
-          # Upload all parquet + rowmap files (main tier + derived tiers)
-          for dir in /tmp/bake-out /tmp/${SOURCE}-*; do
-            [ -d "$dir" ] || continue
-            for f in "$dir"/*.parquet "$dir"/*-rowmap.json; do
-              [ -f "$f" ] && gh release upload "$TAG" "$f" --clobber || true
-            done
-            # Upload index JSON (skip manifest/rowmap)
-            for f in "$dir"/*.json; do
-              [ -f "$f" ] || continue
-              case "$(basename "$f")" in
-                release-manifest.json|*-rowmap.json) ;;
-                *) gh release upload "$TAG" "$f" --clobber || true ;;
-              esac
-            done
-          done
-
-      - name: Rebuild manifest from all release assets
-        if: inputs.release-tag != 'v0000.00.0'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ inputs.release-tag }}"
-          python3 -c "
-          from mat_vis_baker.manifest import rebuild_manifest_from_release, write_manifest
-          manifest = rebuild_manifest_from_release('$TAG')
-          write_manifest(manifest, '/tmp/release-manifest.json')
-          "
-          gh release upload "$TAG" /tmp/release-manifest.json --clobber
-
-      - name: Generate app token for PR
-        id: app-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.COMMIT_APP_ID }}
-          private-key: ${{ secrets.COMMIT_APP_PRIVATE_KEY }}
-
-      - name: Commit index + mtlx + thumbnails + catalog to git
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          SOURCE="${{ inputs.source }}"
-
-          # Index JSON
-          if [ -f "/tmp/bake-out/${SOURCE}.json" ]; then
-            mkdir -p index
-            cp "/tmp/bake-out/${SOURCE}.json" "index/${SOURCE}.json"
-          fi
-
-          # mtlx + thumbnails
-          if [ -d "/tmp/bake-out/mtlx/${SOURCE}" ]; then
-            mkdir -p "mtlx/${SOURCE}"
-            cp -r "/tmp/bake-out/mtlx/${SOURCE}/." "mtlx/${SOURCE}/"
-          fi
-
-          # Catalog
-          if [ -f "/tmp/bake-out/catalog.md" ]; then
-            mkdir -p docs
-            cp "/tmp/bake-out/catalog.md" "docs/catalog.md"
-          fi
-
-          # Create branch and PR using app token
-          BRANCH="chore/bake-${SOURCE}-${{ inputs.tier }}"
-          git config user.name "mat-vis-baker[bot]"
-          git config user.email "mat-vis-baker[bot]@users.noreply.github.com"
-          # Fresh branch from dev — only data files will be added (no workflows)
-          git checkout -b "$BRANCH"
-          # Ensure no workflow changes are staged
-          git checkout HEAD -- .github/ || true
-          [ -d index ] && git add index/
-          [ -d mtlx ] && git add mtlx/
-          [ -f docs/catalog.md ] && git add docs/catalog.md
-          git diff --cached --quiet && echo "No changes to commit" && exit 0
-          git commit -m "data: bake ${SOURCE} ${{ inputs.tier }} — index + mtlx + thumbnails"
-          git push origin "$BRANCH"
-          gh pr create \
-            --base dev \
-            --head "$BRANCH" \
-            --title "data: bake ${SOURCE} ${{ inputs.tier }}" \
-            --body "Auto-generated by bake workflow. Contains index JSON, mtlx files, thumbnails, and catalog."
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
