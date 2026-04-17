@@ -51,6 +51,17 @@ _MTLX_TEX_MAP: dict[str, str] = {
     "emission": "emission_color",
 }
 
+# UsdPreviewSurface input names (different from standard_surface)
+_USD_PREVIEW_TEX_MAP: dict[str, tuple[str, str]] = {
+    "color": ("diffuseColor", "color3"),
+    "normal": ("normal", "vector3"),
+    "roughness": ("roughness", "float"),
+    "metalness": ("metallic", "float"),
+    "ao": ("occlusion", "float"),
+    "displacement": ("displacement", "float"),
+    "emission": ("emissiveColor", "color3"),
+}
+
 
 # ── Helpers ─────────────────────────────────────────────────────
 
@@ -206,14 +217,28 @@ def export_mtlx(
     output_dir: str | Path = ".",
     *,
     material_name: str = "Material",
+    texture_dir: str | Path | None = None,
+    channels: list[str] | None = None,
 ) -> Path:
     """Export as MaterialX .mtlx XML with referenced PNG files.
 
+    Uses UsdPreviewSurface with a nodegraph for texture reads — valid
+    MaterialX 1.38 that works with USD/Hydra renderers.
+
+    Two modes:
+        1. Pass ``textures`` dict: PNGs are written to output_dir,
+           mtlx references them by filename.
+        2. Pass ``texture_dir`` + ``channels``: no PNG writing, mtlx
+           references existing files in texture_dir.
+
     Args:
-        scalars: Same as to_threejs().
-        textures: Same as to_threejs(). PNGs are written to output_dir.
-        output_dir: Directory for .mtlx and .png files.
+        scalars: Material scalars (metalness, roughness, color_hex, ior, etc).
+        textures: Channel name -> PNG bytes. Written to output_dir.
+        output_dir: Directory for .mtlx (and .png files if textures provided).
         material_name: Name for the material in the .mtlx document.
+        texture_dir: Path to existing texture PNGs. If set, textures param
+            is ignored and no PNGs are written.
+        channels: Channel names when using texture_dir mode.
 
     Returns:
         Path to the written .mtlx file.
@@ -222,59 +247,95 @@ def export_mtlx(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # Root element
+    # Determine available channels and texture paths
+    if texture_dir is not None:
+        tex_dir = Path(texture_dir)
+        available_channels = channels or []
+        tex_filenames: dict[str, str] = {}
+        for ch in available_channels:
+            png_path = tex_dir / f"{ch}.png"
+            if png_path.exists():
+                tex_filenames[ch] = str(png_path)
+    else:
+        # Write PNGs and record filenames
+        tex_filenames = {}
+        for channel, png_bytes in textures.items():
+            if channel not in _USD_PREVIEW_TEX_MAP:
+                continue
+            png_filename = f"{material_name}_{channel}.png"
+            (out / png_filename).write_bytes(png_bytes)
+            tex_filenames[channel] = png_filename
+
+    # Build MaterialX document
     root = ET.Element("materialx", version="1.38")
 
-    # Standard surface node
-    sr = ET.SubElement(root, "standard_surface", name=f"SR_{material_name}", type="surfaceshader")
+    # Nodegraph with image reads
+    ng_name = f"{material_name}_textures"
+    nodegraph = ET.SubElement(root, "nodegraph", name=ng_name)
 
-    # Scalar inputs
-    if "metalness" in scalars and scalars["metalness"] is not None:
-        ET.SubElement(sr, "input", name="metalness", type="float", value=str(scalars["metalness"]))
-    if "roughness" in scalars and scalars["roughness"] is not None:
-        ET.SubElement(
-            sr, "input", name="specular_roughness", type="float", value=str(scalars["roughness"])
-        )
-    if "color_hex" in scalars and scalars["color_hex"] is not None:
-        rgba = _color_hex_to_rgba(scalars["color_hex"])
-        color_str = f"{rgba[0]:.4f}, {rgba[1]:.4f}, {rgba[2]:.4f}"
-        ET.SubElement(sr, "input", name="base_color", type="color3", value=color_str)
-    if "ior" in scalars and scalars["ior"] is not None:
-        ET.SubElement(sr, "input", name="specular_IOR", type="float", value=str(scalars["ior"]))
-    if "transmission" in scalars and scalars["transmission"] is not None:
-        ET.SubElement(
-            sr, "input", name="transmission", type="float", value=str(scalars["transmission"])
-        )
+    output_refs: dict[str, tuple[str, str]] = {}
 
-    # Write texture PNGs and create image nodes
-    for channel, png_bytes in textures.items():
-        mtlx_input = _MTLX_TEX_MAP.get(channel)
-        if mtlx_input is None:
+    for ch, (usd_input, mtlx_type) in _USD_PREVIEW_TEX_MAP.items():
+        if ch not in tex_filenames:
             continue
 
-        # Write PNG file
-        png_filename = f"{material_name}_{channel}.png"
-        png_path = out / png_filename
-        png_path.write_bytes(png_bytes)
+        img_name = f"img_{ch}"
+        img = ET.SubElement(nodegraph, "image", name=img_name, type=mtlx_type)
+        file_inp = ET.SubElement(img, "input", name="file", type="filename")
+        file_inp.set("value", tex_filenames[ch])
+        if ch in ("color", "emission"):
+            file_inp.set("colorspace", "srgb_texture")
 
-        # Image node
-        img_node_name = f"IMG_{material_name}_{channel}"
-        img = ET.SubElement(root, "tiledimage", name=img_node_name, type="color3")
-        ET.SubElement(img, "input", name="file", type="filename", value=png_filename)
+        if ch == "normal":
+            nmap_name = f"normalmap_{ch}"
+            nmap = ET.SubElement(nodegraph, "normalmap", name=nmap_name, type="vector3")
+            ET.SubElement(nmap, "input", name="in", type="vector3").set("nodename", img_name)
+            out_name = f"out_{ch}"
+            ET.SubElement(nodegraph, "output", name=out_name, type="vector3").set(
+                "nodename", nmap_name
+            )
+            output_refs[usd_input] = (out_name, "vector3")
+        else:
+            out_name = f"out_{ch}"
+            ET.SubElement(nodegraph, "output", name=out_name, type=mtlx_type).set(
+                "nodename", img_name
+            )
+            output_refs[usd_input] = (out_name, mtlx_type)
 
-        # Connect texture to shader input
-        ET.SubElement(sr, "input", name=mtlx_input, type="color3", nodename=img_node_name)
+    # UsdPreviewSurface shader
+    shader_name = f"{material_name}_shader"
+    shader = ET.SubElement(root, "UsdPreviewSurface", name=shader_name, type="surfaceshader")
+
+    # Scalar inputs on the shader
+    if "roughness" in scalars and scalars["roughness"] is not None:
+        if "roughness" not in tex_filenames:
+            ET.SubElement(
+                shader, "input", name="roughness", type="float", value=str(scalars["roughness"])
+            )
+    if "metalness" in scalars and scalars["metalness"] is not None:
+        if "metalness" not in tex_filenames:
+            ET.SubElement(
+                shader, "input", name="metallic", type="float", value=str(scalars["metalness"])
+            )
+    if "ior" in scalars and scalars["ior"] is not None:
+        ET.SubElement(shader, "input", name="ior", type="float", value=str(scalars["ior"]))
+
+    # Connect texture outputs to shader
+    for usd_input, (out_name, mtlx_type) in output_refs.items():
+        inp = ET.SubElement(shader, "input", name=usd_input, type=mtlx_type)
+        inp.set("nodegraph", ng_name)
+        inp.set("output", out_name)
 
     # Surface material
     mat = ET.SubElement(root, "surfacematerial", name=material_name, type="material")
     ET.SubElement(
-        mat, "input", name="surfaceshader", type="surfaceshader", nodename=f"SR_{material_name}"
+        mat, "input", name="surfaceshader", type="surfaceshader", nodename=f"{shader_name}"
     )
 
-    # Write .mtlx file
-    tree = ET.ElementTree(root)
-    ET.indent(tree, space="  ")
+    # Write
+    ET.indent(root, space="  ")
     mtlx_path = out / f"{material_name}.mtlx"
-    tree.write(mtlx_path, encoding="unicode", xml_declaration=True)
+    with open(mtlx_path, "w") as f:
+        f.write(ET.tostring(root, encoding="unicode", xml_declaration=True))
 
     return mtlx_path
