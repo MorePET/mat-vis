@@ -56,24 +56,32 @@ def _download_maps(
     *,
     session: requests.Session | None = None,
 ) -> dict[str, Path]:
-    """Download PNG maps for a given tier. Returns {channel: path}."""
+    """Download PNG maps for a given tier. Returns {channel: path}.
+
+    Polyhaven structure: response[MapName][tier][format] = {url, size, md5}
+    e.g. response["Diffuse"]["1k"]["png"] = {"url": "...", "size": 123}
+    """
     s = session or requests.Session()
     tier_key = _TIER_KEYS.get(tier)
-    if not tier_key or tier_key not in file_info:
+    if not tier_key:
         return {}
 
-    tier_data = file_info[tier_key]
     mat_dir = output_dir / material_id
     mat_dir.mkdir(parents=True, exist_ok=True)
     result: dict[str, Path] = {}
 
-    for map_key, formats in tier_data.items():
+    for map_key, tier_data in file_info.items():
+        # Skip non-map keys (blend, gltf, mtlx, etc.)
+        if not isinstance(tier_data, dict) or tier_key not in tier_data:
+            continue
+
         channel = normalize_channel("polyhaven", map_key)
         if channel is None:
             continue
         if channel in result:
             continue
 
+        formats = tier_data[tier_key]
         # Prefer PNG, fall back to JPG
         fmt_data = formats.get("png") or formats.get("jpg")
         if not fmt_data or "url" not in fmt_data:
