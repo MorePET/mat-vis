@@ -29,6 +29,43 @@ calendar rebuilds.**
    `release.yml` — bake, build Parquet, upload assets, tag.
 4. **Versioning**: calver tags (`vYYYY.MM.N`).
 
+### Dual versioning
+
+- **Code releases** use semantic versioning (`v0.1.0`, `v0.2.0`)
+  via the vig-os release workflow. Tags code changes to the baker,
+  CI, and container images.
+- **Data releases** use calver (`v2026.04.0`, `v2026.04.1`) for
+  Parquet bundles and rowmaps. Each data release pins reproducible
+  texture bytes.
+
+Both are GitHub Releases on the same repo. Code releases push
+container images to GHCR. Data releases upload Parquet + rowmap
+assets.
+
+### CI pipeline
+
+CI is implemented via Dagger (Python SDK), not plain GitHub Actions
+YAML. The GHA workflow is a thin wrapper:
+
+```yaml
+- uses: dagger/dagger-for-github@v8.4.1
+  with:
+    verb: call
+    module: .dagger
+    args: test-all --src=.
+```
+
+Dagger functions: `build`, `lint`, `test`, `smoke`, `probe-sources`,
+`integration-test`, `bake-source`, `push`. All testable locally
+via `dagger call <function>`.
+
+### Watch workflow (deferred)
+
+`watch.yml` (daily upstream poll → auto PR) is specified but not
+yet implemented. Current workflow: manual bake dispatch via
+`bake.yml`. Watch automation planned for when all four source
+fetchers are production-stable.
+
 ### Tiered hosting for large tiers
 
 GitHub's Acceptable Use Policy reserves the right to act on

@@ -73,6 +73,52 @@ cached), then does pure-Python HTTP range reads (`urllib.request`
 with `Range` header) to pull individual materials from the Parquet.
 No pyarrow. No binary deps.
 
+## Integrity verification
+
+Each index entry includes a `texture_hashes` object mapping channel
+names to `{sha256, size}` pairs for the full-resolution baked PNGs:
+
+```json
+{
+  "id": "Rock064",
+  "texture_hashes": {
+    "color": {"sha256": "abc123...", "size": 2412010},
+    "normal": {"sha256": "def456...", "size": 6131828}
+  }
+}
+```
+
+(Full schema: `docs/specs/index-schema.json`)
+
+Hashes serve three purposes:
+
+1. **Upstream change detection** — `watch.yml` re-hashes upstream
+   PNGs; if a hash differs, the material is flagged for re-bake.
+2. **Client integrity** — after range-reading PNG bytes from the
+   Parquet, the client can verify SHA-256 against the index.
+3. **Audit trail** — git history shows exactly when each texture
+   changed (hash diff in index JSON).
+
+## Thumbnails and catalog
+
+The bake pipeline generates 128×128 PNG thumbnails for each channel,
+committed to `mtlx/<source>/<id>/<channel>_thumb.png`. These enable:
+
+- **Visual PR diffs** — GitHub natively renders PNG before/after.
+- **Browsable catalog** — `docs/catalog.md` (auto-generated) shows
+  all materials grouped by category with inline thumbnail images.
+
+## Container images
+
+The baker runs in two container variants, published to GHCR:
+
+- **Slim** (`ghcr.io/morepet/mat-vis-baker:<version>`) — Python +
+  pyarrow + Pillow + requests + uv. Used for devcontainer, CI,
+  and baking all sources except gpuopen layered graphs.
+- **MaterialX** (`ghcr.io/morepet/mat-vis-baker:<version>-materialx`)
+  — slim + MaterialX + OpenEXR. Prebuilt amd64 wheels, no C++
+  compilation. Used only for gpuopen layered graph baking.
+
 **Binary texture columns use UNCOMPRESSED Parquet encoding.** PNG
 is already internally compressed; Zstd on top saves ~2-5% but
 requires a decompressor on the client. UNCOMPRESSED means the

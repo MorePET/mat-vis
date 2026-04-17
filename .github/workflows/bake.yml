@@ -35,9 +35,9 @@ on:  # yamllint disable-line rule:truthy
         default: '50'
         type: string
       release-tag:
-        description: 'Release tag for rowmap metadata'
+        description: 'Calver data release tag (e.g. v2026.04.0)'
         required: false
-        default: 'v0.1.0'
+        default: 'v2026.04.0'
         type: string
 
 permissions:
