@@ -410,13 +410,20 @@ class MatVisCi:
 
     @function
     def _baker_container(self, context: dagger.Directory) -> dagger.Container:
-        """Baker container with code + gh CLI. Uses python:3.12-slim (public)."""
+        """Baker container with code + gh CLI."""
         pip_cache = dag.cache_volume("pip-cache")
-        gh_bin = dag.container().from_("ghcr.io/cli/cli:latest").file("/usr/bin/gh")
+        gh_cache = dag.cache_volume("gh-install")
         return (
             dag.container()
             .from_("python:3.12-slim")
-            .with_file("/usr/local/bin/gh", gh_bin)
+            .with_mounted_cache("/opt/gh-cache", gh_cache)
+            .with_exec(
+                [
+                    "sh",
+                    "-c",
+                    "if [ ! -f /usr/local/bin/gh ]; then apt-get update -qq && apt-get install -y -qq curl && curl -fsSL https://github.com/cli/cli/releases/download/v2.74.1/gh_2.74.1_linux_amd64.tar.gz | tar xz -C /opt/gh-cache && cp /opt/gh-cache/gh_2.74.1_linux_amd64/bin/gh /usr/local/bin/gh; fi",
+                ]
+            )
             .with_mounted_cache("/root/.cache/pip", pip_cache)
             .with_mounted_directory("/app", context)
             .with_workdir("/app")
