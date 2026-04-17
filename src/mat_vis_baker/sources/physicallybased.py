@@ -43,7 +43,10 @@ def fetch(*, session: requests.Session | None = None) -> list[MaterialRecord]:
     records: list[MaterialRecord] = []
     for mat in materials:
         name = mat.get("name", "")
-        cat = normalize_category(mat.get("category", ""))
+        raw_cat = mat.get("category", "")
+        if isinstance(raw_cat, list):
+            raw_cat = raw_cat[0] if raw_cat else ""
+        cat = normalize_category(raw_cat)
         color_hex = _rgb_to_hex(mat.get("color"))
 
         rec = MaterialRecord(
