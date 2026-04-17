@@ -78,13 +78,28 @@ jobs:
           path: /tmp/bake-out/
           retention-days: 30
 
-      - name: Attach assets to release
+      - name: Ensure pre-release exists
         if: inputs.release-tag != 'v0000.00.0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          TAG="${{ inputs.release-tag }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Creating pre-release $TAG..."
+            gh release create "$TAG" \
+              --title "$TAG — data release (pre-release)" \
+              --prerelease \
+              --notes "Data release. Assets attached by bake workflow. Promote with promote-data-release workflow."
+          fi
+
+      - name: Attach assets to pre-release
+        if: inputs.release-tag != 'v0000.00.0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ inputs.release-tag }}"
           for f in /tmp/bake-out/*.parquet /tmp/bake-out/*-rowmap.json /tmp/bake-out/release-manifest.json /tmp/bake-out/*.json; do
-            [ -f "$f" ] && gh release upload "${{ inputs.release-tag }}" "$f" --clobber || true
+            [ -f "$f" ] && gh release upload "$TAG" "$f" --clobber || true
           done
 
       - name: Generate app token for PR
