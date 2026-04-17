@@ -2,7 +2,7 @@
 name = "mat-vis-client"
 version = "2026.4.0"
 description = "Pure Python client for mat-vis PBR textures — HTTP range reads, zero deps"
-readme = "../../README.md"
+readme = {text = "Pure Python client for mat-vis PBR textures. Fetch materials via HTTP range reads from GitHub Releases. Zero dependencies.", content-type = "text/plain"}
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Lars Gerchow" }]
