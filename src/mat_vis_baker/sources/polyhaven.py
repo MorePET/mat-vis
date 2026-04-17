@@ -140,8 +140,13 @@ def fetch(
                 )
                 continue
 
-            cats = meta.get("categories", {})
-            cat_str = next(iter(cats.keys()), "") if cats else ""
+            raw_cats = meta.get("categories", [])
+            if isinstance(raw_cats, dict):
+                cat_str = next(iter(raw_cats.keys()), "")
+            elif isinstance(raw_cats, list) and raw_cats:
+                cat_str = raw_cats[0]
+            else:
+                cat_str = ""
             cat = normalize_category(cat_str)
             tags = meta.get("tags", [])
 
