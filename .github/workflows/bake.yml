@@ -76,7 +76,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cd /tmp/bake-out
-          for f in *.parquet *-rowmap.json *.json; do
+          for f in /tmp/bake-out/*.parquet /tmp/bake-out/*-rowmap.json /tmp/bake-out/*.json; do
             [ -f "$f" ] && gh release upload "${{ inputs.release-tag }}" "$f" --clobber || true
           done
