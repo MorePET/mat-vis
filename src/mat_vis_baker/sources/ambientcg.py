@@ -38,7 +38,7 @@ def discover(*, session: requests.Session | None = None) -> list[dict]:
     offset = 0
 
     while True:
-        url = f"{API_BASE}?type=Material&limit={PAGE_SIZE}&offset={offset}"
+        url = f"{API_BASE}?type=Material&limit={PAGE_SIZE}&offset={offset}&include=downloadData"
         resp = retry_request(url, session=s)
         data = resp.json()
         assets = data.get("foundAssets", [])
@@ -56,35 +56,33 @@ def discover(*, session: requests.Session | None = None) -> list[dict]:
 
 # ── download + extract ──────────────────────────────────────────
 
-_TIER_KEYS = {"1k": "1k-png", "2k": "2k-png", "4k": "4k-png", "8k": "8k-png"}
+_TIER_ATTRS = {"1k": "1K-PNG", "2k": "2K-PNG", "4k": "4K-PNG", "8k": "8K-PNG"}
 
 
 def _extract_download_url(entry: dict, tier: str) -> str | None:
-    """Get the ZIP download URL for a given tier from an API entry."""
+    """Get the ZIP download URL for a given tier from an API entry.
+
+    Downloads live under downloadFolders.default.downloadFiletypeCategories.zip.downloads[]
+    with the tier encoded in the `attribute` field (e.g. "1K-PNG").
+    """
     folders = entry.get("downloadFolders")
     if not folders:
         return None
 
-    tier_key = _TIER_KEYS.get(tier)
-    if not tier_key:
-        return None
-
-    # try exact key, then case-insensitive
-    folder = folders.get(tier_key)
-    if not folder:
-        for k, v in folders.items():
-            if k.lower() == tier_key.lower():
-                folder = v
-                break
-    if not folder:
+    target_attr = _TIER_ATTRS.get(tier)
+    if not target_attr:
         return None
 
     try:
-        cats = folder["downloadFiletypeCategories"]
-        zips = cats["zip"]["downloads"]
-        return zips[0]["fullDownloadPath"]
-    except (KeyError, IndexError):
+        downloads = folders["default"]["downloadFiletypeCategories"]["zip"]["downloads"]
+    except (KeyError, TypeError):
         return None
+
+    for dl in downloads:
+        if dl.get("attribute", "").upper() == target_attr:
+            return dl.get("fullDownloadPath")
+
+    return None
 
 
 _CHANNEL_RE = re.compile(r"_([A-Za-z]+)\.(png|jpg)$", re.IGNORECASE)
