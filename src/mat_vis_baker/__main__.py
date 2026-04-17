@@ -42,12 +42,16 @@ def _get_fetcher(source: str):
 
 
 def cmd_all(args: argparse.Namespace) -> int:
-    """Full pipeline: fetch → bake → pack → index."""
-    from mat_vis_baker.bake import bake_batch
+    """Full pipeline: fetch+bake (parallel) → pack (parallel per category) → index."""
+    from collections import defaultdict
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mat_vis_baker.bake import bake_material
+    from mat_vis_baker.common import hash_textures
     from mat_vis_baker.index_builder import build_index, write_index
     from mat_vis_baker.parquet_writer import (
         generate_rowmap,
-        write_partitioned_parquet,
+        write_parquet,
         write_rowmap,
     )
 
@@ -55,53 +59,65 @@ def cmd_all(args: argparse.Namespace) -> int:
     tier = args.tier
     output_dir = Path(args.output_dir)
     resolution_px = TIER_TO_PX[tier]
-
     mtlx_dir = output_dir / "mtlx"
+    thumb_dir = output_dir / "mtlx"
 
-    log.info("=== fetch %s %s ===", source, tier)
-    fetch = _get_fetcher(source)
+    # ── physicallybased: scalar only, no pipeline ──
     if source == "physicallybased":
-        records = fetch()  # scalar only, no tier/output_dir
-    else:
-        records = fetch(tier, output_dir / "textures", limit=args.limit, mtlx_dir=mtlx_dir)
-
-    if source == "physicallybased":
-        # Scalar only — no bake, no parquet, just index
+        log.info("=== fetch physicallybased ===")
+        fetch = _get_fetcher(source)
+        records = fetch()
         log.info("=== index (scalar only) ===")
         index_data = build_index(records, source)
         write_index(index_data, output_dir / f"{source}.json")
         log.info("=== done: %d records ===", len(records))
         return 0
 
-    log.info("=== bake ===")
-    thumb_dir = output_dir / "mtlx"
-    records = bake_batch(records, output_dir / "baked", tier, thumb_dir=thumb_dir)
+    # ── phase 1: fetch (parallel downloads, done inside fetcher) ──
+    log.info("=== fetch %s %s ===", source, tier)
+    fetch = _get_fetcher(source)
+    records = fetch(tier, output_dir / "textures", limit=args.limit, mtlx_dir=mtlx_dir)
+
+    # ── phase 2: bake + hash + thumbnail (parallel per material) ──
+    log.info("=== bake + hash + thumbnail (parallel) ===")
+
+    def _bake_one(rec):
+        if rec.status == "ok":
+            bake_material(rec, output_dir / "baked", thumb_dir, tier)
+            if rec.status == "ok":
+                hash_textures(rec)
+        return rec
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        records = list(pool.map(_bake_one, records))
 
     ok = [r for r in records if r.status == "ok"]
     total = len(records)
+    ok_pct = (len(ok) / total * 100) if total > 0 else 0
+    log.info("bake: %d ok, %d failed (%.1f%%)", len(ok), total - len(ok), ok_pct)
+
     if total > 0 and len(ok) / total < 0.95:
-        log.error(
-            "success rate %.1f%% < 95%% threshold (%d/%d)", len(ok) / total * 100, len(ok), total
-        )
+        log.error("success rate %.1f%% < 95%% threshold", ok_pct)
         return 1
 
-    log.info("=== pack (category-partitioned) ===")
-    pq_paths = write_partitioned_parquet(records, source, tier, output_dir, resolution_px)
-
-    # Generate one rowmap per partition
-    from collections import defaultdict
+    # ── phase 3: pack parquet + rowmap (parallel per category) ──
+    log.info("=== pack (parallel per category) ===")
 
     by_cat: dict[str, list] = defaultdict(list)
     for rec in ok:
         by_cat[rec.category].append(rec)
 
-    for pq_path in pq_paths:
-        # Extract category from filename: mat-vis-ambientcg-1k-metal.parquet → metal
-        cat = pq_path.stem.rsplit("-", 1)[-1]
-        cat_records = by_cat.get(cat, [])
-        if cat_records:
-            rowmap = generate_rowmap(pq_path, source, tier, args.release_tag, cat_records)
-            write_rowmap(rowmap, output_dir / f"{source}-{tier}-{cat}-rowmap.json")
+    def _pack_category(cat_and_records):
+        cat, cat_records = cat_and_records
+        pq_path = output_dir / f"mat-vis-{source}-{tier}-{cat}.parquet"
+        write_parquet(cat_records, source, tier, pq_path, resolution_px)
+        rowmap = generate_rowmap(pq_path, source, tier, args.release_tag, cat_records)
+        rm_path = output_dir / f"{source}-{tier}-{cat}-rowmap.json"
+        write_rowmap(rowmap, rm_path)
+        return pq_path
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(_pack_category, sorted(by_cat.items())))
 
     log.info("=== index ===")
     index_data = build_index(records, source)
