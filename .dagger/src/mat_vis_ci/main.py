@@ -427,10 +427,17 @@ class MatVisCi:
         context = src or dag.host().directory(".")
         pip_cache = dag.cache_volume("pip-cache")
 
-        # Build the baker container with code installed
+        # Build the baker container with code + gh CLI installed
         baker = (
             dag.container()
             .from_("python:3.12-slim")
+            .with_exec(
+                [
+                    "sh",
+                    "-c",
+                    "apt-get update -qq && apt-get install -y -qq curl && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' > /etc/apt/sources.list.d/github-cli.list && apt-get update -qq && apt-get install -y -qq gh",
+                ]
+            )
             .with_mounted_cache("/root/.cache/pip", pip_cache)
             .with_mounted_directory("/app", context)
             .with_workdir("/app")
