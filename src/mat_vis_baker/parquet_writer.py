@@ -293,6 +293,105 @@ def generate_rowmap(
     return rowmap
 
 
+def generate_rowmap_from_parquet(
+    parquet_path: Path,
+    source: str,
+    tier: str,
+    release_tag: str,
+) -> dict:
+    """Generate a rowmap by reading material IDs and PNG sizes from the parquet itself.
+
+    Unlike generate_rowmap(), this does not require MaterialRecords with on-disk
+    texture_paths. It reads the parquet row groups, extracts the material ID from
+    the 'id' column, and determines PNG byte length by reading each binary column's
+    data page to find the PNG payload boundaries (PNG magic to IEND chunk).
+    """
+    pf = pq.ParquetFile(parquet_path)
+    fh = open(parquet_path, "rb")  # noqa: SIM115 — kept open for seeking
+    meta = pf.metadata
+    parquet_name = parquet_path.name
+
+    # Map column name -> column index
+    col_name_to_idx = {}
+    schema = pf.schema_arrow
+    for i, field in enumerate(schema):
+        col_name_to_idx[field.name] = i
+
+    materials: dict[str, dict[str, dict[str, int]]] = {}
+
+    for rg_idx in range(meta.num_row_groups):
+        rg = meta.row_group(rg_idx)
+
+        # Read the material ID from this row group
+        table = pf.read_row_group(rg_idx, columns=["id"])
+        mid = table.column("id")[0].as_py()
+
+        channels: dict[str, dict[str, int]] = {}
+
+        for col_idx in range(rg.num_columns):
+            col_meta = rg.column(col_idx)
+            col_name = col_meta.path_in_schema
+
+            if col_name not in CHANNEL_COLS:
+                continue
+
+            # Check if column has data (non-null) by looking at stats
+            if col_meta.is_stats_set and col_meta.statistics.null_count == col_meta.num_values:
+                continue
+
+            page_offset = col_meta.data_page_offset
+            fh.seek(page_offset)
+            window = fh.read(_MAX_PAGE_HEADER_SIZE)
+            png_idx = window.find(PNG_MAGIC)
+            if png_idx < 0:
+                continue
+
+            png_start = page_offset + png_idx
+
+            # Read enough data to find the PNG IEND chunk and determine length.
+            # The total_compressed_size gives an upper bound on the data.
+            data_size = col_meta.total_compressed_size
+            fh.seek(png_start)
+            png_data = fh.read(data_size)
+
+            # Find IEND chunk: the 8-byte trailer is 4-byte CRC + 0x00000000 IEND + 4-byte CRC
+            # IEND marker is b'IEND' preceded by a 4-byte length (always 0)
+            iend_marker = b"IEND"
+            iend_pos = png_data.find(iend_marker)
+            if iend_pos < 0:
+                log.warning("%s/%s: IEND not found, skipping", mid, col_name)
+                continue
+
+            # PNG length = up to and including IEND chunk + its 4-byte CRC
+            png_length = iend_pos + len(iend_marker) + 4  # +4 for CRC after IEND
+
+            channels[col_name] = {
+                "offset": png_start,
+                "length": png_length,
+            }
+
+        if channels:
+            materials[mid] = channels
+
+    rowmap = {
+        "version": 1,
+        "release_tag": release_tag,
+        "source": source,
+        "tier": tier,
+        "parquet_file": parquet_name,
+        "materials": materials,
+    }
+
+    fh.close()
+
+    log.info(
+        "rowmap (from-parquet): %d materials, %d total channels",
+        len(materials),
+        sum(len(v) for v in materials.values()),
+    )
+    return rowmap
+
+
 def write_rowmap(rowmap: dict, output_path: Path) -> Path:
     """Write rowmap JSON to disk."""
     output_path.parent.mkdir(parents=True, exist_ok=True)

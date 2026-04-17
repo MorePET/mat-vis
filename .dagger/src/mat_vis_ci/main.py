@@ -14,6 +14,7 @@ Usage:
     dagger call test-client-shell    # bash tests for shell reference client
     dagger call test-client-rust     # cargo test for Rust reference client
     dagger call test-clients         # all 4 client tests in parallel
+    dagger call validate-release      # verify release assets are complete
     dagger call preflight            # verify GHCR auth before push
     dagger call push                 # preflight + build + push to GHCR
 """
@@ -152,6 +153,176 @@ print(f"  OK rowmap: {len(materials)} materials")
 print(f"  OK range-read: {verified} channels verified (all PNG)")
 print(f"  OK index: {len(index_files)} JSON files")
 print(f"\\nintegration test passed")
+'''
+
+
+VALIDATE_RELEASE_SCRIPT = '''\
+"""Validate all expected release assets exist and range reads work."""
+
+import json
+import os
+import random
+import sys
+import tempfile
+import urllib.request
+
+USER_AGENT = "mat-vis-validate/0.1"
+TEXTURE_TIERS = ["128", "256", "512", "1k", "2k"]
+REQUIRED_SOURCES = ["ambientcg", "polyhaven"]
+OPTIONAL_SOURCES = ["gpuopen"]
+
+
+def get(url, headers=None):
+    hdrs = {"User-Agent": USER_AGENT}
+    if headers:
+        hdrs.update(headers)
+    req = urllib.request.Request(url, headers=hdrs)
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return resp.read()
+
+
+def get_json(url):
+    return json.loads(get(url))
+
+
+tag = os.environ.get("VALIDATE_TAG", "v2026.04.0")
+release_base = f"https://github.com/MorePET/mat-vis/releases/download/{tag}"
+manifest_url = f"{release_base}/release-manifest.json"
+
+# ── 1. Fetch manifest ──
+print(f"=== validate-release {tag} ===\\n")
+try:
+    manifest = get_json(manifest_url)
+    print(f"  OK manifest fetched ({len(json.dumps(manifest))} bytes)")
+except Exception as e:
+    print(f"FAIL manifest: {e}")
+    sys.exit(1)
+
+tiers_data = manifest.get("tiers", {})
+failures = []
+passes = []
+
+# ── 2+3. Check texture sources per tier ──
+for tier in TEXTURE_TIERS:
+    if tier not in tiers_data:
+        failures.append(f"tier {tier}: missing from manifest")
+        continue
+
+    tier_info = tiers_data[tier]
+    base_url = tier_info.get("base_url", "")
+    sources_in_tier = tier_info.get("sources", {})
+
+    for source in REQUIRED_SOURCES:
+        label = f"{source}/{tier}"
+        if source not in sources_in_tier:
+            failures.append(f"{label}: missing from manifest")
+            continue
+
+        src_data = sources_in_tier[source]
+        rowmap_files = src_data.get("rowmap_files", [])
+        if not rowmap_files:
+            rm_file = src_data.get("rowmap_file", f"{source}-{tier}-rowmap.json")
+            rowmap_files = [rm_file]
+
+        # Verify at least one parquet + rowmap exists
+        if not rowmap_files:
+            failures.append(f"{label}: no rowmap files listed")
+            continue
+
+        # Fetch one rowmap, verify parquet reference
+        rm_url = base_url + rowmap_files[0]
+        try:
+            rowmap = get_json(rm_url)
+        except Exception as e:
+            failures.append(f"{label}: rowmap fetch failed: {e}")
+            continue
+
+        materials = rowmap.get("materials", {})
+        pq_file = rowmap.get("parquet_file", "")
+        if not materials:
+            failures.append(f"{label}: rowmap has 0 materials")
+            continue
+        if not pq_file:
+            failures.append(f"{label}: rowmap missing parquet_file")
+            continue
+
+        passes.append(f"{label}: rowmap OK ({len(materials)} materials, pq={pq_file})")
+
+        # ── 4. Pick one random material, range-read, verify PNG ──
+        mat_id = random.choice(list(materials.keys()))
+        channels = materials[mat_id]
+        ch_name = next(iter(channels))
+        rng = channels[ch_name]
+        offset = rng["offset"]
+        length = rng["length"]
+
+        pq_url = base_url + pq_file
+        range_header = f"bytes={offset}-{offset + length - 1}"
+        try:
+            data = get(pq_url, headers={"Range": range_header})
+            if data[:4] != b"\\x89PNG":
+                failures.append(
+                    f"{label}: range read {mat_id}/{ch_name} not PNG "
+                    f"(got {data[:4]!r})"
+                )
+            else:
+                passes.append(
+                    f"{label}: range read OK ({mat_id}/{ch_name}, "
+                    f"{len(data):,} bytes)"
+                )
+        except Exception as e:
+            failures.append(f"{label}: range read failed: {e}")
+
+    # Optional sources: just check if present, validate same way
+    for source in OPTIONAL_SOURCES:
+        label = f"{source}/{tier}"
+        if source not in sources_in_tier:
+            passes.append(f"{label}: not present (optional, OK)")
+            continue
+
+        src_data = sources_in_tier[source]
+        rowmap_files = src_data.get("rowmap_files", [])
+        if not rowmap_files:
+            rm_file = src_data.get("rowmap_file", f"{source}-{tier}-rowmap.json")
+            rowmap_files = [rm_file]
+
+        rm_url = base_url + rowmap_files[0]
+        try:
+            rowmap = get_json(rm_url)
+            materials = rowmap.get("materials", {})
+            if materials:
+                passes.append(f"{label}: rowmap OK ({len(materials)} materials)")
+            else:
+                failures.append(f"{label}: rowmap has 0 materials")
+        except Exception as e:
+            failures.append(f"{label}: rowmap fetch failed: {e}")
+
+# ── 5. Check physicallybased index JSON ──
+pb_label = "physicallybased/index"
+try:
+    pb_url = f"{release_base}/physicallybased.json"
+    pb_data = get_json(pb_url)
+    if isinstance(pb_data, list) and len(pb_data) > 0:
+        passes.append(f"{pb_label}: OK ({len(pb_data)} entries)")
+    else:
+        failures.append(f"{pb_label}: unexpected shape (got {type(pb_data).__name__})")
+except Exception as e:
+    failures.append(f"{pb_label}: {e}")
+
+# ── Report ──
+print()
+for p in passes:
+    print(f"  OK {p}")
+for f in failures:
+    print(f"FAIL {f}")
+
+total = len(passes) + len(failures)
+print(f"\\n{len(passes)}/{total} checks passed")
+if failures:
+    print(f"{len(failures)} FAILURES — release is incomplete")
+    sys.exit(1)
+else:
+    print("release validated successfully")
 '''
 
 
@@ -551,6 +722,36 @@ write_manifest(manifest, Path('/tmp/release-manifest.json'))
             self.build(context)
             .with_new_file("/tmp/probe.py", contents=PROBE_SCRIPT, permissions=0o755)
             .with_exec(["python", "/tmp/probe.py"])
+            .stdout()
+        )
+
+    # ── release validation ─────────────────────────────────────
+
+    @function
+    async def validate_release(
+        self,
+        tag: Annotated[str, Doc("Release tag to validate")] = "v2026.04.0",
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+    ) -> str:
+        """Validate all expected release assets exist and range reads work.
+
+        Checks the manifest, verifies every source x tier has parquet + rowmap,
+        picks one random material per combination for an HTTP range read, and
+        confirms PNG magic bytes. Exits non-zero on any failure.
+        """
+        context = src or dag.host().directory(".")
+        return await (
+            dag.container()
+            .from_("python:3.12-slim")
+            .with_mounted_directory("/app", context)
+            .with_workdir("/app")
+            .with_env_variable("VALIDATE_TAG", tag)
+            .with_new_file(
+                "/tmp/validate_release.py",
+                contents=VALIDATE_RELEASE_SCRIPT,
+                permissions=0o755,
+            )
+            .with_exec(["python", "/tmp/validate_release.py"])
             .stdout()
         )
 

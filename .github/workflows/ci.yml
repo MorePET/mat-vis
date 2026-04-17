@@ -41,6 +41,19 @@ jobs:
           module: .dagger
           args: test-clients --src=. --tag=v2026.04.0
 
+  # validate-release:
+  #   name: Validate release assets
+  #   runs-on: ubuntu-latest
+  #   # Not required yet — would block PRs during incremental bake cycles.
+  #   # Enable once the release is fully populated.
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dagger/dagger-for-github@v8.4.1
+  #       with:
+  #         verb: call
+  #         module: .dagger
+  #         args: validate-release --src=. --tag=v2026.04.0
+
   push:
     name: Push baker image to GHCR
     if: startsWith(github.ref, 'refs/tags/v')

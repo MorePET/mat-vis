@@ -2,6 +2,8 @@
 
 Usage:
     mat-vis-baker all <source> <tier> <output_dir> [--limit N] [--release-tag TAG]
+    mat-vis-baker derive <source> <tier> <source_dir> <output_dir> [--release-tag TAG]
+    mat-vis-baker derive-from-release <source> <tier> <output_dir> [--source-tier 1k] [--release-tag TAG] [--limit N]
     mat-vis-baker fetch <source> <tier> <output_dir> [--limit N]
 
 Called directly in release.yml. Not a user-facing tool.
@@ -310,6 +312,20 @@ def cmd_derive(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_derive_from_release(args: argparse.Namespace) -> int:
+    """Derive a smaller tier from an existing release's parquets (no download from upstream)."""
+    from mat_vis_baker.derive_from_release import derive_from_release
+
+    return derive_from_release(
+        source=args.source,
+        target_tier=args.tier,
+        output_dir=Path(args.output_dir),
+        source_tier=args.source_tier,
+        release_tag=args.release_tag,
+        limit=args.limit,
+    )
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     """Fetch only — download textures from upstream."""
     fetch = _get_fetcher(args.source)
@@ -342,6 +358,19 @@ def main() -> int:
     p_derive.add_argument("output_dir")
     p_derive.add_argument("--release-tag", default="v0000.00.0")
 
+    p_dfr = sub.add_parser(
+        "derive-from-release",
+        help="Derive smaller tier from existing release parquets (no upstream download)",
+    )
+    p_dfr.add_argument("source", choices=SOURCES)
+    p_dfr.add_argument("tier", choices=VALID_TIERS)
+    p_dfr.add_argument("output_dir")
+    p_dfr.add_argument(
+        "--source-tier", default="1k", choices=VALID_TIERS, help="Tier to read from (default: 1k)"
+    )
+    p_dfr.add_argument("--release-tag", default="v0000.00.0")
+    p_dfr.add_argument("--limit", type=int, default=None, help="Process only first N materials")
+
     p_fetch = sub.add_parser("fetch", help="Fetch textures from upstream")
     p_fetch.add_argument("source", choices=SOURCES)
     p_fetch.add_argument("tier", choices=VALID_TIERS)
@@ -354,6 +383,8 @@ def main() -> int:
         return cmd_all(args)
     if args.command == "derive":
         return cmd_derive(args)
+    if args.command == "derive-from-release":
+        return cmd_derive_from_release(args)
     if args.command == "fetch":
         return cmd_fetch(args)
 
