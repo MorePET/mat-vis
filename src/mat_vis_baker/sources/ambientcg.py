@@ -120,6 +120,11 @@ def _extract_maps_from_zip(zip_bytes: bytes, material_id: str, output_dir: Path)
 # ── main fetch ──────────────────────────────────────────────────
 
 
+def _filter_with_downloads(entries: list[dict], tier: str) -> list[dict]:
+    """Filter to entries that have a download URL for the given tier."""
+    return [e for e in entries if _extract_download_url(e, tier) is not None]
+
+
 def fetch(
     tier: str,
     output_dir: Path,
@@ -130,6 +135,10 @@ def fetch(
     """Fetch ambientcg materials for a given tier."""
     s = session or requests.Session()
     entries = discover(session=s)
+
+    # Filter to entries with downloads for this tier, then apply limit
+    entries = _filter_with_downloads(entries, tier)
+    log.info("%d materials have downloads for tier %s", len(entries), tier)
     if limit:
         entries = entries[:limit]
 
@@ -143,16 +152,6 @@ def fetch(
         name = entry.get("displayName", mid)
         try:
             dl_url = _extract_download_url(entry, tier)
-            if not dl_url:
-                log.warning("%s: no download for tier %s", mid, tier)
-                failed += 1
-                records.append(
-                    MaterialRecord(
-                        id=mid, source="ambientcg", name=name, category="other", status="failed"
-                    )
-                )
-                continue
-
             resp = retry_request(dl_url, session=s)
             textures = _extract_maps_from_zip(resp.content, mid, output_dir)
 
