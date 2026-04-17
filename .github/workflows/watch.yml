@@ -9,7 +9,7 @@ name: Watch upstream sources
 
 on:  # yamllint disable-line rule:truthy
   schedule:
-    - cron: "37 6 * * *"  # daily 06:37 UTC (off-minute to avoid thundering herd)
+    - cron: "37 6 * * 1"  # weekly Monday 06:37 UTC (sources update ~2-5 materials/week)
   workflow_dispatch:
     inputs:
       sources:
