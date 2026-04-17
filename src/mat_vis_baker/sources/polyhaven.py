@@ -23,7 +23,16 @@ log = logging.getLogger("mat-vis-baker.polyhaven")
 
 API_BASE = "https://api.polyhaven.com"
 
-_TIER_KEYS = {"1k": "1k", "2k": "2k", "4k": "4k", "8k": "8k"}
+# Sub-1k tiers download 1k and let the bake step resize
+_TIER_KEYS = {
+    "128": "1k",
+    "256": "1k",
+    "512": "1k",
+    "1k": "1k",
+    "2k": "2k",
+    "4k": "4k",
+    "8k": "8k",
+}
 
 
 # ── discovery ───────────────────────────────────────────────────

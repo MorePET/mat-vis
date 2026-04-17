@@ -37,8 +37,8 @@ HEADER = """\
 
 
 def _thumb_img(source: str, material_id: str, channel: str) -> str:
-    """Markdown image tag for a committed thumbnail."""
-    return f"![{channel}](mtlx/{source}/{material_id}/{channel}_thumb.png)"
+    """Markdown image tag for a committed thumbnail. Relative to docs/ directory."""
+    return f"![{channel}](../mtlx/{source}/{material_id}/{channel}_thumb.png)"
 
 
 def _texture_section(source: str, entries: list[dict], thumb_dir: Path) -> str:

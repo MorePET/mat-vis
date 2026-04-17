@@ -442,6 +442,8 @@ class MatVisCi:
                     "/tmp/out",
                     "--release-tag",
                     release_tag,
+                    "--also-derive",
+                    "128,256,512",
                 ]
             )
         )

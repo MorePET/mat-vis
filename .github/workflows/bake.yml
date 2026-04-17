@@ -66,6 +66,7 @@ jobs:
         run: |
           ARGS="mat-vis-baker all ${{ inputs.source }} ${{ inputs.tier }} /tmp/bake-out"
           ARGS="$ARGS --release-tag ${{ inputs.release-tag }}"
+          ARGS="$ARGS --also-derive 128,256,512"
           if [ "${{ inputs.limit }}" != "0" ] && [ -n "${{ inputs.limit }}" ]; then
             ARGS="$ARGS --limit ${{ inputs.limit }}"
           fi
@@ -98,16 +99,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ inputs.release-tag }}"
-          # Upload parquet, rowmaps, index JSON (not the per-bake manifest)
-          for f in /tmp/bake-out/*.parquet /tmp/bake-out/*-rowmap.json; do
-            [ -f "$f" ] && gh release upload "$TAG" "$f" --clobber || true
-          done
-          # Upload index JSON separately (skip manifest — rebuilt below)
-          for f in /tmp/bake-out/*.json; do
-            case "$(basename "$f")" in
-              release-manifest.json|*-rowmap.json) ;; # skip
-              *) gh release upload "$TAG" "$f" --clobber || true ;;
-            esac
+          SOURCE="${{ inputs.source }}"
+          # Upload all parquet + rowmap files (main tier + derived tiers)
+          for dir in /tmp/bake-out /tmp/${SOURCE}-*; do
+            [ -d "$dir" ] || continue
+            for f in "$dir"/*.parquet "$dir"/*-rowmap.json; do
+              [ -f "$f" ] && gh release upload "$TAG" "$f" --clobber || true
+            done
+            # Upload index JSON (skip manifest/rowmap)
+            for f in "$dir"/*.json; do
+              [ -f "$f" ] || continue
+              case "$(basename "$f")" in
+                release-manifest.json|*-rowmap.json) ;;
+                *) gh release upload "$TAG" "$f" --clobber || true ;;
+              esac
+            done
           done
 
       - name: Rebuild manifest from all release assets

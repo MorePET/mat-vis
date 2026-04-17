@@ -1,0 +1,540 @@
+[
+  {
+    "id": "Bricks104",
+    "source": "ambientcg",
+    "name": "Bricks 104",
+    "category": "other",
+    "tags": [
+      "104",
+      "bond",
+      "bricks",
+      "clean",
+      "masonry",
+      "modern",
+      "mortar",
+      "orange",
+      "red",
+      "simple",
+      "smooth",
+      "urban",
+      "wall"
+    ],
+    "source_url": "https://ambientcg.com/a/Bricks104",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "2026-04-02",
+    "texture_hashes": {
+      "ao": {
+        "sha256": "b23e9956a069c6d6f46f7593c78855cb65cdac0a1bff7b647a6e48d1576a6572",
+        "size": 218947
+      },
+      "color": {
+        "sha256": "99439ad0bed6d1d5cb8e27e4eb307adc885b87c4854b67bfefe147ff34bba9c6",
+        "size": 824359
+      },
+      "displacement": {
+        "sha256": "c0d2dd0192fe2e572a52fc3efa881b6b9f4c9eb14e41a0eb5dfed614c2119b46",
+        "size": 797985
+      },
+      "normal": {
+        "sha256": "43aee9756e5e99e752c908c07dbac8635202be4d2a3ec929b2e6e27c977cae8d",
+        "size": 2810398
+      },
+      "roughness": {
+        "sha256": "500b70a90f78342fde216479cc34f4817e3c86d401c4197d021fc1f88d3e5f59",
+        "size": 246101
+      }
+    }
+  },
+  {
+    "id": "Grass005",
+    "source": "ambientcg",
+    "name": "Grass 005",
+    "category": "organic",
+    "tags": [
+      "5",
+      "clean",
+      "grass",
+      "green",
+      "lawn",
+      "short"
+    ],
+    "source_url": "https://ambientcg.com/a/Grass005",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "2025-02-02",
+    "texture_hashes": {
+      "ao": {
+        "sha256": "8542721790de3e3fba140b9f94567d9ab415dcf40ffbf636c3abe2b9aba9ef65",
+        "size": 972127
+      },
+      "color": {
+        "sha256": "4460b603d9e65b588ddb3be8ef2621a0f860b7fddb74dcfac0f48aecc45a5f07",
+        "size": 2137182
+      },
+      "displacement": {
+        "sha256": "d882952e7d494401a55159fa61c346727211a0af7768e3d2442cfb88a616639b",
+        "size": 1977689
+      },
+      "normal": {
+        "sha256": "da9ebcd6b3025af633b06859b6949c9dfbcd2a0c605e3045b6f300562d089fee",
+        "size": 5888837
+      },
+      "roughness": {
+        "sha256": "31ebdabc2ed67a485d79ef31bee940925df0cf16ace63b2b6d132af2159ab592",
+        "size": 826513
+      }
+    }
+  },
+  {
+    "id": "Ground103",
+    "source": "ambientcg",
+    "name": "Ground 103",
+    "category": "organic",
+    "tags": [
+      "103",
+      "brown",
+      "dirt",
+      "earth",
+      "ground",
+      "natural",
+      "old",
+      "outdoor",
+      "rough",
+      "soil",
+      "uneven"
+    ],
+    "source_url": "https://ambientcg.com/a/Ground103",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "2026-01-12",
+    "texture_hashes": {
+      "ao": {
+        "sha256": "3f109855bd8d77a61f5f7f7a2f931a909167a722be63ef8f0383c0640dc8917f",
+        "size": 872515
+      },
+      "color": {
+        "sha256": "0d9461215ae355b6b34c85bac4102b7de8baba723b855e5a3114c3e2c0969f12",
+        "size": 2207560
+      },
+      "displacement": {
+        "sha256": "86d1a8a06206dcd5d62a661ecfe2ea34812d5ffa2251c1b9b4ec4ad55dbd6b73",
+        "size": 1710157
+      },
+      "normal": {
+        "sha256": "8b8f466a108f26ab30ec24afd3187795c21b03191776f918f50e080745e01be1",
+        "size": 6557244
+      },
+      "roughness": {
+        "sha256": "dfad44fb1ae9379a98a671e824c3f91c8c95093b162571c3258d65b6d3581b1c",
+        "size": 819374
+      }
+    }
+  },
+  {
+    "id": "Metal063",
+    "source": "ambientcg",
+    "name": "Metal 063",
+    "category": "metal",
+    "tags": [
+      "063",
+      "63",
+      "aged",
+      "black",
+      "brown",
+      "dark",
+      "fine",
+      "glossy",
+      "industrial",
+      "metal",
+      "oxidized",
+      "polished",
+      "rust",
+      "rusty",
+      "smooth",
+      "steel"
+    ],
+    "source_url": "https://ambientcg.com/a/Metal063",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "color",
+      "displacement",
+      "metalness",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "2026-03-30",
+    "texture_hashes": {
+      "color": {
+        "sha256": "7f5d0b9de1c43a4469a977ccb7cf96e5a103477ce485009166f826eb522d3576",
+        "size": 1923008
+      },
+      "displacement": {
+        "sha256": "c3c364a8df365fdc3ad94b7d14d5c8695ad5695b28871ac4d2ba94d0eb090ab0",
+        "size": 1949507
+      },
+      "metalness": {
+        "sha256": "f3ffdb20b3be70bbc044fd0764f949a3e33c254232a88e40311c382182bb0779",
+        "size": 517423
+      },
+      "normal": {
+        "sha256": "a2d95ba512c604cfff32799690eefcc022ba1c514172640e3a6053d3bcb3eef1",
+        "size": 3231413
+      },
+      "roughness": {
+        "sha256": "760f142cde10fac01a5f6f91bba58010964ed825a5b409ed2c9d473f04d9edf9",
+        "size": 714732
+      }
+    }
+  },
+  {
+    "id": "Road012A",
+    "source": "ambientcg",
+    "name": "Road 012 A",
+    "category": "other",
+    "tags": [
+      "012",
+      "12",
+      "asphalt",
+      "dark",
+      "durable",
+      "gray",
+      "industrial",
+      "modern",
+      "old",
+      "outdoor",
+      "pavement",
+      "road",
+      "rough",
+      "street",
+      "urban",
+      "worn"
+    ],
+    "source_url": "https://ambientcg.com/a/Road012A",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "2026-03-10",
+    "texture_hashes": {
+      "ao": {
+        "sha256": "b64d3e2cbd83bf8e447133e38add530e9265e3ed77fb6a7bba4e29a6f1527598",
+        "size": 789860
+      },
+      "color": {
+        "sha256": "17831a709d2f3cce25e721fca2d4abf13fd5772de702751e6928854d2326078f",
+        "size": 1348623
+      },
+      "displacement": {
+        "sha256": "a83de4408acfe1c8e6cbe65b7735a7b2a75305b8177d3969abaf794f1c3156e6",
+        "size": 1881016
+      },
+      "normal": {
+        "sha256": "301007789014035bf69bc8bcaa16661134874ca04ed6fbdb7dc2402abd2b271c",
+        "size": 6534426
+      },
+      "roughness": {
+        "sha256": "9f6a3ffa38d949b473218eb4d7a072016ede36d855f7c48b62ec203ea0ca352f",
+        "size": 669730
+      }
+    }
+  },
+  {
+    "id": "Rock063",
+    "source": "ambientcg",
+    "name": "Rock 063",
+    "category": "stone",
+    "tags": [
+      "063",
+      "63",
+      "aged",
+      "cliff",
+      "cracked",
+      "damaged",
+      "dirty",
+      "eroded",
+      "gray",
+      "green",
+      "layered",
+      "mossy",
+      "natural",
+      "outdoor",
+      "rock",
+      "rough",
+      "rustic",
+      "stone"
+    ],
+    "source_url": "https://ambientcg.com/a/Rock063",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "2026-02-22",
+    "texture_hashes": {
+      "ao": {
+        "sha256": "b41054654cb39fb10782fa7b646538ca95a3131608e977c26174ee6694f934c3",
+        "size": 303737
+      },
+      "color": {
+        "sha256": "494cbc5b1c781bb27f6859a4f34275c3b101ada4cb72e7bf189b3528d343ca80",
+        "size": 1275458
+      },
+      "displacement": {
+        "sha256": "ed7eb8e95022a51476404fa48ddabf18a5bbd2655185ce1ebeee64a2de16a077",
+        "size": 733165
+      },
+      "normal": {
+        "sha256": "2b697a91693f061fe598993cf5b6c65b982e80e8c833fffd962d1415e7149f2b",
+        "size": 3006145
+      },
+      "roughness": {
+        "sha256": "b06e3a67db176327c6d268d87233bba4281db2a783ad0393b838e025e79b0c97",
+        "size": 338827
+      }
+    }
+  },
+  {
+    "id": "Rock064",
+    "source": "ambientcg",
+    "name": "Rock 064",
+    "category": "stone",
+    "tags": [
+      "064",
+      "64",
+      "forest",
+      "gray",
+      "green",
+      "irregular",
+      "moss",
+      "mossy",
+      "natural",
+      "old",
+      "rock",
+      "rock064",
+      "rough",
+      "stacked",
+      "stone"
+    ],
+    "source_url": "https://ambientcg.com/a/Rock064",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "2026-04-14",
+    "texture_hashes": {
+      "ao": {
+        "sha256": "f7ef819504648efdc2ff0c4c9b04603d4e9eb0124705c6b953d63f28a1c4b03e",
+        "size": 537684
+      },
+      "color": {
+        "sha256": "c67046d29fa5efac4e22d82fd2ead97e03700b51be9467463c8ce2a55f213178",
+        "size": 2412010
+      },
+      "displacement": {
+        "sha256": "98957436198531396dec5aac8d273d615ef8a43f6d42a4a0923fcf783659ced8",
+        "size": 1527881
+      },
+      "normal": {
+        "sha256": "1f2980e8643887564e9a71aef6777382af196f067cb012b33e618212ffbd51f4",
+        "size": 6131828
+      },
+      "roughness": {
+        "sha256": "989e8f6886c1c047ad533403759ca0e38fd4304af3c6c413954b876ca0f7d980",
+        "size": 656810
+      }
+    }
+  },
+  {
+    "id": "Wood092",
+    "source": "ambientcg",
+    "name": "Wood 092",
+    "category": "wood",
+    "tags": [
+      "92",
+      "brown",
+      "clean",
+      "fine",
+      "orange",
+      "smooth",
+      "wood",
+      "wooden"
+    ],
+    "source_url": "https://ambientcg.com/a/Wood092",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "2024-03-20",
+    "texture_hashes": {
+      "color": {
+        "sha256": "bd68ea79908d3c5d96fe6c2fb11d74aec5dd12b82051e1f33a2bfb8a07e923c2",
+        "size": 1092692
+      },
+      "displacement": {
+        "sha256": "b9cec6f35c1bbb3eca21d35d4ed705f1c79867de623eb3eaba0eafb66a021d98",
+        "size": 1750607
+      },
+      "normal": {
+        "sha256": "a17efe7658824f0ae1644f2e372193315d01e80302dd18fba7acc8bf2b70c14a",
+        "size": 4722934
+      },
+      "roughness": {
+        "sha256": "eb7eda8a72254bec750a355e4d06f1605eddc7bd6806c006d29f3a2a7799d555",
+        "size": 424973
+      }
+    }
+  },
+  {
+    "id": "Wood094",
+    "source": "ambientcg",
+    "name": "Wood 094",
+    "category": "wood",
+    "tags": [
+      "94",
+      "brown",
+      "smooth",
+      "wood",
+      "wooden"
+    ],
+    "source_url": "https://ambientcg.com/a/Wood094",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "2025-07-12",
+    "texture_hashes": {
+      "color": {
+        "sha256": "64ea35bb2cd4336e7ce75540a379541e1b4be005c3dabf18208ef2f4f09ecdc5",
+        "size": 1172436
+      },
+      "displacement": {
+        "sha256": "e838a3c94d2836dcec4673fe71cad08209c3719f388c3070026c3a31b07d6c85",
+        "size": 1812024
+      },
+      "normal": {
+        "sha256": "f3bcea40b007fa37c147ec118ec2d41652b71975142ce8d252e5cd1e5dc277b2",
+        "size": 4115095
+      },
+      "roughness": {
+        "sha256": "fcd8bccae0925f713430bc84b7ac370358f5ea424a65983b4df38b9fdf1bc75e",
+        "size": 264851
+      }
+    }
+  },
+  {
+    "id": "Wood095",
+    "source": "ambientcg",
+    "name": "Wood 095",
+    "category": "wood",
+    "tags": [
+      "095",
+      "95",
+      "beige",
+      "clean",
+      "indoor",
+      "light",
+      "minimalist",
+      "modern",
+      "natural",
+      "polished",
+      "rustic",
+      "smooth",
+      "subtle",
+      "uniform",
+      "wood"
+    ],
+    "source_url": "https://ambientcg.com/a/Wood095",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "2026-03-08",
+    "texture_hashes": {
+      "color": {
+        "sha256": "db7abc2ff1e3ec39be84a9e199d1d4b1195e6cc2c202ba5e06ad4069929895ae",
+        "size": 703467
+      },
+      "displacement": {
+        "sha256": "5a03496440deab8a0121b7c02165a23347582cda4f3c08b14988756f70279406",
+        "size": 905181
+      },
+      "normal": {
+        "sha256": "aa675eaa9afa99d91188a9a243ea06e8231f110836a0aefda6b5b306d0d5b568",
+        "size": 2953911
+      },
+      "roughness": {
+        "sha256": "bbfa72df42407f3eb2159127b1bc1f7fa74bf9223b7e92843b6833dae1603bc7",
+        "size": 234757
+      }
+    }
+  }
+]
