@@ -182,7 +182,7 @@ def write_partitioned_parquet(
 # ── rowmap generation ───────────────────────────────────────────
 
 
-_MAX_PAGE_HEADER_SIZE = 100  # Thrift page header is typically 13-50 bytes
+_MAX_PAGE_HEADER_SIZE = 256  # Thrift page header can be larger for nullable columns
 
 
 def _find_png_in_page(data: bytes, page_offset: int, png_length: int) -> int | None:
