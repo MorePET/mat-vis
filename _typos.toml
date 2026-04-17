@@ -1,0 +1,4 @@
+# Typos configuration — domain-specific words that are correct.
+[default.extend-words]
+# PBR standard term for metallic property (0-1 scalar)
+metalness = "metalness"

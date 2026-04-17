@@ -92,6 +92,63 @@ if ok < len(SOURCES):
     sys.exit(1)
 '''
 
+VERIFY_SCRIPT = '''\
+"""Verify integration test output: parquet + rowmap + range-read."""
+
+import json
+import sys
+from pathlib import Path
+
+out_dir = Path(sys.argv[1])
+
+# Check files exist
+pq_files = list(out_dir.glob("*.parquet"))
+assert pq_files, f"No parquet files in {out_dir}"
+pq_path = pq_files[0]
+
+rowmap_files = list(out_dir.glob("*-rowmap.json"))
+assert rowmap_files, f"No rowmap files in {out_dir}"
+
+index_files = list(out_dir.glob("*.json"))
+assert any("rowmap" not in f.name for f in index_files), "No index JSON"
+
+# Load rowmap and verify range reads
+rowmap = json.loads(rowmap_files[0].read_text())
+file_bytes = pq_path.read_bytes()
+
+materials = rowmap["materials"]
+assert len(materials) > 0, "Rowmap has no materials"
+
+verified = 0
+errors = []
+for mid, channels in materials.items():
+    for ch, rng in channels.items():
+        offset = rng["offset"]
+        length = rng["length"]
+        chunk = file_bytes[offset : offset + length]
+        if chunk[:4] != b"\\x89PNG":
+            errors.append(f"{mid}/{ch}: not PNG at offset {offset} (got {chunk[:4]!r})")
+            continue
+        if len(chunk) != length:
+            errors.append(
+                f"{mid}/{ch}: length mismatch at offset {offset}"
+                f" (expected {length}, got {len(chunk)}, file_size={len(file_bytes)})"
+            )
+            continue
+        verified += 1
+
+if errors:
+    for e in errors:
+        print(f"  FAIL {e}")
+    sys.exit(1)
+
+print(f"  OK parquet: {pq_path.name} ({len(file_bytes)} bytes)")
+print(f"  OK rowmap: {len(materials)} materials")
+print(f"  OK range-read: {verified} channels verified (all PNG)")
+print(f"  OK index: {len(index_files)} JSON files")
+print(f"\\nintegration test passed")
+'''
+
 
 @object_type
 class MatVisCi:
@@ -194,6 +251,88 @@ class MatVisCi:
             f"=== smoke ===\n{smoke_out}\n"
             f"=== probe ===\n{probe_out}"
         )
+
+    # ── integration test ──────────────────────────────────────────
+
+    @function
+    async def integration_test(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+    ) -> str:
+        """End-to-end: fetch 2 ambientcg materials → bake → pack → rowmap → range-read verify.
+
+        Runs native (no platform override) — tests pipeline logic, not the amd64 image.
+        """
+        context = src or dag.host().directory(".")
+        pip_cache = dag.cache_volume("pip-cache")
+        return await (
+            dag.container()
+            .from_("python:3.12-slim")
+            .with_mounted_cache("/root/.cache/pip", pip_cache)
+            .with_mounted_directory("/app", context)
+            .with_workdir("/app")
+            .with_exec(["pip", "install", "--quiet", "-e", ".[baker]"])
+            .with_exec(
+                [
+                    "mat-vis-baker",
+                    "all",
+                    "ambientcg",
+                    "1k",
+                    "/tmp/integration",
+                    "--limit",
+                    "2",
+                ]
+            )
+            .with_new_file(
+                "/tmp/verify.py",
+                contents=VERIFY_SCRIPT,
+                permissions=0o755,
+            )
+            .with_exec(["python", "/tmp/verify.py", "/tmp/integration"])
+            .stdout()
+        )
+
+    # ── bake pipeline ─────────────────────────────────────────────
+
+    @function
+    async def bake_source(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        source: Annotated[str, Doc("Source name")] = "ambientcg",
+        tier: Annotated[str, Doc("Resolution tier")] = "1k",
+        release_tag: Annotated[str, Doc("Release tag for rowmap")] = "v0000.00.0",
+    ) -> dagger.Directory:
+        """Run full baker pipeline for one source+tier. Returns directory with artifacts.
+
+        Output directory contains:
+        - mat-vis-<source>-<tier>.parquet
+        - <source>-<tier>-rowmap.json
+        - <source>.json (index)
+        """
+        context = src or dag.host().directory(".")
+        pip_cache = dag.cache_volume("pip-cache")
+
+        ctr = (
+            dag.container()
+            .from_("python:3.12-slim")
+            .with_mounted_cache("/root/.cache/pip", pip_cache)
+            .with_mounted_directory("/app", context)
+            .with_workdir("/app")
+            .with_exec(["pip", "install", "--quiet", "-e", ".[baker]"])
+            .with_exec(
+                [
+                    "mat-vis-baker",
+                    "all",
+                    source,
+                    tier,
+                    "/tmp/out",
+                    "--release-tag",
+                    release_tag,
+                ]
+            )
+        )
+
+        return ctr.directory("/tmp/out")
 
     # ── source probes ─────────────────────────────────────────────
 
