@@ -190,6 +190,122 @@ def cmd_all(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_derive(args: argparse.Namespace) -> int:
+    """Derive a smaller tier from existing bake output — resize, repack, no download."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mat_vis_baker.bake import _validate_and_resize_png
+    from mat_vis_baker.common import TIER_TO_PX, hash_textures
+    from mat_vis_baker.index_builder import build_index, write_index
+    from mat_vis_baker.parquet_writer import generate_rowmap, write_parquet, write_rowmap
+
+    source_dir = Path(args.source_dir)
+    target_tier = args.tier
+    target_px = TIER_TO_PX[target_tier]
+    output_dir = Path(args.output_dir)
+    source = args.source
+
+    # Find existing texture files from a previous bake
+    tex_dir = source_dir / "textures"
+    if not tex_dir.exists():
+        log.error("No textures dir at %s — run 'all' first", tex_dir)
+        return 1
+
+    import json
+
+    index_path = source_dir / f"{source}.json"
+    if not index_path.exists():
+        log.error("No index at %s — run 'all' first", index_path)
+        return 1
+
+    index_data = json.loads(index_path.read_text())
+    ok_entries = [e for e in index_data if e.get("status") != "failed"]
+    log.info("deriving %s from %d materials at %dpx", target_tier, len(ok_entries), target_px)
+
+    t0 = time.monotonic()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_tex = output_dir / "textures"
+
+    from mat_vis_baker.common import MaterialRecord
+
+    records = []
+
+    def _derive_one(entry):
+        mid = entry["id"]
+        src_mat = tex_dir / mid
+        if not src_mat.exists():
+            return None
+        dst_mat = out_tex / mid
+        dst_mat.mkdir(parents=True, exist_ok=True)
+        paths = {}
+        for ch in entry.get("maps", []):
+            src_png = src_mat / f"{ch}.png"
+            if not src_png.exists():
+                continue
+            dst_png = dst_mat / f"{ch}.png"
+            import shutil
+
+            shutil.copy2(src_png, dst_png)
+            _validate_and_resize_png(dst_png, target_px)
+            paths[ch] = dst_png
+
+        if not paths:
+            return None
+
+        rec = MaterialRecord(
+            id=mid,
+            source=source,
+            name=entry.get("name", mid),
+            category=entry.get("category", "other"),
+            tags=entry.get("tags", []),
+            source_url=entry.get("source_url", ""),
+            source_license=entry.get("source_license", "CC0-1.0"),
+            last_updated=entry.get("last_updated", ""),
+            available_tiers=[target_tier],
+            maps=sorted(paths.keys()),
+            texture_paths=paths,
+        )
+        hash_textures(rec)
+        return rec
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(_derive_one, ok_entries))
+
+    records = [r for r in results if r is not None]
+    t_derive = time.monotonic() - t0
+    log.info("PERF derive: %.1fs, %d materials at %dpx", t_derive, len(records), target_px)
+
+    # Pack
+    from collections import defaultdict as _dd
+
+    by_cat: dict[str, list] = _dd(list)
+    for rec in records:
+        by_cat[rec.category].append(rec)
+
+    t1 = time.monotonic()
+    for cat, cat_records in sorted(by_cat.items()):
+        pq_path = output_dir / f"mat-vis-{source}-{target_tier}-{cat}.parquet"
+        write_parquet(cat_records, source, target_tier, pq_path, target_px)
+        rowmap = generate_rowmap(pq_path, source, target_tier, args.release_tag, cat_records)
+        write_rowmap(rowmap, output_dir / f"{source}-{target_tier}-{cat}-rowmap.json")
+
+    t_pack = time.monotonic() - t1
+
+    # Index
+    index_out = build_index(records, source)
+    write_index(index_out, output_dir / f"{source}.json")
+
+    log.info(
+        "PERF derive total: %.1fs (derive %.1fs + pack %.1fs), %d materials",
+        time.monotonic() - t0,
+        t_derive,
+        t_pack,
+        len(records),
+    )
+    return 0
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     """Fetch only — download textures from upstream."""
     fetch = _get_fetcher(args.source)
@@ -211,6 +327,19 @@ def main() -> int:
     p_all.add_argument("output_dir")
     p_all.add_argument("--limit", type=int, default=None)
     p_all.add_argument("--release-tag", default="v0000.00.0")
+    p_all.add_argument(
+        "--also-derive",
+        help="Comma-separated smaller tiers to derive (e.g. 128,256,512)",
+    )
+
+    p_derive = sub.add_parser("derive", help="Derive smaller tier from existing bake output")
+    p_derive.add_argument("source", choices=SOURCES)
+    p_derive.add_argument("tier", choices=VALID_TIERS)
+    p_derive.add_argument(
+        "source_dir", help="Directory with existing bake output (textures + index)"
+    )
+    p_derive.add_argument("output_dir")
+    p_derive.add_argument("--release-tag", default="v0000.00.0")
 
     p_fetch = sub.add_parser("fetch", help="Fetch textures from upstream")
     p_fetch.add_argument("source", choices=SOURCES)
@@ -221,7 +350,26 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "all":
-        return cmd_all(args)
+        rc = cmd_all(args)
+        if rc == 0 and args.also_derive:
+            for dtier in args.also_derive.split(","):
+                dtier = dtier.strip()
+                log.info("=== deriving tier %s ===", dtier)
+                import argparse as _ap
+
+                dargs = _ap.Namespace(
+                    source=args.source,
+                    tier=dtier,
+                    source_dir=args.output_dir,
+                    output_dir=str(Path(args.output_dir).parent / f"{args.source}-{dtier}"),
+                    release_tag=args.release_tag,
+                )
+                drc = cmd_derive(dargs)
+                if drc != 0:
+                    log.error("derive %s failed", dtier)
+        return rc
+    if args.command == "derive":
+        return cmd_derive(args)
     if args.command == "fetch":
         return cmd_fetch(args)
 
