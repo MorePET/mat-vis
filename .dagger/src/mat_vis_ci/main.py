@@ -420,19 +420,19 @@ class MatVisCi:
         )
 
     @function
-    async def bake_batch(
+    async def bake_and_release(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
         source: Annotated[str, Doc("Source name")] = "ambientcg",
         tier: Annotated[str, Doc("Resolution tier")] = "1k",
         release_tag: Annotated[str, Doc("Release tag")] = "v0000.00.0",
-        offset: Annotated[int, Doc("Skip first N materials")] = 0,
-        limit: Annotated[int, Doc("Max materials in this batch")] = 100,
-        registry_pass: Annotated[dagger.Secret | None, Doc("GH token for upload")] = None,
+        limit: Annotated[int, Doc("Max materials (0 = all)")] = 0,
+        registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
     ) -> str:
-        """Bake one batch of materials. Small container, no OOM.
+        """Bake all materials → upload to release → rebuild manifest.
 
-        Each batch: fetch offset..offset+limit → bake → pack → upload → die.
+        Single container. Streaming parquet writer — constant memory.
+        No OOM regardless of source size.
         """
         context = src or dag.host().directory(".")
         baker = self._baker_container(context)
@@ -445,11 +445,10 @@ class MatVisCi:
             "/tmp/out",
             "--release-tag",
             release_tag,
-            "--offset",
-            str(offset),
-            "--limit",
-            str(limit),
         ]
+        if limit > 0:
+            bake_cmd.extend(["--limit", str(limit)])
+
         baker = baker.with_exec(bake_cmd)
 
         # Upload to release
@@ -471,104 +470,28 @@ class MatVisCi:
                 ]
             )
 
-        return await baker.stdout()
-
-    @function
-    async def bake_and_release(
-        self,
-        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        source: Annotated[str, Doc("Source name")] = "ambientcg",
-        tier: Annotated[str, Doc("Resolution tier")] = "1k",
-        release_tag: Annotated[str, Doc("Release tag")] = "v0000.00.0",
-        batch_size: Annotated[int, Doc("Materials per batch")] = 100,
-        registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
-    ) -> str:
-        """Fan out into parallel batches, then rebuild manifest.
-
-        Each batch runs in its own container (~500 MB RAM). No OOM.
-        """
-        import asyncio
-
-        context = src or dag.host().directory(".")
-
-        # Discover total material count
-        baker = self._baker_container(context)
-        count_str = await baker.with_exec(
-            [
-                "python3",
-                "-c",
-                f"""
-try:
-    from mat_vis_baker.sources.{source} import discover
-    data = discover()
-    print(len(data) if isinstance(data, (list, dict)) else 0)
-except ImportError:
-    # physicallybased has no discover — use fetch directly
-    from mat_vis_baker.sources.{source} import fetch
-    data = fetch()
-    print(len(data))
-""",
-            ]
-        ).stdout()
-        total = int(count_str.strip())
-
-        # For small sources or scalar-only, single batch is fine
-        if total <= batch_size or source == "physicallybased":
-            return await self.bake_batch(
-                src=context,
-                source=source,
-                tier=tier,
-                release_tag=release_tag,
-                offset=0,
-                limit=total,
-                registry_pass=registry_pass,
-            )
-
-        # Fan out batches for large sources
-        offsets = list(range(0, total, batch_size))
-        await asyncio.gather(
-            *[
-                self.bake_batch(
-                    src=context,
-                    source=source,
-                    tier=tier,
-                    release_tag=release_tag,
-                    offset=off,
-                    limit=batch_size,
-                    registry_pass=registry_pass,
-                )
-                for off in offsets
-            ]
-        )
-
-        # Rebuild manifest
-        if release_tag != "v0000.00.0" and registry_pass is not None:
-            manifest_baker = self._baker_container(context)
-            manifest_baker = manifest_baker.with_secret_variable("GH_TOKEN", registry_pass)
-            await (
-                manifest_baker.with_exec(
-                    [
-                        "python3",
-                        "-c",
-                        f"""
+            # Rebuild manifest from all release assets
+            baker = baker.with_exec(
+                [
+                    "python3",
+                    "-c",
+                    f"""
 from pathlib import Path
 from mat_vis_baker.manifest import rebuild_manifest_from_release, write_manifest
 manifest = rebuild_manifest_from_release('{release_tag}')
 write_manifest(manifest, Path('/tmp/release-manifest.json'))
 """,
-                    ]
-                )
-                .with_exec(
-                    [
-                        "sh",
-                        "-c",
-                        f"gh release upload {release_tag} /tmp/release-manifest.json --clobber",
-                    ]
-                )
-                .stdout()
+                ]
+            )
+            baker = baker.with_exec(
+                [
+                    "sh",
+                    "-c",
+                    f"gh release upload {release_tag} /tmp/release-manifest.json --clobber",
+                ]
             )
 
-        return f"Baked {total} materials in {len(offsets)} batches"
+        return await baker.stdout()
 
     @function
     async def bake_source(

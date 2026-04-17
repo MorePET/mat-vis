@@ -24,10 +24,10 @@ on:  # yamllint disable-line rule:truthy
         options:
           - 1k
           - 2k
-      batch-size:
-        description: 'Materials per batch (default 100)'
+      limit:
+        description: 'Max materials (0 = all)'
         required: false
-        default: '100'
+        default: '0'
         type: string
       release-tag:
         description: 'Calver data release tag (e.g. v2026.04.0)'
@@ -55,7 +55,7 @@ jobs:
             --src=.
             --source=${{ inputs.source }}
             --tier=${{ inputs.tier }}
-            --batch-size=${{ inputs.batch-size }}
+            --limit=${{ inputs.limit }}
             --release-tag=${{ inputs.release-tag }}
             --registry-pass=env:GITHUB_TOKEN
         env:
