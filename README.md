@@ -16,7 +16,7 @@ from mat_vis_client import MatVisClient
 
 client = MatVisClient()                                      # auto-discovers latest release
 png = client.fetch_texture("ambientcg", "Rock064", "color")  # 1k PNG bytes, one HTTP range read
-materials = client.search("wood")                             # search across all sources
+results = client.search(category="wood")                      # filter by category
 ```
 
 ## Architecture
