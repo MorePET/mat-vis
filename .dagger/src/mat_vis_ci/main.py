@@ -410,10 +410,14 @@ class MatVisCi:
 
     @function
     def _baker_container(self, context: dagger.Directory) -> dagger.Container:
-        """Baker container from GHCR — has uv, gh, pyarrow, pillow, requests pre-installed."""
+        """Baker container with code + gh CLI. Uses python:3.12-slim (public)."""
+        pip_cache = dag.cache_volume("pip-cache")
+        gh_bin = dag.container().from_("ghcr.io/cli/cli:latest").file("/usr/bin/gh")
         return (
             dag.container()
-            .from_(f"{IMAGE}:latest")
+            .from_("python:3.12-slim")
+            .with_file("/usr/local/bin/gh", gh_bin)
+            .with_mounted_cache("/root/.cache/pip", pip_cache)
             .with_mounted_directory("/app", context)
             .with_workdir("/app")
             .with_exec(["pip", "install", "--quiet", "-e", ".[baker]"])
