@@ -68,7 +68,8 @@ def cmd_all(args: argparse.Namespace) -> int:
         return 0
 
     log.info("=== bake ===")
-    records = bake_batch(records, output_dir / "baked", tier)
+    thumb_dir = output_dir / "mtlx"
+    records = bake_batch(records, output_dir / "baked", tier, thumb_dir=thumb_dir)
 
     ok = [r for r in records if r.status == "ok"]
     total = len(records)
@@ -88,6 +89,12 @@ def cmd_all(args: argparse.Namespace) -> int:
     log.info("=== index ===")
     index_data = build_index(records, source)
     write_index(index_data, output_dir / f"{source}.json")
+
+    log.info("=== catalog ===")
+    from mat_vis_baker.catalog import generate_catalog, write_catalog
+
+    catalog_md = generate_catalog(output_dir, output_dir / "mtlx")
+    write_catalog(catalog_md, output_dir / "catalog.md")
 
     log.info("=== done: %d ok, %d failed ===", len(ok), total - len(ok))
     return 0
