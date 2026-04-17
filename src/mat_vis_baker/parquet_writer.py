@@ -58,40 +58,51 @@ def write_parquet(
     output_path: Path,
     resolution_px: int,
 ) -> Path:
-    """Write a Parquet file from MaterialRecords. Returns output path."""
+    """Write a Parquet file streaming one row at a time. Constant memory.
+
+    Each material's PNGs are read, written as a single row group, then freed.
+    Never holds more than one material's textures in memory.
+    """
     ok_records = [r for r in records if r.status == "ok"]
     if not ok_records:
         raise ValueError("No successful records to write")
 
     now = datetime.now(timezone.utc).isoformat()
-
-    rows: dict[str, list] = {f.name: [] for f in _SCHEMA}
-    for rec in ok_records:
-        rows["id"].append(rec.id)
-        rows["source"].append(source)
-        rows["category"].append(rec.category)
-        rows["resolution_px"].append(resolution_px)
-        for ch in CANONICAL_CHANNELS:
-            rows[ch].append(_read_png_bytes(rec.texture_paths.get(ch)))
-        rows["source_url"].append(rec.source_url)
-        rows["source_license"].append(rec.source_license)
-        rows["baker_version"].append(BAKER_VERSION)
-        rows["baked_at"].append(now)
-
-    table = pa.table(rows, schema=_SCHEMA)
-
-    compression = {col: "NONE" if col in CHANNEL_COLS else "ZSTD" for col in table.column_names}
-    use_dictionary = {col: col not in CHANNEL_COLS for col in table.column_names}
+    compression = {
+        col: "NONE" if col in CHANNEL_COLS else "ZSTD" for col in [f.name for f in _SCHEMA]
+    }
+    use_dictionary = {col: col not in CHANNEL_COLS for col in [f.name for f in _SCHEMA]}
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(
-        table,
+
+    writer = pq.ParquetWriter(
         output_path,
+        _SCHEMA,
         compression=compression,
         use_dictionary=use_dictionary,
-        row_group_size=1,
-        write_statistics=True,
     )
+
+    try:
+        for rec in ok_records:
+            # Build one row — read PNGs, write, free
+            row = {
+                "id": [rec.id],
+                "source": [source],
+                "category": [rec.category],
+                "resolution_px": [resolution_px],
+                "source_url": [rec.source_url],
+                "source_license": [rec.source_license],
+                "baker_version": [BAKER_VERSION],
+                "baked_at": [now],
+            }
+            for ch in CANONICAL_CHANNELS:
+                row[ch] = [_read_png_bytes(rec.texture_paths.get(ch))]
+
+            table = pa.table(row, schema=_SCHEMA)
+            writer.write_table(table)
+            del row, table  # free PNG bytes immediately
+    finally:
+        writer.close()
 
     log.info(
         "wrote %s (%d rows, %.1f MB)",
