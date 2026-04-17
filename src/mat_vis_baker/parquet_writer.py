@@ -102,6 +102,19 @@ def write_parquet(
     return output_path
 
 
+MAX_PARTITION_BYTES = 1_800_000_000  # 1.8 GB — stay under GitHub's 2 GB limit
+
+
+def _estimate_partition_size(records: list[MaterialRecord]) -> int:
+    """Estimate parquet size from texture file sizes."""
+    total = 0
+    for rec in records:
+        for ch, path in rec.texture_paths.items():
+            if not ch.startswith("_") and path.exists():
+                total += path.stat().st_size
+    return total
+
+
 def write_partitioned_parquet(
     records: list[MaterialRecord],
     source: str,
@@ -109,10 +122,10 @@ def write_partitioned_parquet(
     output_dir: Path,
     resolution_px: int,
 ) -> list[Path]:
-    """Write category-partitioned parquet files. Returns list of paths.
+    """Write size-aware partitioned parquet files. Returns list of paths.
 
-    Naming: mat-vis-<source>-<tier>-<category>.parquet
-    Each file stays under GitHub's 2 GB per-asset limit.
+    First partitions by category. If a category exceeds MAX_PARTITION_BYTES,
+    splits further into numbered chunks (alphabetical by material ID).
     """
     from collections import defaultdict
 
@@ -128,11 +141,33 @@ def write_partitioned_parquet(
     paths: list[Path] = []
 
     for cat in sorted(by_cat.keys()):
-        cat_records = by_cat[cat]
-        filename = f"mat-vis-{source}-{tier}-{cat}.parquet"
-        path = output_dir / filename
-        write_parquet(cat_records, source, tier, path, resolution_px)
-        paths.append(path)
+        cat_records = sorted(by_cat[cat], key=lambda r: r.id)
+        est_size = _estimate_partition_size(cat_records)
+
+        if est_size <= MAX_PARTITION_BYTES:
+            # Single partition
+            filename = f"mat-vis-{source}-{tier}-{cat}.parquet"
+            path = output_dir / filename
+            write_parquet(cat_records, source, tier, path, resolution_px)
+            paths.append(path)
+        else:
+            # Split into chunks that fit under the limit
+            n_chunks = (est_size // MAX_PARTITION_BYTES) + 1
+            chunk_size = max(1, len(cat_records) // n_chunks)
+            log.info(
+                "%s: %.1f GB estimated, splitting into %d chunks of ~%d materials",
+                cat,
+                est_size / 1e9,
+                n_chunks,
+                chunk_size,
+            )
+            for i in range(0, len(cat_records), chunk_size):
+                chunk = cat_records[i : i + chunk_size]
+                chunk_num = (i // chunk_size) + 1
+                filename = f"mat-vis-{source}-{tier}-{cat}-{chunk_num}.parquet"
+                path = output_dir / filename
+                write_parquet(chunk, source, tier, path, resolution_px)
+                paths.append(path)
 
     log.info(
         "wrote %d partitioned parquet files for %s %s (%d total records)",
