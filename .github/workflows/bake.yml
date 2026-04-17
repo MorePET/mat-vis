@@ -1,6 +1,5 @@
 ---
-# Bake workflow — thin wrapper around Dagger.
-# All logic lives in .dagger/src/mat_vis_ci/main.py
+# Bake workflow — thin Dagger wrapper.
 
 name: Bake
 
@@ -25,10 +24,10 @@ on:  # yamllint disable-line rule:truthy
         options:
           - 1k
           - 2k
-      limit:
-        description: 'Max materials (0 = all)'
+      batch-size:
+        description: 'Materials per batch (default 100)'
         required: false
-        default: '0'
+        default: '100'
         type: string
       release-tag:
         description: 'Calver data release tag (e.g. v2026.04.0)'
@@ -56,9 +55,8 @@ jobs:
             --src=.
             --source=${{ inputs.source }}
             --tier=${{ inputs.tier }}
-            --limit=${{ inputs.limit }}
+            --batch-size=${{ inputs.batch-size }}
             --release-tag=${{ inputs.release-tag }}
-            --registry-user=${{ github.actor }}
             --registry-pass=env:GITHUB_TOKEN
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
