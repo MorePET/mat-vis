@@ -59,6 +59,14 @@ def cmd_all(args: argparse.Namespace) -> int:
     else:
         records = fetch(tier, output_dir / "textures", limit=args.limit)
 
+    if source == "physicallybased":
+        # Scalar only — no bake, no parquet, just index
+        log.info("=== index (scalar only) ===")
+        index_data = build_index(records, source)
+        write_index(index_data, output_dir / f"{source}.json")
+        log.info("=== done: %d records ===", len(records))
+        return 0
+
     log.info("=== bake ===")
     records = bake_batch(records, output_dir / "baked", tier)
 
