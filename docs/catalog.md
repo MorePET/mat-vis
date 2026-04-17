@@ -12,7 +12,7 @@
 
 | Material | Color | Normal | Category | License |
 |---|---|---|---|---|
-| [Metal 063](https://ambientcg.com/a/Metal063) | ![color](mtlx/ambientcg/Metal063/color_thumb.png) | ![normal](mtlx/ambientcg/Metal063/normal_thumb.png) | metal | CC0-1.0 |
+| [Metal 063](https://ambientcg.com/a/Metal063) | ![color](../mtlx/ambientcg/Metal063/color_thumb.png) | ![normal](../mtlx/ambientcg/Metal063/normal_thumb.png) | metal | CC0-1.0 |
 
 </details>
 
@@ -20,8 +20,8 @@
 
 | Material | Color | Normal | Category | License |
 |---|---|---|---|---|
-| [Grass 005](https://ambientcg.com/a/Grass005) | ![color](mtlx/ambientcg/Grass005/color_thumb.png) | ![normal](mtlx/ambientcg/Grass005/normal_thumb.png) | organic | CC0-1.0 |
-| [Ground 103](https://ambientcg.com/a/Ground103) | ![color](mtlx/ambientcg/Ground103/color_thumb.png) | ![normal](mtlx/ambientcg/Ground103/normal_thumb.png) | organic | CC0-1.0 |
+| [Grass 005](https://ambientcg.com/a/Grass005) | ![color](../mtlx/ambientcg/Grass005/color_thumb.png) | ![normal](../mtlx/ambientcg/Grass005/normal_thumb.png) | organic | CC0-1.0 |
+| [Ground 103](https://ambientcg.com/a/Ground103) | ![color](../mtlx/ambientcg/Ground103/color_thumb.png) | ![normal](../mtlx/ambientcg/Ground103/normal_thumb.png) | organic | CC0-1.0 |
 
 </details>
 
@@ -29,8 +29,8 @@
 
 | Material | Color | Normal | Category | License |
 |---|---|---|---|---|
-| [Bricks 104](https://ambientcg.com/a/Bricks104) | ![color](mtlx/ambientcg/Bricks104/color_thumb.png) | ![normal](mtlx/ambientcg/Bricks104/normal_thumb.png) | other | CC0-1.0 |
-| [Road 012 A](https://ambientcg.com/a/Road012A) | ![color](mtlx/ambientcg/Road012A/color_thumb.png) | ![normal](mtlx/ambientcg/Road012A/normal_thumb.png) | other | CC0-1.0 |
+| [Bricks 104](https://ambientcg.com/a/Bricks104) | ![color](../mtlx/ambientcg/Bricks104/color_thumb.png) | ![normal](../mtlx/ambientcg/Bricks104/normal_thumb.png) | other | CC0-1.0 |
+| [Road 012 A](https://ambientcg.com/a/Road012A) | ![color](../mtlx/ambientcg/Road012A/color_thumb.png) | ![normal](../mtlx/ambientcg/Road012A/normal_thumb.png) | other | CC0-1.0 |
 
 </details>
 
@@ -38,8 +38,8 @@
 
 | Material | Color | Normal | Category | License |
 |---|---|---|---|---|
-| [Rock 063](https://ambientcg.com/a/Rock063) | ![color](mtlx/ambientcg/Rock063/color_thumb.png) | ![normal](mtlx/ambientcg/Rock063/normal_thumb.png) | stone | CC0-1.0 |
-| [Rock 064](https://ambientcg.com/a/Rock064) | ![color](mtlx/ambientcg/Rock064/color_thumb.png) | ![normal](mtlx/ambientcg/Rock064/normal_thumb.png) | stone | CC0-1.0 |
+| [Rock 063](https://ambientcg.com/a/Rock063) | ![color](../mtlx/ambientcg/Rock063/color_thumb.png) | ![normal](../mtlx/ambientcg/Rock063/normal_thumb.png) | stone | CC0-1.0 |
+| [Rock 064](https://ambientcg.com/a/Rock064) | ![color](../mtlx/ambientcg/Rock064/color_thumb.png) | ![normal](../mtlx/ambientcg/Rock064/normal_thumb.png) | stone | CC0-1.0 |
 
 </details>
 
@@ -47,9 +47,9 @@
 
 | Material | Color | Normal | Category | License |
 |---|---|---|---|---|
-| [Wood 092](https://ambientcg.com/a/Wood092) | ![color](mtlx/ambientcg/Wood092/color_thumb.png) | ![normal](mtlx/ambientcg/Wood092/normal_thumb.png) | wood | CC0-1.0 |
-| [Wood 094](https://ambientcg.com/a/Wood094) | ![color](mtlx/ambientcg/Wood094/color_thumb.png) | ![normal](mtlx/ambientcg/Wood094/normal_thumb.png) | wood | CC0-1.0 |
-| [Wood 095](https://ambientcg.com/a/Wood095) | ![color](mtlx/ambientcg/Wood095/color_thumb.png) | ![normal](mtlx/ambientcg/Wood095/normal_thumb.png) | wood | CC0-1.0 |
+| [Wood 092](https://ambientcg.com/a/Wood092) | ![color](../mtlx/ambientcg/Wood092/color_thumb.png) | ![normal](../mtlx/ambientcg/Wood092/normal_thumb.png) | wood | CC0-1.0 |
+| [Wood 094](https://ambientcg.com/a/Wood094) | ![color](../mtlx/ambientcg/Wood094/color_thumb.png) | ![normal](../mtlx/ambientcg/Wood094/normal_thumb.png) | wood | CC0-1.0 |
+| [Wood 095](https://ambientcg.com/a/Wood095) | ![color](../mtlx/ambientcg/Wood095/color_thumb.png) | ![normal](../mtlx/ambientcg/Wood095/normal_thumb.png) | wood | CC0-1.0 |
 
 </details>
 
@@ -59,7 +59,7 @@
 
 | Material | Color | Normal | Category | License |
 |---|---|---|---|---|
-| [Aerial Asphalt 01](https://polyhaven.com/a/aerial_asphalt_01) | ![color](mtlx/polyhaven/aerial_asphalt_01/color_thumb.png) | ![normal](mtlx/polyhaven/aerial_asphalt_01/normal_thumb.png) | concrete | CC0-1.0 |
+| [Aerial Asphalt 01](https://polyhaven.com/a/aerial_asphalt_01) | ![color](../mtlx/polyhaven/aerial_asphalt_01/color_thumb.png) | ![normal](../mtlx/polyhaven/aerial_asphalt_01/normal_thumb.png) | concrete | CC0-1.0 |
 
 </details>
 
@@ -67,14 +67,14 @@
 
 | Material | Color | Normal | Category | License |
 |---|---|---|---|---|
-| [Aerial Beach 01](https://polyhaven.com/a/aerial_beach_01) | ![color](mtlx/polyhaven/aerial_beach_01/color_thumb.png) | ![normal](mtlx/polyhaven/aerial_beach_01/normal_thumb.png) | organic | CC0-1.0 |
-| [Aerial Beach 02](https://polyhaven.com/a/aerial_beach_02) | ![color](mtlx/polyhaven/aerial_beach_02/color_thumb.png) | ![normal](mtlx/polyhaven/aerial_beach_02/normal_thumb.png) | organic | CC0-1.0 |
-| [Aerial Grass Rock](https://polyhaven.com/a/aerial_grass_rock) | ![color](mtlx/polyhaven/aerial_grass_rock/color_thumb.png) | ![normal](mtlx/polyhaven/aerial_grass_rock/normal_thumb.png) | organic | CC0-1.0 |
-| [Aerial Ground Rock](https://polyhaven.com/a/aerial_ground_rock) | ![color](mtlx/polyhaven/aerial_ground_rock/color_thumb.png) | ![normal](mtlx/polyhaven/aerial_ground_rock/normal_thumb.png) | organic | CC0-1.0 |
-| [Aerial Mud 1](https://polyhaven.com/a/aerial_mud_1) | ![color](mtlx/polyhaven/aerial_mud_1/color_thumb.png) | ![normal](mtlx/polyhaven/aerial_mud_1/normal_thumb.png) | organic | CC0-1.0 |
-| [Aerial Rocks 01](https://polyhaven.com/a/aerial_rocks_01) | ![color](mtlx/polyhaven/aerial_rocks_01/color_thumb.png) | ![normal](mtlx/polyhaven/aerial_rocks_01/normal_thumb.png) | organic | CC0-1.0 |
-| [Aerial Rocks 02](https://polyhaven.com/a/aerial_rocks_02) | ![color](mtlx/polyhaven/aerial_rocks_02/color_thumb.png) | ![normal](mtlx/polyhaven/aerial_rocks_02/normal_thumb.png) | organic | CC0-1.0 |
-| [Aerial Rocks 04](https://polyhaven.com/a/aerial_rocks_04) | ![color](mtlx/polyhaven/aerial_rocks_04/color_thumb.png) | ![normal](mtlx/polyhaven/aerial_rocks_04/normal_thumb.png) | organic | CC0-1.0 |
+| [Aerial Beach 01](https://polyhaven.com/a/aerial_beach_01) | ![color](../mtlx/polyhaven/aerial_beach_01/color_thumb.png) | ![normal](../mtlx/polyhaven/aerial_beach_01/normal_thumb.png) | organic | CC0-1.0 |
+| [Aerial Beach 02](https://polyhaven.com/a/aerial_beach_02) | ![color](../mtlx/polyhaven/aerial_beach_02/color_thumb.png) | ![normal](../mtlx/polyhaven/aerial_beach_02/normal_thumb.png) | organic | CC0-1.0 |
+| [Aerial Grass Rock](https://polyhaven.com/a/aerial_grass_rock) | ![color](../mtlx/polyhaven/aerial_grass_rock/color_thumb.png) | ![normal](../mtlx/polyhaven/aerial_grass_rock/normal_thumb.png) | organic | CC0-1.0 |
+| [Aerial Ground Rock](https://polyhaven.com/a/aerial_ground_rock) | ![color](../mtlx/polyhaven/aerial_ground_rock/color_thumb.png) | ![normal](../mtlx/polyhaven/aerial_ground_rock/normal_thumb.png) | organic | CC0-1.0 |
+| [Aerial Mud 1](https://polyhaven.com/a/aerial_mud_1) | ![color](../mtlx/polyhaven/aerial_mud_1/color_thumb.png) | ![normal](../mtlx/polyhaven/aerial_mud_1/normal_thumb.png) | organic | CC0-1.0 |
+| [Aerial Rocks 01](https://polyhaven.com/a/aerial_rocks_01) | ![color](../mtlx/polyhaven/aerial_rocks_01/color_thumb.png) | ![normal](../mtlx/polyhaven/aerial_rocks_01/normal_thumb.png) | organic | CC0-1.0 |
+| [Aerial Rocks 02](https://polyhaven.com/a/aerial_rocks_02) | ![color](../mtlx/polyhaven/aerial_rocks_02/color_thumb.png) | ![normal](../mtlx/polyhaven/aerial_rocks_02/normal_thumb.png) | organic | CC0-1.0 |
+| [Aerial Rocks 04](https://polyhaven.com/a/aerial_rocks_04) | ![color](../mtlx/polyhaven/aerial_rocks_04/color_thumb.png) | ![normal](../mtlx/polyhaven/aerial_rocks_04/normal_thumb.png) | organic | CC0-1.0 |
 
 </details>
 
@@ -82,6 +82,6 @@
 
 | Material | Color | Normal | Category | License |
 |---|---|---|---|---|
-| [Aerial Beach 03](https://polyhaven.com/a/aerial_beach_03) | ![color](mtlx/polyhaven/aerial_beach_03/color_thumb.png) | ![normal](mtlx/polyhaven/aerial_beach_03/normal_thumb.png) | other | CC0-1.0 |
+| [Aerial Beach 03](https://polyhaven.com/a/aerial_beach_03) | ![color](../mtlx/polyhaven/aerial_beach_03/color_thumb.png) | ![normal](../mtlx/polyhaven/aerial_beach_03/normal_thumb.png) | other | CC0-1.0 |
 
 </details>
