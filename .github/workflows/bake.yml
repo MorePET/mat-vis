@@ -117,8 +117,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
-          git add index/ mtlx/ docs/catalog.md 2>/dev/null || true
-          git add -u
+          [ -d index ] && git add index/
+          [ -d mtlx ] && git add mtlx/
+          [ -f docs/catalog.md ] && git add docs/catalog.md
           git diff --cached --quiet && echo "No changes to commit" && exit 0
           git commit -m "data: bake ${SOURCE} ${{ inputs.tier }} — index + mtlx + thumbnails"
           git push origin "$BRANCH"
