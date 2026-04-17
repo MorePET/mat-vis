@@ -78,21 +78,6 @@ jobs:
           path: /tmp/bake-out/
           retention-days: 30
 
-      - name: Zip thumbnails by size
-        run: |
-          SOURCE="${{ inputs.source }}"
-          THUMB_DIR="/tmp/bake-out/mtlx/${SOURCE}"
-          for size in 128 256 512; do
-            ZIPFILE="/tmp/bake-out/mat-vis-${SOURCE}-thumbnails-${size}.zip"
-            if find "$THUMB_DIR" -name "*_thumb_${size}.png" 2>/dev/null | head -1 | grep -q .; then
-              cd /tmp/bake-out/mtlx
-              find "${SOURCE}" -name "*_thumb_${size}.png" | sort | zip -q "$ZIPFILE" -@
-              echo "Created $ZIPFILE"
-            else
-              echo "No ${size}px thumbnails found for ${SOURCE}, skipping zip"
-            fi
-          done
-
       - name: Ensure pre-release exists
         if: inputs.release-tag != 'v0000.00.0'
         env:
@@ -123,10 +108,6 @@ jobs:
               release-manifest.json|*-rowmap.json) ;; # skip
               *) gh release upload "$TAG" "$f" --clobber || true ;;
             esac
-          done
-          # Upload thumbnail packs
-          for f in /tmp/bake-out/mat-vis-*-thumbnails-*.zip; do
-            [ -f "$f" ] && gh release upload "$TAG" "$f" --clobber || true
           done
 
       - name: Rebuild manifest from all release assets
