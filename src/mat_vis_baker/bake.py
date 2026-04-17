@@ -16,7 +16,7 @@ from mat_vis_baker.common import TIER_TO_PX, MaterialRecord, hash_textures
 
 log = logging.getLogger("mat-vis-baker.bake")
 
-THUMB_SIZE = 128
+THUMB_SIZES = (128, 256, 512)
 
 
 def _validate_png(path: Path, expected_px: int | None = None) -> bool:
@@ -41,14 +41,35 @@ def _validate_png(path: Path, expected_px: int | None = None) -> bool:
         return False
 
 
-def _generate_thumbnail(src_path: Path, thumb_dir: Path, channel: str) -> Path:
-    """Resize to 128x128 thumbnail. Returns path to thumbnail."""
+def _generate_thumbnail(
+    src_path: Path,
+    thumb_dir: Path,
+    channel: str,
+    sizes: tuple[int, ...] = THUMB_SIZES,
+) -> list[Path]:
+    """Resize to multiple thumbnail sizes. Returns paths to generated thumbnails.
+
+    Generates ``<channel>_thumb_<size>.png`` for each size, plus
+    ``<channel>_thumb.png`` as a backward-compatible alias for the 128px variant.
+    """
     thumb_dir.mkdir(parents=True, exist_ok=True)
-    thumb_path = thumb_dir / f"{channel}_thumb.png"
+    paths: list[Path] = []
+
     with Image.open(src_path) as img:
-        img.thumbnail((THUMB_SIZE, THUMB_SIZE), Image.LANCZOS)
-        img.save(thumb_path, "PNG", optimize=True)
-    return thumb_path
+        for size in sizes:
+            sized_path = thumb_dir / f"{channel}_thumb_{size}.png"
+            copy = img.copy()
+            copy.thumbnail((size, size), Image.LANCZOS)
+            copy.save(sized_path, "PNG", optimize=True)
+            paths.append(sized_path)
+
+            # Backward-compat alias: _thumb.png == 128px
+            if size == 128:
+                alias_path = thumb_dir / f"{channel}_thumb.png"
+                copy.save(alias_path, "PNG", optimize=True)
+                paths.append(alias_path)
+
+    return paths
 
 
 def _bake_mtlx(mtlx_path: Path, output_dir: Path, resolution_px: int) -> dict[str, Path]:
