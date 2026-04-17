@@ -67,11 +67,15 @@ fn fetch_manifest(tag: &Option<String>) -> Manifest {
 }
 
 fn fetch_rowmap(base_url: &str, src: &SourceEntry) -> Rowmap {
-    let files = src
-        .rowmap_files
-        .as_deref()
-        .or(src.rowmap_file.as_deref().map(std::slice::from_ref))
-        .expect("No rowmap file");
+    let fallback;
+    let files: &[String] = if let Some(ref f) = src.rowmap_files {
+        f.as_slice()
+    } else if let Some(ref f) = src.rowmap_file {
+        fallback = [f.clone()];
+        &fallback
+    } else {
+        panic!("No rowmap file");
+    };
     let url = format!("{}{}", base_url, files[0]);
     client()
         .get(&url)
