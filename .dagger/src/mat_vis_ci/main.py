@@ -453,8 +453,6 @@ class MatVisCi:
             "/tmp/out",
             "--release-tag",
             release_tag,
-            "--also-derive",
-            "128,256,512",
         ]
         if limit > 0:
             bake_cmd.extend(["--limit", str(limit)])
@@ -531,8 +529,6 @@ write_manifest(manifest, Path('/tmp/release-manifest.json'))
             "/tmp/out",
             "--release-tag",
             release_tag,
-            "--also-derive",
-            "128,256,512",
         ]
         if limit > 0:
             bake_cmd.extend(["--limit", str(limit)])
