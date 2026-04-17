@@ -19,21 +19,19 @@ log = logging.getLogger("mat-vis-baker.bake")
 THUMB_SIZE = 128
 
 
-def _validate_png(path: Path, expected_px: int | None = None) -> bool:
-    """Open with Pillow, verify valid PNG. Optionally check dimensions."""
+def _validate_and_resize_png(path: Path, target_px: int | None = None) -> bool:
+    """Validate PNG. If target_px is smaller than source, resize in place."""
     try:
         with Image.open(path) as img:
             if img.format != "PNG":
                 log.warning("%s: not PNG (got %s)", path, img.format)
                 return False
-            if expected_px and (img.width != expected_px or img.height != expected_px):
-                log.warning(
-                    "%s: expected %dx%d, got %dx%d",
-                    path,
-                    expected_px,
-                    expected_px,
-                    img.width,
-                    img.height,
+            if target_px and (img.width > target_px or img.height > target_px):
+                resized = img.copy()
+                resized.thumbnail((target_px, target_px), Image.LANCZOS)
+                resized.save(path, "PNG")
+                log.debug(
+                    "%s: resized %dx%d → %dx%d", path, img.width, img.height, target_px, target_px
                 )
             return True
     except Exception:
@@ -100,7 +98,7 @@ def bake_material(
     for channel, path in record.texture_paths.items():
         if channel.startswith("_"):
             continue
-        if _validate_png(path, expected_px):
+        if _validate_and_resize_png(path, expected_px):
             valid_maps[channel] = path
         else:
             log.warning("%s/%s: invalid PNG, dropping channel", record.id, channel)
