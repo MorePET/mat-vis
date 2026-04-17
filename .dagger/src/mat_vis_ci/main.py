@@ -292,6 +292,48 @@ class MatVisCi:
             .stdout()
         )
 
+    # ── bake pipeline ─────────────────────────────────────────────
+
+    @function
+    async def bake_source(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        source: Annotated[str, Doc("Source name")] = "ambientcg",
+        tier: Annotated[str, Doc("Resolution tier")] = "1k",
+        release_tag: Annotated[str, Doc("Release tag for rowmap")] = "v0000.00.0",
+    ) -> dagger.Directory:
+        """Run full baker pipeline for one source+tier. Returns directory with artifacts.
+
+        Output directory contains:
+        - mat-vis-<source>-<tier>.parquet
+        - <source>-<tier>-rowmap.json
+        - <source>.json (index)
+        """
+        context = src or dag.host().directory(".")
+        pip_cache = dag.cache_volume("pip-cache")
+
+        ctr = (
+            dag.container()
+            .from_("python:3.12-slim")
+            .with_mounted_cache("/root/.cache/pip", pip_cache)
+            .with_mounted_directory("/app", context)
+            .with_workdir("/app")
+            .with_exec(["pip", "install", "--quiet", "-e", ".[baker]"])
+            .with_exec(
+                [
+                    "mat-vis-baker",
+                    "all",
+                    source,
+                    tier,
+                    "/tmp/out",
+                    "--release-tag",
+                    release_tag,
+                ]
+            )
+        )
+
+        return ctr.directory("/tmp/out")
+
     # ── source probes ─────────────────────────────────────────────
 
     @function
