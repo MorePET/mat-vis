@@ -507,18 +507,33 @@ class MatVisCi:
                 "python3",
                 "-c",
                 f"""
-from mat_vis_baker.sources.{source} import discover
-data = discover()
-if isinstance(data, dict):
-    print(len(data))
-else:
+try:
+    from mat_vis_baker.sources.{source} import discover
+    data = discover()
+    print(len(data) if isinstance(data, (list, dict)) else 0)
+except ImportError:
+    # physicallybased has no discover — use fetch directly
+    from mat_vis_baker.sources.{source} import fetch
+    data = fetch()
     print(len(data))
 """,
             ]
         ).stdout()
         total = int(count_str.strip())
 
-        # Fan out batches
+        # For small sources or scalar-only, single batch is fine
+        if total <= batch_size or source == "physicallybased":
+            return await self.bake_batch(
+                src=context,
+                source=source,
+                tier=tier,
+                release_tag=release_tag,
+                offset=0,
+                limit=total,
+                registry_pass=registry_pass,
+            )
+
+        # Fan out batches for large sources
         offsets = list(range(0, total, batch_size))
         await asyncio.gather(
             *[
