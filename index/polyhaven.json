@@ -1,0 +1,488 @@
+[
+  {
+    "id": "aerial_asphalt_01",
+    "source": "polyhaven",
+    "name": "Aerial Asphalt 01",
+    "category": "concrete",
+    "tags": [
+      "road",
+      "flat",
+      "cracked"
+    ],
+    "source_url": "https://polyhaven.com/a/aerial_asphalt_01",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "",
+    "texture_hashes": {
+      "color": {
+        "sha256": "2aaa24b429b395afc4309afd431edcee52bd640265f3adb5638d0d228ff33992",
+        "size": 2337475
+      },
+      "normal": {
+        "sha256": "aea5813095e3bd62c178a5f5f1f463930ff970c6c2914cb75c0225d02128c92e",
+        "size": 1671704
+      },
+      "ao": {
+        "sha256": "cb978d67894cd5133beafbec105ddb183162a8535c7b960ccdb3c32a2bbc333e",
+        "size": 640881
+      },
+      "displacement": {
+        "sha256": "85ace5b6eb48c97d3a4ea28427147cfce8917ca0722f85a37dcc847e1f8087da",
+        "size": 1930160
+      },
+      "roughness": {
+        "sha256": "9ed62332d843291ee378bb8d1181bc58264fa417671cc116a9ef4b38b61fbe49",
+        "size": 525889
+      }
+    }
+  },
+  {
+    "id": "aerial_beach_01",
+    "source": "polyhaven",
+    "name": "Aerial Beach 01",
+    "category": "organic",
+    "tags": [
+      "beach",
+      "wavy",
+      "costal",
+      "ocean",
+      "seaside"
+    ],
+    "source_url": "https://polyhaven.com/a/aerial_beach_01",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "",
+    "texture_hashes": {
+      "color": {
+        "sha256": "3a6c129842434812255fa097c7e855212f36fbe2d899af1b38bbd723b9a608f1",
+        "size": 5933588
+      },
+      "normal": {
+        "sha256": "f5688cd2d64952f45ebe1b073ff8021fb617ffb59d451bf5b9726f1161552be6",
+        "size": 2021131
+      },
+      "ao": {
+        "sha256": "78b73128b9d5844688d7efb217296d596c8da504117ed21cc68ef9653415a69c",
+        "size": 1094390
+      },
+      "displacement": {
+        "sha256": "0ad0fb69dd862f101ede0427d86665e83cacb20be82f10b9b4555a728812516c",
+        "size": 2209508
+      },
+      "roughness": {
+        "sha256": "c7345d101b8ea914372bd8d286d29a714eb38df8e6185bf0a227568b509d1a72",
+        "size": 545628
+      }
+    }
+  },
+  {
+    "id": "aerial_beach_02",
+    "source": "polyhaven",
+    "name": "Aerial Beach 02",
+    "category": "organic",
+    "tags": [
+      "beach",
+      "flat",
+      "costal",
+      "ocean",
+      "seaside"
+    ],
+    "source_url": "https://polyhaven.com/a/aerial_beach_02",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "",
+    "texture_hashes": {
+      "color": {
+        "sha256": "8a30e238dde67cee2d98b83f9d9faafd6459f0a7f14563520a153b247a19d4d8",
+        "size": 1267626
+      },
+      "ao": {
+        "sha256": "b5395c910cb5970cb86fb945389e2b77fd3ecf759a91e67e00f76a2eb4e8f907",
+        "size": 431161
+      },
+      "displacement": {
+        "sha256": "47c41fc52ad5c81405faa41eb678f1b4c93ae3dd331d0aef72d98985385e6710",
+        "size": 1881339
+      },
+      "roughness": {
+        "sha256": "38f0d0507934678cac6d71509bcf149a590e7429a3be74e80468ea10e306e295",
+        "size": 416249
+      },
+      "normal": {
+        "sha256": "18b5e6fbf20432ea5ba204d33871ede82574a6df8b24388fcf0716cbf8e5a58e",
+        "size": 2315545
+      }
+    }
+  },
+  {
+    "id": "aerial_beach_03",
+    "source": "polyhaven",
+    "name": "Aerial Beach 03",
+    "category": "other",
+    "tags": [
+      "beach",
+      "seaside",
+      "sand",
+      "trampled",
+      "uneven",
+      "brown",
+      "footprints",
+      "costal",
+      "ocean"
+    ],
+    "source_url": "https://polyhaven.com/a/aerial_beach_03",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "",
+    "texture_hashes": {
+      "color": {
+        "sha256": "6e08484af394c84edd05d5a0cd975e475c02cd2ac7dc1acbb851bf9aed6f5634",
+        "size": 5570827
+      },
+      "normal": {
+        "sha256": "df6f678d4dadc34d456da7743725e0703799c4ffadb7d934ac1bff8f0ecffded",
+        "size": 5577580
+      },
+      "ao": {
+        "sha256": "9b6fd521d9893ae60f55efd423ba4647f66c2f8b8ae69e44f43216e285c7cdf2",
+        "size": 1877822
+      },
+      "displacement": {
+        "sha256": "d798908e89aa87b2ec16760539b76f8ae03b4f4bfeb99637e83e74d140af28b5",
+        "size": 1674556
+      },
+      "roughness": {
+        "sha256": "ed1bf92f0c70fd2c6d83b7b65ceacb43a358b5afe8f63a7b646029bf0ef03720",
+        "size": 1897557
+      }
+    }
+  },
+  {
+    "id": "aerial_grass_rock",
+    "source": "polyhaven",
+    "name": "Aerial Grass Rock",
+    "category": "organic",
+    "tags": [
+      "moss",
+      "grass",
+      "cliff",
+      "cave",
+      "rock face"
+    ],
+    "source_url": "https://polyhaven.com/a/aerial_grass_rock",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "",
+    "texture_hashes": {
+      "color": {
+        "sha256": "375dcb05aaced6f690ae53016a45f9a6b780a5b66f77f0a53a90ce840b4d71bc",
+        "size": 6322654
+      },
+      "normal": {
+        "sha256": "40772a6b4deb6870fe82ed128aa4edfc27acff8019963993cf63226340f1905b",
+        "size": 6366365
+      },
+      "ao": {
+        "sha256": "be3c756ffaff7384adea5fdda7034cbec779658a663b2fdb662ae59163e1fc95",
+        "size": 2346389
+      },
+      "displacement": {
+        "sha256": "f8600ff2054d11c57d32ec5634b3b6b6ba3f5f1bc68366a981f0be1fe4736908",
+        "size": 1951317
+      },
+      "roughness": {
+        "sha256": "02b7f51dbd09652a5f48630ad6ea791abecb44c7f8e6c87bb4ad7a196426a4c7",
+        "size": 2225970
+      }
+    }
+  },
+  {
+    "id": "aerial_ground_rock",
+    "source": "polyhaven",
+    "name": "Aerial Ground Rock",
+    "category": "organic",
+    "tags": [
+      "mud",
+      "rocks",
+      "stones",
+      "dirt",
+      "dry"
+    ],
+    "source_url": "https://polyhaven.com/a/aerial_ground_rock",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "",
+    "texture_hashes": {
+      "color": {
+        "sha256": "f0231417cb673ddc6263b667a5fced83b9aad91d88b362f6a6e3744d0336bcc0",
+        "size": 6442920
+      },
+      "normal": {
+        "sha256": "d5ef11ed51a373b6b47bb567e7b77391125e771d2562d48bf5cf157276074882",
+        "size": 5998957
+      },
+      "ao": {
+        "sha256": "7157bc17b10f8791811bc55e5ffec647e1e653bf6c3d7122407ef440c427ec71",
+        "size": 2238738
+      },
+      "displacement": {
+        "sha256": "f160fce324b10cdbce34bab523cc9f9088a2bbad1dcdf72be4c7aa1e678a4fa7",
+        "size": 1855372
+      },
+      "roughness": {
+        "sha256": "ade67ab394a234452115431931cf9ab79c431d2f15a9941a43c730a6a6f60e96",
+        "size": 2244190
+      }
+    }
+  },
+  {
+    "id": "aerial_mud_1",
+    "source": "polyhaven",
+    "name": "Aerial Mud 1",
+    "category": "organic",
+    "tags": [
+      "mud",
+      "tracks",
+      "tire tracks",
+      "wet soil",
+      "uneven surface",
+      "ruts",
+      "surface depressions"
+    ],
+    "source_url": "https://polyhaven.com/a/aerial_mud_1",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "",
+    "texture_hashes": {
+      "color": {
+        "sha256": "91f320331c9d3d7a7c9204cb858fd3a8975a790a12ab9201f48d8256a2bbfce8",
+        "size": 1716478
+      },
+      "normal": {
+        "sha256": "d43504e29cfbfd844ea5ff972a7f0a7e8d2290c6346a9bca99fae4c20ed1c158",
+        "size": 1918310
+      },
+      "ao": {
+        "sha256": "dce7cd86b6e1f9d31bb0287869ba966b3e29b8b0d1e3197800a3b5e7267e91b8",
+        "size": 634992
+      },
+      "displacement": {
+        "sha256": "2c880ab8d66756e8a5eaa3657a17794e10dcd4036cf53bca891f569d1963586d",
+        "size": 2032464
+      },
+      "roughness": {
+        "sha256": "dcaaceef7415022f90ab66f59cdac159b635f94a21bb6b9a556401c58f463a86",
+        "size": 523079
+      }
+    }
+  },
+  {
+    "id": "aerial_rocks_01",
+    "source": "polyhaven",
+    "name": "Aerial Rocks 01",
+    "category": "organic",
+    "tags": [
+      "rocks",
+      "moss",
+      "cliff",
+      "rock face",
+      "cave"
+    ],
+    "source_url": "https://polyhaven.com/a/aerial_rocks_01",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "",
+    "texture_hashes": {
+      "color": {
+        "sha256": "f6928295995dc45049bf8e2775ced11529d9027c83b3d676f6565d566eb3503c",
+        "size": 2297243
+      },
+      "normal": {
+        "sha256": "97c34752758e2ce8e7b808d75153f8308be50f945f2ce542fb434e8a227413e2",
+        "size": 2533309
+      },
+      "ao": {
+        "sha256": "2dbf51502b55767a84ec99d2154b7a7adb780450185ffd51aec299abcc106c3f",
+        "size": 621064
+      },
+      "displacement": {
+        "sha256": "ea8c021657da9dd88d05aaebac799e7255ee09bb382234adfc79b47771fabfd1",
+        "size": 1918420
+      },
+      "roughness": {
+        "sha256": "72f21013bc2065a6a004773509ee72ac8d4906dcfea12441acf78ce6d4101452",
+        "size": 626622
+      }
+    }
+  },
+  {
+    "id": "aerial_rocks_02",
+    "source": "polyhaven",
+    "name": "Aerial Rocks 02",
+    "category": "organic",
+    "tags": [
+      "rocks",
+      "rough",
+      "moss",
+      "cliff",
+      "rock face",
+      "cave"
+    ],
+    "source_url": "https://polyhaven.com/a/aerial_rocks_02",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "",
+    "texture_hashes": {
+      "color": {
+        "sha256": "1010e597d6f3c90834ac867423692a94e8d58bee7bb5d25bca1c126f46b1ad52",
+        "size": 2199181
+      },
+      "normal": {
+        "sha256": "ca51fb65c624bb836947aa5deed8943f0560653f6227ca866c4b0fb1af052a22",
+        "size": 2295779
+      },
+      "ao": {
+        "sha256": "b24ca3be1c2ca51060db9b0eec776a12f78472bcac2d065fece51e9ae7202926",
+        "size": 580468
+      },
+      "displacement": {
+        "sha256": "dc01129a11b11041f8c735c6e2b4121c2d587765ad74d3e818ab1e4f60509f7a",
+        "size": 1780480
+      },
+      "roughness": {
+        "sha256": "9a5cf0262905d9398ca162614fbde5cfac5bbf73a8c25f58e9c3c71473ba92b6",
+        "size": 598262
+      }
+    }
+  },
+  {
+    "id": "aerial_rocks_04",
+    "source": "polyhaven",
+    "name": "Aerial Rocks 04",
+    "category": "organic",
+    "tags": [
+      "rough",
+      "rocks",
+      "moss",
+      "cliff",
+      "rock face",
+      "cave"
+    ],
+    "source_url": "https://polyhaven.com/a/aerial_rocks_04",
+    "source_license": "CC0-1.0",
+    "available_tiers": [
+      "1k"
+    ],
+    "maps": [
+      "ao",
+      "color",
+      "displacement",
+      "normal",
+      "roughness"
+    ],
+    "last_updated": "",
+    "texture_hashes": {
+      "color": {
+        "sha256": "2e543b9917f12f927460d7fe47f0807b8d4d2ad8790644d31ea84413a870a5e4",
+        "size": 2281248
+      },
+      "normal": {
+        "sha256": "88765e6be947962587e5174d1b9119694222de90daa4cb49ad349c8d183574a4",
+        "size": 2319297
+      },
+      "ao": {
+        "sha256": "1eda4f7d2ae6c601fec75e061d4cb6f4d49425232f996a82faf6eadcee8509eb",
+        "size": 597563
+      },
+      "displacement": {
+        "sha256": "79d39c6a9664a196a0a86951369dcdddfe5c79ee5399201825ea98a9af0430f8",
+        "size": 1789693
+      },
+      "roughness": {
+        "sha256": "0452c9a4de1b59aa4095a2fd91848202535a7059e484448dade86012ab517a1b",
+        "size": 664355
+      }
+    }
+  }
+]

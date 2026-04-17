@@ -56,7 +56,16 @@ def discover(*, session: requests.Session | None = None) -> list[dict]:
 
 # ── download + extract ──────────────────────────────────────────
 
-_TIER_ATTRS = {"1k": "1K-PNG", "2k": "2K-PNG", "4k": "4K-PNG", "8k": "8K-PNG"}
+# Sub-1k tiers download 1K and let the bake step resize
+_TIER_ATTRS = {
+    "128": "1K-PNG",
+    "256": "1K-PNG",
+    "512": "1K-PNG",
+    "1k": "1K-PNG",
+    "2k": "2K-PNG",
+    "4k": "4K-PNG",
+    "8k": "8K-PNG",
+}
 
 
 def _extract_download_url(entry: dict, tier: str) -> str | None:
