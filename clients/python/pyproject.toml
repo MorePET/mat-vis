@@ -1,0 +1,31 @@
+[project]
+name = "mat-vis-client"
+version = "2026.4.0"
+description = "Pure Python client for mat-vis PBR textures — HTTP range reads, zero deps"
+readme = "../../README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Lars Gerchow" }]
+keywords = ["materials", "pbr", "textures", "mat-vis"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = []
+
+[project.scripts]
+mat-vis-client = "mat_vis_client.client:main"
+
+[project.urls]
+Homepage = "https://github.com/MorePET/mat-vis"
+Repository = "https://github.com/MorePET/mat-vis"
+Issues = "https://github.com/MorePET/mat-vis/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mat_vis_client"]

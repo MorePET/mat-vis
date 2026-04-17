@@ -8,6 +8,7 @@
 FROM python:3.12-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/cli/cli:latest /usr/bin/gh /usr/local/bin/gh
 
 COPY pyproject.toml README.md ./
 COPY src/ src/
