@@ -52,12 +52,14 @@ def cmd_all(args: argparse.Namespace) -> int:
     output_dir = Path(args.output_dir)
     resolution_px = TIER_TO_PX[tier]
 
+    mtlx_dir = output_dir / "mtlx"
+
     log.info("=== fetch %s %s ===", source, tier)
     fetch = _get_fetcher(source)
     if source == "physicallybased":
         records = fetch()  # scalar only, no tier/output_dir
     else:
-        records = fetch(tier, output_dir / "textures", limit=args.limit)
+        records = fetch(tier, output_dir / "textures", limit=args.limit, mtlx_dir=mtlx_dir)
 
     if source == "physicallybased":
         # Scalar only — no bake, no parquet, just index
