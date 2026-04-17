@@ -102,6 +102,48 @@ def write_parquet(
     return output_path
 
 
+def write_partitioned_parquet(
+    records: list[MaterialRecord],
+    source: str,
+    tier: str,
+    output_dir: Path,
+    resolution_px: int,
+) -> list[Path]:
+    """Write category-partitioned parquet files. Returns list of paths.
+
+    Naming: mat-vis-<source>-<tier>-<category>.parquet
+    Each file stays under GitHub's 2 GB per-asset limit.
+    """
+    from collections import defaultdict
+
+    ok_records = [r for r in records if r.status == "ok"]
+    if not ok_records:
+        raise ValueError("No successful records to write")
+
+    by_cat: dict[str, list[MaterialRecord]] = defaultdict(list)
+    for rec in ok_records:
+        by_cat[rec.category].append(rec)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[Path] = []
+
+    for cat in sorted(by_cat.keys()):
+        cat_records = by_cat[cat]
+        filename = f"mat-vis-{source}-{tier}-{cat}.parquet"
+        path = output_dir / filename
+        write_parquet(cat_records, source, tier, path, resolution_px)
+        paths.append(path)
+
+    log.info(
+        "wrote %d partitioned parquet files for %s %s (%d total records)",
+        len(paths),
+        source,
+        tier,
+        len(ok_records),
+    )
+    return paths
+
+
 # ── rowmap generation ───────────────────────────────────────────
 
 
@@ -142,7 +184,7 @@ def generate_rowmap(
     meta = pf.metadata
 
     ok_records = [r for r in records if r.status == "ok"]
-    parquet_name = f"mat-vis-{source}-{tier}.parquet"
+    parquet_name = parquet_path.name
 
     materials: dict[str, dict[str, dict[str, int]]] = {}
 

@@ -45,7 +45,11 @@ def cmd_all(args: argparse.Namespace) -> int:
     """Full pipeline: fetch → bake → pack → index."""
     from mat_vis_baker.bake import bake_batch
     from mat_vis_baker.index_builder import build_index, write_index
-    from mat_vis_baker.parquet_writer import generate_rowmap, write_parquet, write_rowmap
+    from mat_vis_baker.parquet_writer import (
+        generate_rowmap,
+        write_partitioned_parquet,
+        write_rowmap,
+    )
 
     source = args.source
     tier = args.tier
@@ -81,16 +85,33 @@ def cmd_all(args: argparse.Namespace) -> int:
         )
         return 1
 
-    log.info("=== pack ===")
-    pq_path = output_dir / f"mat-vis-{source}-{tier}.parquet"
-    write_parquet(records, source, tier, pq_path, resolution_px)
+    log.info("=== pack (category-partitioned) ===")
+    pq_paths = write_partitioned_parquet(records, source, tier, output_dir, resolution_px)
 
-    rowmap = generate_rowmap(pq_path, source, tier, args.release_tag, records)
-    write_rowmap(rowmap, output_dir / f"{source}-{tier}-rowmap.json")
+    # Generate one rowmap per partition
+    from collections import defaultdict
+
+    by_cat: dict[str, list] = defaultdict(list)
+    for rec in ok:
+        by_cat[rec.category].append(rec)
+
+    for pq_path in pq_paths:
+        # Extract category from filename: mat-vis-ambientcg-1k-metal.parquet → metal
+        cat = pq_path.stem.rsplit("-", 1)[-1]
+        cat_records = by_cat.get(cat, [])
+        if cat_records:
+            rowmap = generate_rowmap(pq_path, source, tier, args.release_tag, cat_records)
+            write_rowmap(rowmap, output_dir / f"{source}-{tier}-{cat}-rowmap.json")
 
     log.info("=== index ===")
     index_data = build_index(records, source)
     write_index(index_data, output_dir / f"{source}.json")
+
+    log.info("=== manifest ===")
+    from mat_vis_baker.manifest import generate_manifest, write_manifest
+
+    manifest = generate_manifest(output_dir, args.release_tag, [source], [tier])
+    write_manifest(manifest, output_dir / "release-manifest.json")
 
     log.info("=== catalog ===")
     from mat_vis_baker.catalog import generate_catalog, write_catalog
