@@ -26,10 +26,11 @@ import logging
 from typing import Any
 
 from mat_vis_client.adapters import export_mtlx, to_gltf, to_threejs
-from mat_vis_client.client import MatVisClient
+from mat_vis_client.client import MatVisClient, _in_range
 
 __all__ = [
     "MatVisClient",
+    "_in_range",
     "search",
     "fetch",
     "prefetch",

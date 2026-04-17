@@ -108,48 +108,62 @@ from pathlib import Path
 out_dir = Path(sys.argv[1])
 
 # Check files exist
-pq_files = list(out_dir.glob("*.parquet"))
+pq_files = sorted(out_dir.glob("*.parquet"))
 assert pq_files, f"No parquet files in {out_dir}"
-pq_path = pq_files[0]
 
-rowmap_files = list(out_dir.glob("*-rowmap.json"))
+rowmap_files = sorted(out_dir.glob("*-rowmap.json"))
 assert rowmap_files, f"No rowmap files in {out_dir}"
 
 index_files = list(out_dir.glob("*.json"))
 assert any("rowmap" not in f.name for f in index_files), "No index JSON"
 
-# Load rowmap and verify range reads
-rowmap = json.loads(rowmap_files[0].read_text())
-file_bytes = pq_path.read_bytes()
-
-materials = rowmap["materials"]
-assert len(materials) > 0, "Rowmap has no materials"
-
+# Match each rowmap to its parquet by category slug
 verified = 0
 errors = []
-for mid, channels in materials.items():
-    for ch, rng in channels.items():
-        offset = rng["offset"]
-        length = rng["length"]
-        chunk = file_bytes[offset : offset + length]
-        if chunk[:4] != b"\\x89PNG":
-            errors.append(f"{mid}/{ch}: not PNG at offset {offset} (got {chunk[:4]!r})")
+total_materials = 0
+
+for rm_path in rowmap_files:
+    rowmap = json.loads(rm_path.read_text())
+    pq_name = rowmap.get("parquet_file", "")
+    pq_path = out_dir / pq_name if pq_name else None
+
+    if not pq_path or not pq_path.exists():
+        # Fall back: extract category from rowmap filename and find matching parquet
+        # e.g. ambientcg-1k-wood-rowmap.json -> mat-vis-ambientcg-1k-wood.parquet
+        slug = rm_path.stem.replace("-rowmap", "")
+        candidates = [p for p in pq_files if slug in p.stem]
+        if not candidates:
+            errors.append(f"No parquet for rowmap {rm_path.name}")
             continue
-        if len(chunk) != length:
-            errors.append(
-                f"{mid}/{ch}: length mismatch at offset {offset}"
-                f" (expected {length}, got {len(chunk)}, file_size={len(file_bytes)})"
-            )
-            continue
-        verified += 1
+        pq_path = candidates[0]
+
+    file_bytes = pq_path.read_bytes()
+    materials = rowmap["materials"]
+    total_materials += len(materials)
+
+    for mid, channels in materials.items():
+        for ch, rng in channels.items():
+            offset = rng["offset"]
+            length = rng["length"]
+            chunk = file_bytes[offset : offset + length]
+            if chunk[:4] != b"\\x89PNG":
+                errors.append(f"{mid}/{ch}: not PNG at offset {offset} (got {chunk[:4]!r})")
+                continue
+            if len(chunk) != length:
+                errors.append(
+                    f"{mid}/{ch}: length mismatch at offset {offset}"
+                    f" (expected {length}, got {len(chunk)}, file_size={len(file_bytes)})"
+                )
+                continue
+            verified += 1
 
 if errors:
     for e in errors:
         print(f"  FAIL {e}")
     sys.exit(1)
 
-print(f"  OK parquet: {pq_path.name} ({len(file_bytes)} bytes)")
-print(f"  OK rowmap: {len(materials)} materials")
+print(f"  OK parquets: {len(pq_files)} files")
+print(f"  OK rowmaps: {len(rowmap_files)} files, {total_materials} materials")
 print(f"  OK range-read: {verified} channels verified (all PNG)")
 print(f"  OK index: {len(index_files)} JSON files")
 print(f"\\nintegration test passed")
