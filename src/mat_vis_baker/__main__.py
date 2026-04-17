@@ -355,6 +355,55 @@ def cmd_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_derive_ktx2(args: argparse.Namespace) -> int:
+    """Derive KTX2 tier from existing release PNGs."""
+    from mat_vis_baker.ktx2 import derive_ktx2_from_release
+
+    output_dir = Path(args.output_dir)
+    source_tier = args.source_tier
+    target_tier = args.target_tier or f"ktx2-{source_tier}"
+    sources = [args.source] if args.source else None
+
+    paths = derive_ktx2_from_release(
+        tag=args.release_tag,
+        source_tier=source_tier,
+        target_tier=target_tier,
+        output_dir=output_dir,
+        sources=sources,
+    )
+    log.info("wrote %d KTX2 parquet files", len(paths))
+    return 0
+
+
+def cmd_pack_mtlx(args: argparse.Namespace) -> int:
+    """Generate MaterialX documents and pack as parquet tier."""
+    output_dir = Path(args.output_dir)
+
+    if args.original:
+        from mat_vis_baker.mtlx_tier import pack_original_mtlx
+
+        source = args.source or "gpuopen"
+        paths = pack_original_mtlx(
+            mtlx_dir=Path(args.mtlx_dir),
+            source=source,
+            output_dir=output_dir,
+            release_tag=args.release_tag,
+        )
+    else:
+        from mat_vis_baker.mtlx_tier import pack_mtlx_tier
+
+        sources = [args.source] if args.source else None
+        paths = pack_mtlx_tier(
+            tag=args.release_tag,
+            tier=args.tier,
+            output_dir=output_dir,
+            sources=sources,
+        )
+
+    log.info("wrote %d MaterialX parquet files", len(paths))
+    return 0
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     """Fetch only — download textures from upstream."""
     fetch = _get_fetcher(args.source)
@@ -413,6 +462,35 @@ def main() -> int:
     )
     p_cat.add_argument("--skip-thumbnails", action="store_true", help="Skip thumbnail download")
 
+    p_ktx2 = sub.add_parser(
+        "derive-ktx2",
+        help="Derive KTX2-compressed tier from existing release PNGs",
+    )
+    p_ktx2.add_argument("output_dir")
+    p_ktx2.add_argument("--release-tag", default="v2026.04.0")
+    p_ktx2.add_argument(
+        "--source-tier", default="1k", help="PNG tier to transcode from (default: 1k)"
+    )
+    p_ktx2.add_argument(
+        "--target-tier", default=None, help="KTX2 tier name (default: ktx2-{source-tier})"
+    )
+    p_ktx2.add_argument("--source", default=None, help="Restrict to one source")
+
+    p_mtlx = sub.add_parser(
+        "pack-mtlx",
+        help="Generate MaterialX documents and pack as parquet tier",
+    )
+    p_mtlx.add_argument("output_dir")
+    p_mtlx.add_argument("--release-tag", default="v2026.04.0")
+    p_mtlx.add_argument("--tier", default="1k", help="Resolution tier to reference (default: 1k)")
+    p_mtlx.add_argument("--source", default=None, help="Restrict to one source")
+    p_mtlx.add_argument(
+        "--original",
+        action="store_true",
+        help="Pack original upstream .mtlx files (gpuopen only)",
+    )
+    p_mtlx.add_argument("--mtlx-dir", default="mtlx", help="Directory with upstream .mtlx files")
+
     args = parser.parse_args()
 
     if args.command == "all":
@@ -425,6 +503,10 @@ def main() -> int:
         return cmd_fetch(args)
     if args.command == "catalog":
         return cmd_catalog(args)
+    if args.command == "derive-ktx2":
+        return cmd_derive_ktx2(args)
+    if args.command == "pack-mtlx":
+        return cmd_pack_mtlx(args)
 
     parser.print_help()
     return 1
