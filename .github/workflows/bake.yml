@@ -137,7 +137,10 @@ jobs:
           BRANCH="chore/bake-${SOURCE}-${{ inputs.tier }}"
           git config user.name "mat-vis-baker[bot]"
           git config user.email "mat-vis-baker[bot]@users.noreply.github.com"
+          # Fresh branch from dev — only data files will be added (no workflows)
           git checkout -b "$BRANCH"
+          # Ensure no workflow changes are staged
+          git checkout HEAD -- .github/ || true
           [ -d index ] && git add index/
           [ -d mtlx ] && git add mtlx/
           [ -f docs/catalog.md ] && git add docs/catalog.md

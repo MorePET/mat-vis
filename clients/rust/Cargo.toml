@@ -1,0 +1,16 @@
+[package]
+name = "mat-vis-client"
+version = "0.1.0"
+edition = "2021"
+description = "mat-vis PBR texture client — fetch textures via HTTP range reads"
+license = "MIT"
+
+[[bin]]
+name = "mat-vis"
+path = "src/main.rs"
+
+[dependencies]
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
