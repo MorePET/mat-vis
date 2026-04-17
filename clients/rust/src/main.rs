@@ -123,6 +123,10 @@ enum Commands {
     },
 }
 
+fn tag_from_env() -> Option<String> {
+    std::env::var("MAT_VIS_TAG").ok().or_else(|| Some("v2026.04.0".to_string()))
+}
+
 fn main() {
     let cli = Cli::parse();
     let manifest = fetch_manifest(&cli.tag);
@@ -177,5 +181,64 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_tag() -> Option<String> {
+        Some(std::env::var("MAT_VIS_TAG").unwrap_or_else(|_| "v2026.04.0".to_string()))
+    }
+
+    #[test]
+    fn test_fetch_manifest() {
+        let tag = test_tag();
+        let manifest = fetch_manifest(&tag);
+        assert!(manifest.tiers.contains_key("1k"), "manifest should have 1k tier");
+    }
+
+    #[test]
+    fn test_list_sources() {
+        let tag = test_tag();
+        let manifest = fetch_manifest(&tag);
+        let tier = manifest.tiers.get("1k").expect("1k tier missing");
+        assert!(tier.sources.contains_key("ambientcg"), "should have ambientcg source");
+    }
+
+    #[test]
+    fn test_fetch_rowmap() {
+        let tag = test_tag();
+        let manifest = fetch_manifest(&tag);
+        let tier = manifest.tiers.get("1k").expect("1k tier missing");
+        let src = tier.sources.get("ambientcg").expect("ambientcg missing");
+        let rowmap = fetch_rowmap(&tier.base_url, src);
+        assert!(!rowmap.materials.is_empty(), "rowmap should have materials");
+    }
+
+    #[test]
+    fn test_range_read_png() {
+        let tag = test_tag();
+        let manifest = fetch_manifest(&tag);
+        let tier = manifest.tiers.get("1k").expect("1k tier missing");
+        let src = tier.sources.get("ambientcg").expect("ambientcg missing");
+        let rowmap = fetch_rowmap(&tier.base_url, src);
+
+        let (mid, channels) = rowmap.materials.iter().next().expect("no materials");
+        let rng = channels.get("color").unwrap_or_else(|| {
+            channels.values().next().expect("no channels")
+        });
+
+        let url = format!("{}{}", tier.base_url, rowmap.parquet_file);
+        let data = range_read(&url, rng.offset, rng.length);
+
+        assert!(data.len() > 4, "data too small");
+        assert_eq!(
+            &data[..4],
+            &[0x89, 0x50, 0x4E, 0x47],
+            "expected PNG magic bytes for material {mid}"
+        );
+        assert!(data.len() > 1000, "PNG should not be trivially small");
     }
 }
