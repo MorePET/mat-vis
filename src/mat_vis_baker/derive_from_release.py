@@ -42,6 +42,19 @@ def _resize_png(png_bytes: bytes, target_px: int) -> bytes:
         return buf.getvalue()
 
 
+def _make_client(release_tag: str):
+    """Create a MatVisClient, handling the dev-layout import path."""
+    try:
+        from mat_vis_client import MatVisClient
+    except ImportError:
+        client_path = str(Path(__file__).resolve().parents[2] / "clients" / "python" / "src")
+        if client_path not in sys.path:
+            sys.path.insert(0, client_path)
+        from mat_vis_client import MatVisClient
+
+    return MatVisClient(tag=release_tag)
+
+
 def derive_from_release(
     source: str,
     target_tier: str,
@@ -50,6 +63,7 @@ def derive_from_release(
     source_tier: str = "1k",
     release_tag: str = "v0000.00.0",
     limit: int | None = None,
+    _client=None,
 ) -> int:
     """Derive a smaller tier from an existing release's parquets.
 
@@ -57,18 +71,12 @@ def derive_from_release(
     source-tier parquet, resizes to target_tier, and streams into new
     parquet files (one row at a time, constant memory).
 
+    Args:
+        _client: Optional pre-built client (for testing). If None, creates one
+                 from release_tag.
+
     Returns 0 on success, 1 on failure.
     """
-    # Import client — it lives in clients/python/src
-    try:
-        from mat_vis_client import MatVisClient
-    except ImportError:
-        # Fall back to path insertion for dev setups
-        client_path = str(Path(__file__).resolve().parents[2] / "clients" / "python" / "src")
-        if client_path not in sys.path:
-            sys.path.insert(0, client_path)
-        from mat_vis_client import MatVisClient
-
     target_px = TIER_TO_PX[target_tier]
     source_px = TIER_TO_PX[source_tier]
 
@@ -95,7 +103,7 @@ def derive_from_release(
     t0 = time.monotonic()
 
     # ── discover materials from release ──
-    client = MatVisClient(tag=release_tag)
+    client = _client or _make_client(release_tag)
     material_ids = client.materials(source, source_tier)
     if limit:
         material_ids = material_ids[:limit]
