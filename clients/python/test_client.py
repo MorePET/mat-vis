@@ -170,25 +170,25 @@ class TestClientManifest:
 
 
 class TestClientRowmap:
-    @patch("mat_vis_client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
     def test_fetch_rowmap(self, mock_get, mock_client):
         rm = mock_client.rowmap("ambientcg", "1k")
         assert "materials" in rm
         assert "Rock064" in rm["materials"]
 
-    @patch("mat_vis_client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
     def test_materials_list(self, mock_get, mock_client):
         mats = mock_client.materials("ambientcg", "1k")
         assert "Metal032" in mats
         assert "Rock064" in mats
 
-    @patch("mat_vis_client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
     def test_channels(self, mock_get, mock_client):
         channels = mock_client.channels("ambientcg", "Rock064", "1k")
         assert "color" in channels
         assert "normal" in channels
 
-    @patch("mat_vis_client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
     def test_rowmap_entry(self, mock_get, mock_client):
         entry = mock_client.rowmap_entry("ambientcg", "Rock064", "1k")
         assert "color" in entry
@@ -198,14 +198,14 @@ class TestClientRowmap:
 
 
 class TestClientSearch:
-    @patch("mat_vis_client._get_json")
+    @patch("mat_vis_client.client._get_json")
     def test_search_by_category(self, mock_get, mock_client):
         mock_get.return_value = MOCK_INDEX_AMBIENTCG
         results = mock_client.search("metal", source="ambientcg")
         assert len(results) == 1
         assert results[0]["id"] == "Metal032"
 
-    @patch("mat_vis_client._get_json")
+    @patch("mat_vis_client.client._get_json")
     def test_search_by_roughness_range(self, mock_get, mock_client):
         mock_get.return_value = MOCK_INDEX_AMBIENTCG
         results = mock_client.search(roughness_range=(0.5, 0.9), source="ambientcg")
@@ -213,14 +213,14 @@ class TestClientSearch:
         ids = {r["id"] for r in results}
         assert ids == {"Rock064", "Wood045"}
 
-    @patch("mat_vis_client._get_json")
+    @patch("mat_vis_client.client._get_json")
     def test_search_by_metalness_range(self, mock_get, mock_client):
         mock_get.return_value = MOCK_INDEX_AMBIENTCG
         results = mock_client.search(metalness_range=(0.9, 1.0), source="ambientcg")
         assert len(results) == 1
         assert results[0]["id"] == "Metal032"
 
-    @patch("mat_vis_client._get_json")
+    @patch("mat_vis_client.client._get_json")
     def test_search_combined_filters(self, mock_get, mock_client):
         mock_get.return_value = MOCK_INDEX_AMBIENTCG
         results = mock_client.search(
@@ -231,14 +231,14 @@ class TestClientSearch:
         assert len(results) == 1
         assert results[0]["id"] == "Rock064"
 
-    @patch("mat_vis_client._get_json")
+    @patch("mat_vis_client.client._get_json")
     def test_search_tier_filter(self, mock_get, mock_client):
         mock_get.return_value = MOCK_INDEX_AMBIENTCG
         # Metal032 is only available in 1k
         results = mock_client.search("metal", source="ambientcg", tier="2k")
         assert len(results) == 0
 
-    @patch("mat_vis_client._get_json")
+    @patch("mat_vis_client.client._get_json")
     def test_search_no_filters_returns_all(self, mock_get, mock_client):
         mock_get.return_value = MOCK_INDEX_AMBIENTCG
         results = mock_client.search(source="ambientcg")
@@ -250,8 +250,8 @@ class TestClientSearch:
 
 
 class TestClientPrefetch:
-    @patch("mat_vis_client._get_json", return_value=MOCK_ROWMAP)
-    @patch("mat_vis_client._get", return_value=TINY_PNG)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get", return_value=TINY_PNG)
     def test_prefetch_downloads_all(self, mock_http, mock_json, mock_client):
         progress = []
         n = mock_client.prefetch(
@@ -264,8 +264,8 @@ class TestClientPrefetch:
         assert progress[-1][1] == 2  # last index
         assert progress[-1][2] == 2  # total
 
-    @patch("mat_vis_client._get_json", return_value=MOCK_ROWMAP)
-    @patch("mat_vis_client._get", return_value=TINY_PNG)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get", return_value=TINY_PNG)
     def test_fetch_all_textures(self, mock_http, mock_json, mock_client):
         textures = mock_client.fetch_all_textures("ambientcg", "Rock064", "1k")
         assert set(textures.keys()) == {"color", "normal", "roughness"}
@@ -398,7 +398,7 @@ class TestExportMtlx:
     def test_scalars_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = export_mtlx(
-                {"metalness": 1.0, "roughness": 0.3, "color_hex": "#C0C0C0"},
+                {"roughness": 0.3, "ior": 1.5},
                 output_dir=tmp,
                 material_name="TestMat",
             )
@@ -406,15 +406,14 @@ class TestExportMtlx:
             assert path.suffix == ".mtlx"
 
             content = path.read_text()
-            assert "standard_surface" in content
-            assert 'name="metalness"' in content
-            assert 'name="specular_roughness"' in content
-            assert 'name="base_color"' in content
+            assert "UsdPreviewSurface" in content
+            assert 'name="roughness"' in content
+            assert 'name="ior"' in content
 
     def test_with_textures(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = export_mtlx(
-                {"metalness": 0.5},
+                {},
                 {"color": TINY_PNG, "normal": TINY_PNG},
                 output_dir=tmp,
                 material_name="TexMat",
@@ -426,8 +425,33 @@ class TestExportMtlx:
             assert (Path(tmp) / "TexMat_normal.png").exists()
 
             content = path.read_text()
-            assert "tiledimage" in content
+            assert "<image " in content
+            assert "<nodegraph " in content
             assert "TexMat_color.png" in content
+            # Normal maps should have a normalmap node
+            assert "<normalmap " in content
+
+    def test_texture_dir_mode(self):
+        """Test generating mtlx from existing texture files on disk."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tex_dir = Path(tmp) / "textures"
+            tex_dir.mkdir()
+            (tex_dir / "color.png").write_bytes(TINY_PNG)
+            (tex_dir / "roughness.png").write_bytes(TINY_PNG)
+
+            path = export_mtlx(
+                {},
+                output_dir=tmp,
+                material_name="DirMat",
+                texture_dir=str(tex_dir),
+                channels=["color", "roughness"],
+            )
+            assert path.exists()
+            content = path.read_text()
+            assert "color.png" in content
+            assert "roughness.png" in content
+            # Should NOT write new PNG files to output_dir
+            assert not (Path(tmp) / "DirMat_color.png").exists()
 
     def test_creates_output_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -443,7 +467,108 @@ class TestExportMtlx:
 
             content = path.read_text()
             assert 'name="MyMat"' in content
-            assert 'name="SR_MyMat"' in content
+            assert "UsdPreviewSurface" in content
+
+    def test_srgb_colorspace_on_color(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = export_mtlx(
+                {},
+                {"color": TINY_PNG, "emission": TINY_PNG, "roughness": TINY_PNG},
+                output_dir=tmp,
+                material_name="CS",
+            )
+            content = path.read_text()
+            # color and emission get srgb_texture, roughness does not
+            assert content.count('colorspace="srgb_texture"') == 2
+
+    def test_scalar_fallback_when_no_texture(self):
+        """Scalar roughness should appear only when no roughness texture."""
+        with tempfile.TemporaryDirectory() as tmp:
+            # With texture: no scalar
+            path = export_mtlx(
+                {"roughness": 0.5},
+                {"roughness": TINY_PNG},
+                output_dir=tmp,
+                material_name="WithTex",
+            )
+            content = path.read_text()
+            # roughness input should connect to nodegraph, not be a scalar value
+            assert 'output="out_roughness"' in content
+
+            # Without texture: scalar
+            path2 = export_mtlx(
+                {"roughness": 0.5},
+                {},
+                output_dir=tmp,
+                material_name="NoTex",
+            )
+            content2 = path2.read_text()
+            assert 'value="0.5"' in content2
+
+
+# ── Client materialize + to_mtlx tests ───────────────────────
+
+
+class TestMaterialize:
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get", return_value=TINY_PNG)
+    def test_materialize_writes_pngs(self, mock_http, mock_json, mock_client):
+        with tempfile.TemporaryDirectory() as tmp:
+            tex_dir = mock_client.materialize("ambientcg", "Rock064", "1k", tmp)
+            assert tex_dir.is_dir()
+            assert (tex_dir / "color.png").exists()
+            assert (tex_dir / "normal.png").exists()
+            assert (tex_dir / "roughness.png").exists()
+            assert (tex_dir / "color.png").read_bytes()[:4] == b"\x89PNG"
+
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get", return_value=TINY_PNG)
+    def test_materialize_skips_existing(self, mock_http, mock_json, mock_client):
+        with tempfile.TemporaryDirectory() as tmp:
+            # First call writes
+            mock_client.materialize("ambientcg", "Rock064", "1k", tmp)
+            call_count_1 = mock_http.call_count
+
+            # Second call should skip (files exist)
+            mock_client.materialize("ambientcg", "Rock064", "1k", tmp)
+            assert mock_http.call_count == call_count_1  # no new HTTP calls
+
+    @patch("mat_vis_client.client._get_json")
+    @patch("mat_vis_client.client._get", return_value=TINY_PNG)
+    def test_to_mtlx_generates_valid_document(self, mock_http, mock_json, mock_client):
+        mock_json.side_effect = [MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG, MOCK_ROWMAP]
+        with tempfile.TemporaryDirectory() as tmp:
+            mtlx_path = mock_client.to_mtlx("ambientcg", "Rock064", "1k", tmp)
+            assert mtlx_path.exists()
+            assert mtlx_path.suffix == ".mtlx"
+
+            content = mtlx_path.read_text()
+            assert "UsdPreviewSurface" in content
+            assert "<nodegraph " in content
+            assert "color.png" in content
+            assert 'version="1.38"' in content
+
+
+class TestFetchMtlxOriginal:
+    @patch("mat_vis_client.client._get_json")
+    def test_returns_xml_for_known_material(self, mock_json, mock_client):
+        mock_json.return_value = {
+            "test-uuid": '<?xml version="1.0"?><materialx version="1.38"><nodegraph/></materialx>'
+        }
+        xml = mock_client.fetch_mtlx_original("gpuopen", "test-uuid")
+        assert xml is not None
+        assert "<materialx" in xml
+
+    @patch("mat_vis_client.client._get_json")
+    def test_returns_none_for_unknown(self, mock_json, mock_client):
+        mock_json.return_value = {"other-uuid": "<materialx/>"}
+        xml = mock_client.fetch_mtlx_original("gpuopen", "nonexistent")
+        assert xml is None
+
+    @patch("mat_vis_client.client._get_json", side_effect=Exception("404"))
+    def test_returns_none_when_no_mtlx_asset(self, mock_json, mock_client):
+        xml = mock_client.fetch_mtlx_original("ambientcg", "Rock064")
+        assert xml is None
 
 
 # ── Live tests (network required) ──────────────────────────────
