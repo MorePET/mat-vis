@@ -376,31 +376,18 @@ def cmd_derive_ktx2(args: argparse.Namespace) -> int:
 
 
 def cmd_pack_mtlx(args: argparse.Namespace) -> int:
-    """Generate MaterialX documents and pack as parquet tier."""
+    """Pack original upstream MaterialX files into a JSON map."""
+    from mat_vis_baker.mtlx_tier import pack_original_mtlx_json
+
     output_dir = Path(args.output_dir)
+    source = args.source or "gpuopen"
 
-    if args.original:
-        from mat_vis_baker.mtlx_tier import pack_original_mtlx
-
-        source = args.source or "gpuopen"
-        paths = pack_original_mtlx(
-            mtlx_dir=Path(args.mtlx_dir),
-            source=source,
-            output_dir=output_dir,
-            release_tag=args.release_tag,
-        )
-    else:
-        from mat_vis_baker.mtlx_tier import pack_mtlx_tier
-
-        sources = [args.source] if args.source else None
-        paths = pack_mtlx_tier(
-            tag=args.release_tag,
-            tier=args.tier,
-            output_dir=output_dir,
-            sources=sources,
-        )
-
-    log.info("wrote %d MaterialX parquet files", len(paths))
+    path = pack_original_mtlx_json(
+        mtlx_dir=Path(args.mtlx_dir),
+        source=source,
+        output_dir=output_dir,
+    )
+    log.info("wrote %s", path)
     return 0
 
 
@@ -478,17 +465,10 @@ def main() -> int:
 
     p_mtlx = sub.add_parser(
         "pack-mtlx",
-        help="Generate MaterialX documents and pack as parquet tier",
+        help="Pack original upstream .mtlx files into JSON map for release",
     )
     p_mtlx.add_argument("output_dir")
-    p_mtlx.add_argument("--release-tag", default="v2026.04.0")
-    p_mtlx.add_argument("--tier", default="1k", help="Resolution tier to reference (default: 1k)")
-    p_mtlx.add_argument("--source", default=None, help="Restrict to one source")
-    p_mtlx.add_argument(
-        "--original",
-        action="store_true",
-        help="Pack original upstream .mtlx files (gpuopen only)",
-    )
+    p_mtlx.add_argument("--source", default=None, help="Source (default: gpuopen)")
     p_mtlx.add_argument("--mtlx-dir", default="mtlx", help="Directory with upstream .mtlx files")
 
     args = parser.parse_args()

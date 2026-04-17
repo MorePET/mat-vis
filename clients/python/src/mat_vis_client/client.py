@@ -287,6 +287,171 @@ class MatVisClient:
 
         return total
 
+    def materialize(
+        self,
+        source: str,
+        material_id: str,
+        tier: str = "1k",
+        output_dir: str | Path = ".",
+    ) -> Path:
+        """Write all texture PNGs for a material to disk.
+
+        Returns the directory containing the PNG files, named by channel
+        (e.g. color.png, normal.png, roughness.png).
+        """
+        out = Path(output_dir) / material_id
+        out.mkdir(parents=True, exist_ok=True)
+
+        chs = self.channels(source, material_id, tier)
+        for ch in chs:
+            png_path = out / f"{ch}.png"
+            if not png_path.exists():
+                png_bytes = self.fetch_texture(source, material_id, ch, tier)
+                png_path.write_bytes(png_bytes)
+
+        return out
+
+    def to_mtlx(
+        self,
+        source: str,
+        material_id: str,
+        tier: str = "1k",
+        output_dir: str | Path = ".",
+    ) -> Path:
+        """Materialize textures and generate a MaterialX document.
+
+        Writes PNGs to output_dir/{material_id}/ and creates a .mtlx
+        file referencing them with local paths. The result is loadable
+        by any standard MaterialX renderer.
+
+        Returns path to the .mtlx file.
+        """
+        from mat_vis_client.adapters import export_mtlx
+
+        tex_dir = self.materialize(source, material_id, tier, output_dir)
+        chs = self.channels(source, material_id, tier)
+
+        # Get scalars from index if available
+        scalars: dict = {}
+        try:
+            for entry in self.index(source):
+                if entry["id"] == material_id:
+                    for k in ("roughness", "metalness", "ior", "color_hex"):
+                        if k in entry and entry[k] is not None:
+                            scalars[k] = entry[k]
+                    break
+        except Exception:
+            pass
+
+        return export_mtlx(
+            scalars=scalars,
+            output_dir=str(tex_dir),
+            material_name=material_id,
+            texture_dir=str(tex_dir),
+            channels=chs,
+        )
+
+    # ── Original MaterialX (gpuopen) ───────────────────────────
+
+    def fetch_mtlx_original(self, source: str, material_id: str) -> str | None:
+        """Fetch original upstream MaterialX XML for a material.
+
+        Downloads and caches the {source}-mtlx.json map from the release,
+        then returns the XML string for the given material_id.
+        Returns None if the source has no original mtlx or material not found.
+        """
+        if not hasattr(self, "_mtlx_originals"):
+            self._mtlx_originals: dict[str, dict[str, str]] = {}
+
+        if source not in self._mtlx_originals:
+            tag = self.manifest.get("release_tag", self._tag or "")
+            url = f"{GITHUB_RELEASES}/download/{tag}/{source}-mtlx.json"
+            try:
+                data = _get_json(url)
+                self._mtlx_originals[source] = data
+            except Exception:
+                self._mtlx_originals[source] = {}
+
+        return self._mtlx_originals[source].get(material_id)
+
+    def materialize_mtlx(
+        self,
+        source: str,
+        material_id: str,
+        tier: str = "1k",
+        output_dir: str | Path = ".",
+    ) -> Path | None:
+        """Fetch original MaterialX, rewrite texture paths, write to disk.
+
+        For materials with original upstream mtlx (gpuopen), fetches the
+        XML, materializes the PNG textures, then rewrites texture file
+        references to point at the local PNGs.
+
+        Falls back to generated UsdPreviewSurface if no original exists.
+
+        Returns path to the .mtlx file, or None on failure.
+        """
+        import re
+
+        xml_str = self.fetch_mtlx_original(source, material_id)
+        if xml_str is None:
+            # Fall back to generated
+            return self.to_mtlx(source, material_id, tier, output_dir)
+
+        # Materialize textures
+        tex_dir = self.materialize(source, material_id, tier, output_dir)
+        chs = self.channels(source, material_id, tier)
+
+        # Build a map of possible original filenames → our channel filenames
+        # GPUOpen uses names like BaseColor.png, Normal.png, Roughness.png
+        _FILENAME_TO_CHANNEL = {
+            "basecolor": "color",
+            "base_color": "color",
+            "diffuse": "color",
+            "normal": "normal",
+            "roughness": "roughness",
+            "specular_roughness": "roughness",
+            "metallic": "metalness",
+            "metalness": "metalness",
+            "occlusion": "ao",
+            "ao": "ao",
+            "ambientocclusion": "ao",
+            "displacement": "displacement",
+            "height": "displacement",
+            "emission": "emission",
+            "emissive": "emission",
+        }
+
+        def _rewrite_path(match: re.Match) -> str:
+            """Replace texture filename with local path."""
+            orig = match.group(1)
+            stem = Path(orig).stem.lower().replace(" ", "").replace("-", "").replace("_", "")
+            # Try direct match
+            for pattern, channel in _FILENAME_TO_CHANNEL.items():
+                clean_pattern = pattern.replace("_", "")
+                if clean_pattern in stem and channel in chs:
+                    return f'value="{tex_dir / (channel + ".png")}"'
+            # Try substring
+            for pattern, channel in _FILENAME_TO_CHANNEL.items():
+                clean_pattern = pattern.replace("_", "")
+                if clean_pattern in stem:
+                    local = tex_dir / f"{channel}.png"
+                    if local.exists():
+                        return f'value="{local}"'
+            return match.group(0)
+
+        # Rewrite all filename values in the XML
+        rewritten = re.sub(
+            r'value="([^"]*\.(?:png|jpg|jpeg|tif|tiff|exr))"',
+            _rewrite_path,
+            xml_str,
+            flags=re.IGNORECASE,
+        )
+
+        mtlx_path = tex_dir / f"{material_id}.mtlx"
+        mtlx_path.write_text(rewritten, encoding="utf-8")
+        return mtlx_path
+
     def rowmap_entry(
         self,
         source: str,
