@@ -226,7 +226,7 @@ def generate_rowmap(
     from PNG magic appearing inside other columns' compressed data.
     """
     pf = pq.ParquetFile(parquet_path)
-    file_bytes = parquet_path.read_bytes()
+    fh = open(parquet_path, "rb")  # noqa: SIM115 — kept open for seeking
     meta = pf.metadata
 
     ok_records = [r for r in records if r.status == "ok"]
@@ -250,8 +250,12 @@ def generate_rowmap(
             if png_bytes is None:
                 continue
 
+            # Read only a small window around the page offset (not the whole file)
             page_offset = col_meta.data_page_offset
-            png_start = _find_png_in_page(file_bytes, page_offset, len(png_bytes))
+            fh.seek(page_offset)
+            window = fh.read(_MAX_PAGE_HEADER_SIZE)
+            png_idx = window.find(PNG_MAGIC)
+            png_start = (page_offset + png_idx) if png_idx >= 0 else None
             if png_start is None:
                 log.warning(
                     "%s/%s: PNG magic not found within %d bytes of page offset %d",
@@ -278,6 +282,8 @@ def generate_rowmap(
         "parquet_file": parquet_name,
         "materials": materials,
     }
+
+    fh.close()
 
     log.info(
         "rowmap: %d materials, %d total channels",
