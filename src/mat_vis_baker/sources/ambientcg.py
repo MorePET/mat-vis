@@ -88,16 +88,46 @@ def _extract_download_url(entry: dict, tier: str) -> str | None:
 _CHANNEL_RE = re.compile(r"_([A-Za-z]+)\.(png|jpg)$", re.IGNORECASE)
 
 
-def _extract_maps_from_zip(zip_bytes: bytes, material_id: str, output_dir: Path) -> dict[str, Path]:
-    """Extract PNG textures from a ZIP, normalize channel names."""
+def _inject_mtlx_comment(mtlx_bytes: bytes, material_id: str, source_url: str) -> bytes:
+    """Inject source attribution comment into mtlx XML."""
+    comment = (
+        f"<!-- source: {source_url} -->\n"
+        f"<!-- license: CC0-1.0 -->\n"
+        f"<!-- material: {material_id} -->\n"
+        f"<!-- fetched-by: mat-vis-baker -->\n"
+    ).encode()
+    # Insert after XML declaration if present, otherwise prepend
+    text = mtlx_bytes
+    if text.startswith(b"<?xml"):
+        end = text.find(b"?>")
+        if end >= 0:
+            return text[: end + 2] + b"\n" + comment + text[end + 2 :]
+    return comment + text
+
+
+def _extract_maps_from_zip(
+    zip_bytes: bytes, material_id: str, output_dir: Path, *, mtlx_dir: Path | None = None
+) -> dict[str, Path]:
+    """Extract PNG textures and mtlx from a ZIP, normalize channel names."""
     mat_dir = output_dir / material_id
     mat_dir.mkdir(parents=True, exist_ok=True)
     result: dict[str, Path] = {}
+
+    source_url = f"https://ambientcg.com/a/{material_id}"
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         for name in zf.namelist():
             if name.endswith("/"):
                 continue
+
+            # Extract .mtlx files
+            if name.lower().endswith(".mtlx") and mtlx_dir:
+                mtlx_out = mtlx_dir / "ambientcg" / material_id / "material.mtlx"
+                mtlx_out.parent.mkdir(parents=True, exist_ok=True)
+                raw = zf.read(name)
+                mtlx_out.write_bytes(_inject_mtlx_comment(raw, material_id, source_url))
+                continue
+
             m = _CHANNEL_RE.search(name)
             if not m:
                 continue
@@ -129,6 +159,7 @@ def fetch(
     *,
     limit: int | None = None,
     session: requests.Session | None = None,
+    mtlx_dir: Path | None = None,
 ) -> list[MaterialRecord]:
     """Fetch ambientcg materials for a given tier."""
     s = session or requests.Session()
@@ -151,7 +182,7 @@ def fetch(
         try:
             dl_url = _extract_download_url(entry, tier)
             resp = retry_request(dl_url, session=s)
-            textures = _extract_maps_from_zip(resp.content, mid, output_dir)
+            textures = _extract_maps_from_zip(resp.content, mid, output_dir, mtlx_dir=mtlx_dir)
 
             if not textures:
                 log.warning("%s: no textures in ZIP", mid)
