@@ -326,6 +326,35 @@ def cmd_derive_from_release(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_catalog(args: argparse.Namespace) -> int:
+    """Generate catalog + thumbnails from published release."""
+    from mat_vis_baker.catalog_from_release import (
+        fetch_thumbnails_from_release,
+        generate_catalog_from_release,
+    )
+
+    output_dir = Path(args.output_dir)
+    thumb_dir = output_dir / "mtlx"
+    index_dir = output_dir / "index"
+
+    if not args.skip_thumbnails:
+        log.info("=== fetching thumbnails from release ===")
+        count = fetch_thumbnails_from_release(args.release_tag, thumb_dir)
+        log.info("saved %d thumbnails", count)
+
+    log.info("=== generating catalog ===")
+    md = generate_catalog_from_release(
+        args.release_tag,
+        thumb_dir,
+        index_dir if index_dir.exists() else None,
+    )
+    catalog_path = output_dir / "docs" / "catalog.md"
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog_path.write_text(md)
+    log.info("wrote %s", catalog_path)
+    return 0
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     """Fetch only — download textures from upstream."""
     fetch = _get_fetcher(args.source)
@@ -377,6 +406,13 @@ def main() -> int:
     p_fetch.add_argument("output_dir")
     p_fetch.add_argument("--limit", type=int, default=None)
 
+    p_cat = sub.add_parser("catalog", help="Generate catalog + thumbnails from release")
+    p_cat.add_argument("release_tag", help="Release tag (e.g. v2026.04.0)")
+    p_cat.add_argument(
+        "--output-dir", default=".", help="Repo root (writes docs/catalog.md + mtlx/)"
+    )
+    p_cat.add_argument("--skip-thumbnails", action="store_true", help="Skip thumbnail download")
+
     args = parser.parse_args()
 
     if args.command == "all":
@@ -387,6 +423,8 @@ def main() -> int:
         return cmd_derive_from_release(args)
     if args.command == "fetch":
         return cmd_fetch(args)
+    if args.command == "catalog":
+        return cmd_catalog(args)
 
     parser.print_help()
     return 1
