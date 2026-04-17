@@ -67,10 +67,26 @@ export class MatVisClient {
       if (!srcData) throw new Error(`Source ${source} not found for tier ${tier}`);
 
       const rowmapFiles = srcData.rowmap_files || [srcData.rowmap_file];
-      const url = tierData.base_url + rowmapFiles[0];
-      const resp = await fetch(url, { headers: { 'User-Agent': UA } });
-      if (!resp.ok) throw new Error(`Failed to fetch rowmap: ${resp.status}`);
-      this.#rowmaps.set(key, await resp.json());
+
+      // Fetch all partition rowmaps and merge materials
+      const merged = { materials: {} };
+      for (const rmf of rowmapFiles) {
+        const url = tierData.base_url + rmf;
+        const resp = await fetch(url, { headers: { 'User-Agent': UA } });
+        if (!resp.ok) throw new Error(`Failed to fetch rowmap ${rmf}: ${resp.status}`);
+        const rm = await resp.json();
+        const pqFile = rm.parquet_file || '';
+        for (const [mid, channels] of Object.entries(rm.materials || {})) {
+          for (const chData of Object.values(channels)) {
+            chData.parquet_file = pqFile;
+          }
+          merged.materials[mid] = channels;
+        }
+        for (const k of ['version', 'release_tag', 'source', 'tier']) {
+          if (rm[k]) merged[k] = rm[k];
+        }
+      }
+      this.#rowmaps.set(key, merged);
     }
     return this.#rowmaps.get(key);
   }
@@ -97,7 +113,8 @@ export class MatVisClient {
     if (!rng) throw new Error(`Channel ${channel} not found for ${materialId}`);
 
     const m = await this.manifest();
-    const url = m.tiers[tier].base_url + rm.parquet_file;
+    const pqFile = rng.parquet_file || rm.parquet_file || '';
+    const url = m.tiers[tier].base_url + pqFile;
 
     const resp = await fetch(url, {
       headers: {

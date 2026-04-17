@@ -57,14 +57,21 @@ cmd_materials() {
     local manifest
     manifest=$(get_manifest)
 
-    local base_url rowmap_file rowmap_url
+    local base_url
     base_url=$(echo "$manifest" | jq -r ".tiers[\"$tier\"].base_url")
-    rowmap_file=$(echo "$manifest" | jq -r ".tiers[\"$tier\"].sources[\"$source\"].rowmap_files[0]")
+    local rowmap_files
+    rowmap_files=$(echo "$manifest" | jq -r ".tiers[\"$tier\"].sources[\"$source\"].rowmap_files[]")
 
-    [ "$rowmap_file" = "null" ] && die "No rowmap for $source/$tier"
+    [ -z "$rowmap_files" ] && die "No rowmaps for $source/$tier"
 
-    rowmap_url="${base_url}${rowmap_file}"
-    fetch_json "$rowmap_url" "$CACHE/.rowmaps/$rowmap_file" | jq -r '.materials | keys[]' | sort
+    # Fetch all partition rowmaps and merge material IDs
+    local all_materials=""
+    while IFS= read -r rmf; do
+        local rm
+        rm=$(fetch_json "${base_url}${rmf}" "$CACHE/.rowmaps/$rmf")
+        all_materials="$all_materials$(echo "$rm" | jq -r '.materials | keys[]')"$'\n'
+    done <<< "$rowmap_files"
+    echo "$all_materials" | sort -u | grep -v '^$'
 }
 
 cmd_fetch() {
@@ -95,24 +102,30 @@ cmd_fetch() {
         return
     fi
 
-    # Get manifest + rowmap
+    # Get manifest + search all partition rowmaps for this material
     local manifest
     manifest=$(get_manifest)
-    local base_url rowmap_file
+    local base_url
     base_url=$(echo "$manifest" | jq -r ".tiers[\"$tier\"].base_url")
-    rowmap_file=$(echo "$manifest" | jq -r ".tiers[\"$tier\"].sources[\"$source\"].rowmap_files[0]")
-    [ "$rowmap_file" = "null" ] && die "No rowmap for $source/$tier"
+    local rowmap_files
+    rowmap_files=$(echo "$manifest" | jq -r ".tiers[\"$tier\"].sources[\"$source\"].rowmap_files[]")
+    [ -z "$rowmap_files" ] && die "No rowmaps for $source/$tier"
 
-    local rowmap
-    rowmap=$(fetch_json "${base_url}${rowmap_file}" "$CACHE/.rowmaps/$rowmap_file")
+    local offset="" length="" parquet_file=""
+    while IFS= read -r rmf; do
+        local rm
+        rm=$(fetch_json "${base_url}${rmf}" "$CACHE/.rowmaps/$rmf")
+        local found
+        found=$(echo "$rm" | jq -r ".materials[\"$material\"][\"$channel\"].offset // empty")
+        if [ -n "$found" ]; then
+            offset=$found
+            length=$(echo "$rm" | jq -r ".materials[\"$material\"][\"$channel\"].length")
+            parquet_file=$(echo "$rm" | jq -r ".parquet_file")
+            break
+        fi
+    done <<< "$rowmap_files"
 
-    # Get offset + length
-    local offset length parquet_file
-    offset=$(echo "$rowmap" | jq -r ".materials[\"$material\"][\"$channel\"].offset")
-    length=$(echo "$rowmap" | jq -r ".materials[\"$material\"][\"$channel\"].length")
-    parquet_file=$(echo "$rowmap" | jq -r ".parquet_file")
-
-    [ "$offset" = "null" ] && die "$material/$channel not found in rowmap"
+    [ -z "$offset" ] && die "$material/$channel not found in any rowmap partition"
 
     local parquet_url="${base_url}${parquet_file}"
     local range_end=$((offset + length - 1))
