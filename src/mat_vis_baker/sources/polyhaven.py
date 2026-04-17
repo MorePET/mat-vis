@@ -102,15 +102,62 @@ def _download_maps(
 # ── main fetch ──────────────────────────────────────────────────
 
 
+MAX_WORKERS = 8  # polyhaven does per-map downloads, so fewer workers to be polite
+
+
+def _fetch_one(slug: str, meta: dict, tier: str, output_dir: Path) -> MaterialRecord:
+    """Fetch a single polyhaven material. Called from thread pool."""
+    name = meta.get("name", slug)
+    try:
+        file_info = _fetch_files(slug)
+        textures = _download_maps(file_info, tier, output_dir, slug)
+
+        if not textures:
+            return MaterialRecord(
+                id=slug, source="polyhaven", name=name, category="other", status="failed"
+            )
+
+        raw_cats = meta.get("categories", [])
+        if isinstance(raw_cats, dict):
+            cat_str = next(iter(raw_cats.keys()), "")
+        elif isinstance(raw_cats, list) and raw_cats:
+            cat_str = raw_cats[0]
+        else:
+            cat_str = ""
+        cat = normalize_category(cat_str)
+        tags = meta.get("tags", [])
+
+        return MaterialRecord(
+            id=slug,
+            source="polyhaven",
+            name=name,
+            category=cat,
+            tags=tags,
+            source_url=f"https://polyhaven.com/a/{slug}",
+            source_license="CC0-1.0",
+            last_updated="",
+            available_tiers=[tier],
+            maps=sorted(textures.keys()),
+            texture_paths=textures,
+        )
+    except Exception:
+        log.exception("%s: fetch failed", slug)
+        return MaterialRecord(
+            id=slug, source="polyhaven", name=name, category="other", status="failed"
+        )
+
+
 def fetch(
     tier: str,
     output_dir: Path,
     *,
     limit: int | None = None,
     session: requests.Session | None = None,
-    mtlx_dir: Path | None = None,  # polyhaven has no mtlx, param for interface consistency
+    mtlx_dir: Path | None = None,
 ) -> list[MaterialRecord]:
-    """Fetch polyhaven materials for a given tier."""
+    """Fetch polyhaven materials for a given tier. Downloads in parallel."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     s = session or requests.Session()
     assets = discover(session=s)
 
@@ -119,62 +166,24 @@ def fetch(
         slugs = slugs[:limit]
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
     records: list[MaterialRecord] = []
     ok = 0
     failed = 0
 
-    for slug in slugs:
-        meta = assets[slug]
-        name = meta.get("name", slug)
-        try:
-            file_info = _fetch_files(slug, session=s)
-            textures = _download_maps(file_info, tier, output_dir, slug, session=s)
-
-            if not textures:
-                log.warning("%s: no textures for tier %s", slug, tier)
-                failed += 1
-                records.append(
-                    MaterialRecord(
-                        id=slug, source="polyhaven", name=name, category="other", status="failed"
-                    )
-                )
-                continue
-
-            raw_cats = meta.get("categories", [])
-            if isinstance(raw_cats, dict):
-                cat_str = next(iter(raw_cats.keys()), "")
-            elif isinstance(raw_cats, list) and raw_cats:
-                cat_str = raw_cats[0]
-            else:
-                cat_str = ""
-            cat = normalize_category(cat_str)
-            tags = meta.get("tags", [])
-
-            rec = MaterialRecord(
-                id=slug,
-                source="polyhaven",
-                name=name,
-                category=cat,
-                tags=tags,
-                source_url=f"https://polyhaven.com/a/{slug}",
-                source_license="CC0-1.0",
-                last_updated="",
-                available_tiers=[tier],
-                maps=sorted(textures.keys()),
-                texture_paths=textures,
-            )
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(_fetch_one, slug, assets[slug], tier, output_dir): slug for slug in slugs
+        }
+        for i, future in enumerate(as_completed(futures), 1):
+            rec = future.result()
             records.append(rec)
-            ok += 1
-            log.info("%s: ok (%d textures)", slug, len(textures))
-
-        except Exception:
-            log.exception("%s: fetch failed", slug)
-            failed += 1
-            records.append(
-                MaterialRecord(
-                    id=slug, source="polyhaven", name=name, category="other", status="failed"
-                )
-            )
+            if rec.status == "ok":
+                ok += 1
+            else:
+                failed += 1
+            if i % 50 == 0 or i == len(slugs):
+                log.info("progress: %d/%d fetched (%d ok, %d failed)", i, len(slugs), ok, failed)
 
     log.info("polyhaven: %d ok, %d failed / %d total", ok, failed, len(slugs))
     return records

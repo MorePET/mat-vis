@@ -153,6 +153,47 @@ def _filter_with_downloads(entries: list[dict], tier: str) -> list[dict]:
     return [e for e in entries if _extract_download_url(e, tier) is not None]
 
 
+MAX_WORKERS = 10
+
+
+def _fetch_one(entry: dict, tier: str, output_dir: Path, mtlx_dir: Path | None) -> MaterialRecord:
+    """Fetch a single material. Called from thread pool."""
+    mid = entry.get("assetId", "")
+    name = entry.get("displayName", mid)
+    try:
+        dl_url = _extract_download_url(entry, tier)
+        resp = retry_request(dl_url)
+        textures = _extract_maps_from_zip(resp.content, mid, output_dir, mtlx_dir=mtlx_dir)
+
+        if not textures:
+            return MaterialRecord(
+                id=mid, source="ambientcg", name=name, category="other", status="failed"
+            )
+
+        cat = normalize_category(entry.get("displayCategory", entry.get("category", "")))
+        tags = entry.get("tags", [])
+        release_date = (entry.get("releaseDate") or "")[:10]
+
+        return MaterialRecord(
+            id=mid,
+            source="ambientcg",
+            name=name,
+            category=cat,
+            tags=tags,
+            source_url=f"https://ambientcg.com/a/{mid}",
+            source_license="CC0-1.0",
+            last_updated=release_date,
+            available_tiers=[tier],
+            maps=sorted(textures.keys()),
+            texture_paths=textures,
+        )
+    except Exception:
+        log.exception("%s: fetch failed", mid)
+        return MaterialRecord(
+            id=mid, source="ambientcg", name=name, category="other", status="failed"
+        )
+
+
 def fetch(
     tier: str,
     output_dir: Path,
@@ -161,68 +202,36 @@ def fetch(
     session: requests.Session | None = None,
     mtlx_dir: Path | None = None,
 ) -> list[MaterialRecord]:
-    """Fetch ambientcg materials for a given tier."""
+    """Fetch ambientcg materials for a given tier. Downloads in parallel."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     s = session or requests.Session()
     entries = discover(session=s)
 
-    # Filter to entries with downloads for this tier, then apply limit
     entries = _filter_with_downloads(entries, tier)
     log.info("%d materials have downloads for tier %s", len(entries), tier)
     if limit:
         entries = entries[:limit]
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
     records: list[MaterialRecord] = []
     ok = 0
     failed = 0
 
-    for entry in entries:
-        mid = entry.get("assetId", "")
-        name = entry.get("displayName", mid)
-        try:
-            dl_url = _extract_download_url(entry, tier)
-            resp = retry_request(dl_url, session=s)
-            textures = _extract_maps_from_zip(resp.content, mid, output_dir, mtlx_dir=mtlx_dir)
-
-            if not textures:
-                log.warning("%s: no textures in ZIP", mid)
-                failed += 1
-                records.append(
-                    MaterialRecord(
-                        id=mid, source="ambientcg", name=name, category="other", status="failed"
-                    )
-                )
-                continue
-
-            cat = normalize_category(entry.get("displayCategory", entry.get("category", "")))
-            tags = entry.get("tags", [])
-            release_date = (entry.get("releaseDate") or "")[:10]
-
-            rec = MaterialRecord(
-                id=mid,
-                source="ambientcg",
-                name=name,
-                category=cat,
-                tags=tags,
-                source_url=f"https://ambientcg.com/a/{mid}",
-                source_license="CC0-1.0",
-                last_updated=release_date,
-                available_tiers=[tier],
-                maps=sorted(textures.keys()),
-                texture_paths=textures,
-            )
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(_fetch_one, entry, tier, output_dir, mtlx_dir): entry for entry in entries
+        }
+        for i, future in enumerate(as_completed(futures), 1):
+            rec = future.result()
             records.append(rec)
-            ok += 1
-            log.info("%s: ok (%d textures)", mid, len(textures))
-
-        except Exception:
-            log.exception("%s: fetch failed", mid)
-            failed += 1
-            records.append(
-                MaterialRecord(
-                    id=mid, source="ambientcg", name=name, category="other", status="failed"
-                )
-            )
+            if rec.status == "ok":
+                ok += 1
+            else:
+                failed += 1
+            if i % 100 == 0 or i == len(entries):
+                log.info("progress: %d/%d fetched (%d ok, %d failed)", i, len(entries), ok, failed)
 
     log.info("ambientcg: %d ok, %d failed / %d total", ok, failed, len(entries))
     return records
