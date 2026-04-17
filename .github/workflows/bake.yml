@@ -48,7 +48,7 @@ jobs:
   bake:
     name: Bake ${{ inputs.source }} ${{ inputs.tier }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,13 +71,6 @@ jobs:
             ARGS="$ARGS --limit ${{ inputs.limit }}"
           fi
           $ARGS
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: bake-${{ inputs.source }}-${{ inputs.tier }}
-          path: /tmp/bake-out/
-          retention-days: 30
 
       - name: Ensure pre-release exists
         if: inputs.release-tag != 'v0000.00.0'
