@@ -3,7 +3,7 @@
 # Triggered manually.
 #
 # Outputs:
-#   - Parquet + rowmap → uploaded to GitHub Release
+#   - Parquet + rowmap + index JSON → uploaded to GitHub Release
 #   - Index JSON + mtlx + thumbnails + catalog → committed to git via PR
 
 name: Bake
@@ -78,7 +78,7 @@ jobs:
           path: /tmp/bake-out/
           retention-days: 30
 
-      - name: Attach parquet + rowmap to release
+      - name: Attach assets to release
         if: inputs.release-tag != 'v0000.00.0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -87,11 +87,17 @@ jobs:
             [ -f "$f" ] && gh release upload "${{ inputs.release-tag }}" "$f" --clobber || true
           done
 
+      - name: Generate app token for PR
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.COMMIT_APP_ID }}
+          private-key: ${{ secrets.COMMIT_APP_PRIVATE_KEY }}
+
       - name: Commit index + mtlx + thumbnails + catalog to git
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          # Copy git-tracked artifacts to repo
           SOURCE="${{ inputs.source }}"
 
           # Index JSON
@@ -112,10 +118,10 @@ jobs:
             cp "/tmp/bake-out/catalog.md" "docs/catalog.md"
           fi
 
-          # Create branch and PR
+          # Create branch and PR using app token
           BRANCH="chore/bake-${SOURCE}-${{ inputs.tier }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "mat-vis-baker[bot]"
+          git config user.email "mat-vis-baker[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
           [ -d index ] && git add index/
           [ -d mtlx ] && git add mtlx/
