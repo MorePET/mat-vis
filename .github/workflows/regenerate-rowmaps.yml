@@ -1,0 +1,32 @@
+---
+name: Regenerate rowmaps
+
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: 'Release tag to regenerate rowmaps for'
+        required: true
+        default: 'v2026.04.0'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dagger/dagger-for-github@v8.4.1
+        with:
+          verb: call
+          module: .dagger
+          args: >-
+            regenerate-rowmaps
+            --src=.
+            --release-tag=${{ inputs.release-tag }}
+            --registry-pass=env:GITHUB_TOKEN
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
