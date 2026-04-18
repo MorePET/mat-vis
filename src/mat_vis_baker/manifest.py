@@ -98,15 +98,19 @@ def rebuild_manifest_from_release(release_tag: str) -> dict:
     }
 
     # Parse name: mat-vis-{source}-{tier}-{category}[-{chunk}].parquet
-    # Tier can be a simple string (1k, 128) or hyphenated (ktx2-128, mtlx).
-    # Anchor tier to known prefixes or simple alphanumeric.
+    # Tier can be simple (1k, 128) or hyphenated (ktx2-128, mtlx).
+    # Category is pinned to the schema enum — no lazy wildcard, no silent
+    # acceptance of malformed names.
+    from mat_vis_baker.common import CANONICAL_CATEGORIES
+
+    cat_alt = "|".join(sorted(CANONICAL_CATEGORIES))
     pq_re = re.compile(
-        r"^mat-vis-(?P<source>\w+)-(?P<tier>ktx2-\w+|mtlx(?:-\w+)?|\w+)"
-        r"-(?P<cat>[a-z]+?)(?:-\d+)?\.parquet$"
+        rf"^mat-vis-(?P<source>\w+)-(?P<tier>ktx2-\w+|mtlx(?:-\w+)?|\w+)"
+        rf"-(?P<cat>{cat_alt})(?:-\d+)?\.parquet$"
     )
     rm_re = re.compile(
-        r"^(?P<source>\w+)-(?P<tier>ktx2-\w+|mtlx(?:-\w+)?|\w+)"
-        r"-(?P<cat>[a-z]+?)(?:-\d+)?-rowmap\.json$"
+        rf"^(?P<source>\w+)-(?P<tier>ktx2-\w+|mtlx(?:-\w+)?|\w+)"
+        rf"-(?P<cat>{cat_alt})(?:-\d+)?-rowmap\.json$"
     )
 
     parquets: dict[tuple[str, str], list[str]] = {}
