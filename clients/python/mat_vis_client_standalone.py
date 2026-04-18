@@ -29,15 +29,26 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
 REPO = "MorePET/mat-vis"
 GITHUB_RELEASES = f"https://github.com/{REPO}/releases"
+GITHUB_API = f"https://api.github.com/repos/{REPO}"
 GITHUB_RAW = f"https://raw.githubusercontent.com/{REPO}"
 LATEST_MANIFEST_URL = f"{GITHUB_RELEASES}/latest/download/release-manifest.json"
+PYPI_API = "https://pypi.org/pypi/mat-vis-client/json"
 DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" / "mat-vis"))
 USER_AGENT = "mat-vis-client/0.2 (Python)"
+
+# Update check: cache TTL (24h) + opt-out env var
+UPDATE_CHECK_TTL_SECONDS = 24 * 3600
+UPDATE_CHECK_DISABLED = os.environ.get("MAT_VIS_NO_UPDATE_CHECK", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 
 def _parse_size(s: str | int) -> int:
@@ -174,7 +185,110 @@ class MatVisClient:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache_path.write_text(json.dumps(self._manifest, indent=2))
             self._check_schema_version(self._manifest)
+            self._maybe_warn_updates()
         return self._manifest
+
+    # ── update checks ──────────────────────────────────────────
+
+    def check_updates(self, *, force: bool = False) -> dict:
+        """Check for newer data release and newer client version.
+
+        Results cached for 24h in the cache dir. Pass ``force=True`` to
+        skip cache. Returns a dict with ``data`` and ``client`` keys,
+        each with ``current``, ``latest``, ``newer_available`` fields.
+        """
+        cache_path = self._cache_dir / ".update-check.json"
+        if not force and cache_path.exists():
+            try:
+                age = time.time() - cache_path.stat().st_mtime
+                if age < UPDATE_CHECK_TTL_SECONDS:
+                    return json.loads(cache_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        result = {
+            "data": self._check_data_version(),
+            "client": self._check_client_version(),
+        }
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            cache_path.write_text(json.dumps(result, indent=2))
+        except OSError:
+            pass
+        return result
+
+    def _check_data_version(self) -> dict:
+        """Compare current/pinned tag against releases/latest on GitHub."""
+        # Prefer the manifest's own release_tag — works for both pinned
+        # and latest. Falls back to self._tag if manifest isn't loaded.
+        try:
+            current = self.manifest.get("release_tag") or self._tag
+        except Exception:
+            current = self._tag
+        try:
+            data = _get_json(f"{GITHUB_API}/releases/latest")
+            latest = data.get("tag_name")
+        except Exception:
+            latest = None
+        return {
+            "current": current,
+            "latest": latest,
+            "newer_available": bool(latest and current and latest != current),
+        }
+
+    @staticmethod
+    def _check_client_version() -> dict:
+        """Compare installed client version against latest on PyPI."""
+        try:
+            from importlib.metadata import PackageNotFoundError, version
+
+            try:
+                current = version("mat-vis-client")
+            except PackageNotFoundError:
+                current = None
+        except ImportError:
+            current = None
+        try:
+            data = _get_json(PYPI_API)
+            latest = data.get("info", {}).get("version")
+        except Exception:
+            latest = None
+        return {
+            "current": current,
+            "latest": latest,
+            "newer_available": bool(latest and current and latest != current),
+        }
+
+    def _maybe_warn_updates(self) -> None:
+        """Print a one-line notice to stderr if newer data or client exists.
+
+        Runs once per process. Opt out with MAT_VIS_NO_UPDATE_CHECK=1.
+        Network failures are silent — never block usage.
+        """
+        if UPDATE_CHECK_DISABLED or getattr(self, "_update_warned", False):
+            return
+        self._update_warned = True
+        try:
+            result = self.check_updates()
+        except Exception:
+            return
+
+        data = result["data"]
+        client = result["client"]
+        if data["newer_available"]:
+            print(
+                f"mat-vis: newer data release available "
+                f"({data['current']} → {data['latest']}). "
+                f"Use MatVisClient() for latest or set tag={data['latest']!r}.",
+                file=sys.stderr,
+            )
+        if client["newer_available"]:
+            print(
+                f"mat-vis-client: newer version available "
+                f"({client['current']} → {client['latest']}). "
+                f"Upgrade: pip install -U mat-vis-client",
+                file=sys.stderr,
+            )
 
     @staticmethod
     def _check_schema_version(manifest: dict) -> None:
@@ -827,6 +941,9 @@ def main():
         help="Comma-separated tags to keep (drops everything else's metadata)",
     )
 
+    p_upd = sub.add_parser("check-updates", help="Check for newer data + client")
+    p_upd.add_argument("--force", action="store_true", help="Ignore 24h cache")
+
     args = parser.parse_args()
     client = MatVisClient(tag=args.tag)
 
@@ -912,6 +1029,16 @@ def main():
                 tier=args.tier,
             )
             print(f"Pruned {_fmt_size(freed)}", file=sys.stderr)
+
+    elif args.cmd == "check-updates":
+        r = client.check_updates(force=args.force)
+        for kind in ("data", "client"):
+            entry = r[kind]
+            arrow = "→" if entry["newer_available"] else "="
+            marker = " (UPDATE AVAILABLE)" if entry["newer_available"] else ""
+            print(
+                f"  {kind:8s}  {entry['current'] or '?'} {arrow} {entry['latest'] or '?'}{marker}"
+            )
 
 
 if __name__ == "__main__":
