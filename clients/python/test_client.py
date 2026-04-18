@@ -58,16 +58,21 @@ MOCK_MANIFEST = {
             "base_url": "https://example.com/releases/download/v2026.04.0/",
             "sources": {
                 "ambientcg": {
-                    "parquet_files": ["ambientcg-1k.parquet"],
-                    "rowmap_file": "ambientcg-1k-rowmap.json",
+                    # Single rowmap — legacy shape. Search tests that need
+                    # broader category discovery override via mock_client_with_categories.
+                    "parquet_files": ["mat-vis-ambientcg-1k-stone.parquet"],
+                    "rowmap_files": ["ambientcg-1k-stone-rowmap.json"],
+                    "rowmap_file": "ambientcg-1k-stone-rowmap.json",
                 },
                 "polyhaven": {
-                    "parquet_files": ["polyhaven-1k.parquet"],
-                    "rowmap_file": "polyhaven-1k-rowmap.json",
+                    "parquet_files": ["mat-vis-polyhaven-1k-wood.parquet"],
+                    "rowmap_files": ["polyhaven-1k-wood-rowmap.json"],
+                    "rowmap_file": "polyhaven-1k-wood-rowmap.json",
                 },
                 "gpuopen": {
-                    "parquet_files": ["gpuopen-1k.parquet"],
-                    "rowmap_file": "gpuopen-1k-rowmap.json",
+                    "parquet_files": ["mat-vis-gpuopen-1k-other.parquet"],
+                    "rowmap_files": ["gpuopen-1k-other-rowmap.json"],
+                    "rowmap_file": "gpuopen-1k-other-rowmap.json",
                 },
             },
         }
@@ -162,6 +167,32 @@ def mock_client():
         cache_path.write_text(json.dumps(MOCK_MANIFEST))
         # Suppress the background update-check HTTP calls that would
         # otherwise consume our mocked _get_json side_effect iterations.
+        client._update_warned = True
+        yield client
+
+
+@pytest.fixture
+def mock_search_client():
+    """Client with a richer manifest (multiple rowmaps per source) so
+    search() discovers the full category set. Used by search tests that
+    reference categories not in the default single-rowmap fixture."""
+    rich_manifest = json.loads(json.dumps(MOCK_MANIFEST))  # deep copy
+    rich_manifest["tiers"]["1k"]["sources"]["ambientcg"].update(
+        parquet_files=[
+            "mat-vis-ambientcg-1k-stone.parquet",
+            "mat-vis-ambientcg-1k-metal.parquet",
+            "mat-vis-ambientcg-1k-wood.parquet",
+        ],
+        rowmap_files=[
+            "ambientcg-1k-stone-rowmap.json",
+            "ambientcg-1k-metal-rowmap.json",
+            "ambientcg-1k-wood-rowmap.json",
+        ],
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+        cache_path = Path(tmp) / ".manifest.json"
+        cache_path.write_text(json.dumps(rich_manifest))
         client._update_warned = True
         yield client
 
@@ -413,31 +444,31 @@ class TestClientRowmap:
 
 class TestClientSearch:
     @patch("mat_vis_client.client._get_json")
-    def test_search_by_category(self, mock_get, mock_client):
+    def test_search_by_category(self, mock_get, mock_search_client):
         mock_get.return_value = MOCK_INDEX_AMBIENTCG
-        results = mock_client.search("metal", source="ambientcg")
+        results = mock_search_client.search("metal", source="ambientcg")
         assert len(results) == 1
         assert results[0]["id"] == "Metal032"
 
     @patch("mat_vis_client.client._get_json")
-    def test_search_by_roughness_range(self, mock_get, mock_client):
+    def test_search_by_roughness_range(self, mock_get, mock_search_client):
         mock_get.return_value = MOCK_INDEX_AMBIENTCG
-        results = mock_client.search(roughness_range=(0.5, 0.9), source="ambientcg")
+        results = mock_search_client.search(roughness_range=(0.5, 0.9), source="ambientcg")
         # Rock064 (0.8) and Wood045 (0.6) match
         ids = {r["id"] for r in results}
         assert ids == {"Rock064", "Wood045"}
 
     @patch("mat_vis_client.client._get_json")
-    def test_search_by_metalness_range(self, mock_get, mock_client):
+    def test_search_by_metalness_range(self, mock_get, mock_search_client):
         mock_get.return_value = MOCK_INDEX_AMBIENTCG
-        results = mock_client.search(metalness_range=(0.9, 1.0), source="ambientcg")
+        results = mock_search_client.search(metalness_range=(0.9, 1.0), source="ambientcg")
         assert len(results) == 1
         assert results[0]["id"] == "Metal032"
 
     @patch("mat_vis_client.client._get_json")
-    def test_search_combined_filters(self, mock_get, mock_client):
+    def test_search_combined_filters(self, mock_get, mock_search_client):
         mock_get.return_value = MOCK_INDEX_AMBIENTCG
-        results = mock_client.search(
+        results = mock_search_client.search(
             "stone",
             roughness_range=(0.5, 1.0),
             source="ambientcg",
@@ -446,21 +477,32 @@ class TestClientSearch:
         assert results[0]["id"] == "Rock064"
 
     @patch("mat_vis_client.client._get_json")
-    def test_search_tier_filter(self, mock_get, mock_client):
+    def test_search_tier_filter(self, mock_get, mock_search_client):
         mock_get.return_value = MOCK_INDEX_AMBIENTCG
         # Metal032 is only available in 1k
-        results = mock_client.search("metal", source="ambientcg", tier="2k")
+        results = mock_search_client.search("metal", source="ambientcg", tier="2k")
         assert len(results) == 0
 
     @patch("mat_vis_client.client._get_json")
-    def test_search_no_filters_returns_all(self, mock_get, mock_client):
+    def test_search_no_filters_returns_all(self, mock_get, mock_search_client):
         mock_get.return_value = MOCK_INDEX_AMBIENTCG
-        results = mock_client.search(source="ambientcg")
+        results = mock_search_client.search(source="ambientcg")
         assert len(results) == 3
 
-    def test_search_invalid_category(self, mock_client):
-        with pytest.raises(ValueError, match="Unknown category"):
-            mock_client.search("invalid_category")
+    def test_search_invalid_category_returns_empty(self, mock_client, caplog):
+        """Invalid category soft-warns and returns empty rather than raising.
+
+        Raising would force consumers to validate against a moving-target
+        category set that's discovered from the manifest. An empty list
+        is the honest answer for "find materials in a category that has
+        none" and is friendlier to tooling (no exception handling required).
+        """
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="mat-vis-client"):
+            results = mock_client.search("invalid_category")
+        assert results == []
+        assert any("invalid_category" in rec.message for rec in caplog.records)
 
 
 class TestClientPrefetch:

@@ -87,6 +87,13 @@ repos:
         files: ^\.dagger/src/.*\.py$
         pass_filenames: false
 
+      - id: sync-spec
+        name: sync docs/specs to baker's packaged _spec dir
+        entry: python3 scripts/sync-spec.py
+        language: system
+        files: ^(docs/specs/index-schema\.json|src/mat_vis_baker/_spec/.*)$
+        pass_filenames: false
+
   # Typo Linting
   - repo: https://github.com/crate-ci/typos
     rev: 07d900b8fa1097806b8adb6391b0d3e0ac2fdea7  # v1.39.0

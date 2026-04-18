@@ -96,21 +96,13 @@ def _fmt_size(n: int) -> str:
 # Default soft cap: 5 GB (configurable via MAT_VIS_CACHE_MAX_SIZE).
 DEFAULT_CACHE_MAX_BYTES = _parse_size(os.environ.get("MAT_VIS_CACHE_MAX_SIZE", "5GB"))
 
-# Valid categories per index-schema.json
-CATEGORIES = frozenset(
-    [
-        "metal",
-        "wood",
-        "stone",
-        "fabric",
-        "plastic",
-        "concrete",
-        "ceramic",
-        "glass",
-        "organic",
-        "other",
-    ]
-)
+# Previously a hardcoded frozenset of 10 names. The client doesn't need a
+# static enum — categories are discoverable at runtime from rowmap filenames
+# in the release manifest. See MatVisClient.categories(). Kept as a
+# module-level alias for 1.x back-compat and lazy-loaded from the first
+# client instance that calls .categories(). Callers doing strict validation
+# should prefer `client.categories()` over this constant.
+CATEGORIES: frozenset[str] = frozenset()  # populated lazily, see client.categories()
 
 
 # Rate limit / retry knobs (env-configurable).
@@ -478,8 +470,37 @@ class MatVisClient:
         return list(tier_data.get("sources", {}).keys())
 
     def tiers(self) -> list[str]:
-        """List available tiers."""
+        """List available tiers (discovered from the manifest)."""
         return list(self.manifest.get("tiers", {}).keys())
+
+    def categories(self) -> tuple[str, ...]:
+        """Discover material categories from the current release manifest.
+
+        Derived from rowmap filenames (``{source}-{tier}-{category}-rowmap.json``).
+        Always reflects the actual release — no hardcoded list to drift.
+        """
+        import re
+
+        global CATEGORIES
+        # Parse categories out of rowmap filenames across all tiers x sources.
+        # Single regex covers simple and chunked names: ...-{cat}[-N]-rowmap.json
+        pat = re.compile(r"-(?P<cat>[a-z]+)(?:-\d+)?-rowmap\.json$")
+        found: set[str] = set()
+        for tier_data in self.manifest.get("tiers", {}).values():
+            for src_data in tier_data.get("sources", {}).values():
+                for rm in src_data.get("rowmap_files", []):
+                    m = pat.search(rm)
+                    if m:
+                        found.add(m.group("cat"))
+                single = src_data.get("rowmap_file")
+                if single:
+                    m = pat.search(single)
+                    if m:
+                        found.add(m.group("cat"))
+        result = tuple(sorted(found))
+        # Populate the module-level constant for back-compat
+        CATEGORIES = frozenset(result)
+        return result
 
     def rowmap(self, source: str, tier: str, category: str | None = None) -> dict:
         """Fetch and cache rowmaps. Merges partitioned rowmaps into one."""
@@ -596,10 +617,17 @@ class MatVisClient:
                     sources available for the given tier.
             tier: Only return materials that have this tier available.
         """
-        if category and category not in CATEGORIES:
-            raise ValueError(
-                f"Unknown category {category!r}. Valid: {', '.join(sorted(CATEGORIES))}"
-            )
+        if category:
+            valid = self.categories()  # discovered from manifest
+            if valid and category not in valid:
+                # Soft-warn rather than raise — the honest answer to "find
+                # materials in a category that has none" is an empty list.
+                log.warning(
+                    "search: category %r not in manifest %s; returning empty",
+                    category,
+                    valid,
+                )
+                return []
 
         sources = [source] if source else self.sources(tier)
         results: list[dict] = []

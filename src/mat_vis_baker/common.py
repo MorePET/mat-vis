@@ -10,27 +10,24 @@ from pathlib import Path
 
 import requests
 
+# Source of truth: docs/specs/index-schema.json, synced into
+# src/mat_vis_baker/_spec/ by scripts/sync-spec.py (pre-commit hook).
+# Loaded once via spec.py; do NOT hardcode these lists anywhere else.
+from mat_vis_baker.spec import CATEGORIES as _CATEGORIES_FN
+from mat_vis_baker.spec import CHANNELS as _CHANNELS_FN
+from mat_vis_baker.spec import SOURCES as _SOURCES_FN
+
 log = logging.getLogger("mat-vis-baker")
 
-# ── canonical enums (source of truth: docs/specs/*.json) ────────
+# ── canonical enums ─────────────────────────────────────────────
 
-CANONICAL_CATEGORIES = frozenset(
-    {
-        "metal",
-        "wood",
-        "stone",
-        "fabric",
-        "plastic",
-        "concrete",
-        "ceramic",
-        "glass",
-        "organic",
-        "other",
-    }
-)
+CANONICAL_CATEGORIES = frozenset(_CATEGORIES_FN())
+CANONICAL_CHANNELS = list(_CHANNELS_FN())
+CANONICAL_SOURCES = tuple(_SOURCES_FN())
 
-CANONICAL_CHANNELS = ["color", "normal", "roughness", "metalness", "ao", "displacement", "emission"]
-
+# Texture tiers — NOT in the schema enum (list grows dynamically); validated
+# against the manifest instead. Keep this as the authoritative baker-side
+# list for CLI `choices=` constraints.
 VALID_TIERS = ["128", "256", "512", "1k", "2k", "4k", "8k"]
 
 TIER_TO_PX = {"128": 128, "256": 256, "512": 512, "1k": 1024, "2k": 2048, "4k": 4096, "8k": 8192}
