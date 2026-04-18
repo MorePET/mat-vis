@@ -28,9 +28,9 @@ def generate_manifest(
     tiers: list[str],
 ) -> dict:
     """Build a release manifest from the bake output directory."""
+    # schema_version is required by client >= 0.3.0
     manifest: dict = {
         "schema_version": 1,
-        "version": 1,  # legacy alias — drop in schema v2
         "release_tag": release_tag,
         "tiers": {},
     }
@@ -90,9 +90,9 @@ def rebuild_manifest_from_release(release_tag: str) -> dict:
     asset_names = result.stdout.strip().split("\n")
     base_url = f"{GITHUB_BASE}/{release_tag}/"
 
+    # schema_version is required by client >= 0.3.0
     manifest: dict = {
         "schema_version": 1,
-        "version": 1,  # legacy alias — drop in schema v2
         "release_tag": release_tag,
         "tiers": {},
     }
