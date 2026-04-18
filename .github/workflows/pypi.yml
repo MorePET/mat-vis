@@ -34,10 +34,19 @@ jobs:
         with:
           version: "latest"
 
+      - name: Sync project with baker extras (pillow / requests)
+        # conftest.py imports PIL — baker has its own optional deps.
+        # Sync all extras + groups so pytest can collect every test.
+        run: uv sync --all-extras
+
+      - name: Install client package (editable)
+        # Tests patch mat_vis_client.client.* — must be importable.
+        run: uv pip install -e clients/python
+
       - name: Run full pytest suite (skip live network tests)
         env:
           MAT_VIS_SKIP_LIVE_TESTS: "1"
-        run: uv run --with pytest pytest tests/ clients/python/test_client.py
+        run: uv run --no-sync pytest tests/ clients/python/test_client.py
 
   publish:
     name: Publish mat-vis-client to PyPI
