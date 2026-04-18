@@ -44,7 +44,7 @@ DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" 
 # Version is kept in sync with clients/python/pyproject.toml by
 # scripts/sync-standalone-version.py (run via pre-commit). Do not
 # hand-edit — a drift test in tests/ fails CI if it disagrees.
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 # Same User-Agent as the installable package (issue #70). Standalone vs
 # pip-installed is an internal packaging detail; servers receiving the
 # request can't act on it and splitting UA populations fragments
