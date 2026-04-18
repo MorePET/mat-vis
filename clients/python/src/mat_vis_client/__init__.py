@@ -58,6 +58,7 @@ __all__ = [
     "TierNotFoundError",
     "__version__",
     "_in_range",
+    "get_client",
     "search",
     "prefetch",
     "rowmap_entry",
@@ -70,16 +71,41 @@ __all__ = [
 
 log = logging.getLogger("mat-vis-client")
 
-# Singleton client — lazy-initialized
+# Singleton client — lazy-initialized. Shared across callers so the
+# manifest, rowmaps, indexes, and on-disk texture cache are populated
+# once per process. Reach it via :func:`get_client`.
 _client: MatVisClient | None = None
 
 
-def _get_client() -> MatVisClient:
+def get_client() -> MatVisClient:
+    """Return the process-wide ``MatVisClient`` singleton.
+
+    Lazily constructed on first call, with indexes seeded. Downstream
+    consumers that want to share the manifest/index/texture cache with
+    the module-level ``search()`` / ``prefetch()`` helpers should use
+    this instead of ``MatVisClient()`` directly.
+    """
     global _client
     if _client is None:
         _client = MatVisClient()
         seed_indexes(_client)
     return _client
+
+
+def _get_client() -> MatVisClient:
+    """Deprecated: use :func:`get_client` instead.
+
+    Kept for one release to give downstream consumers (e.g. py-mat's
+    ``Vis.client``) time to migrate. Emits ``DeprecationWarning``.
+    """
+    import warnings
+
+    warnings.warn(
+        "mat_vis_client._get_client is deprecated; use get_client instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return get_client()
 
 
 def seed_indexes(client: MatVisClient) -> None:
@@ -126,7 +152,7 @@ def seed_indexes(client: MatVisClient) -> None:
 
 def get_manifest(release_tag: str | None = None) -> dict:
     """Fetch release manifest (URL discovery for all sources × tiers)."""
-    client = MatVisClient(tag=release_tag) if release_tag else _get_client()
+    client = MatVisClient(tag=release_tag) if release_tag else get_client()
     return client.manifest
 
 
@@ -143,7 +169,7 @@ def search(
 
     Returns results sorted by score (lower = closer match).
     """
-    client = MatVisClient(tag=tag) if tag else _get_client()
+    client = MatVisClient(tag=tag) if tag else get_client()
 
     roughness_range = None
     if roughness is not None:
@@ -179,7 +205,7 @@ def prefetch(
     tag: str | None = None,
 ) -> int:
     """Download all materials for a source × tier into the local cache."""
-    client = MatVisClient(tag=tag) if tag else _get_client()
+    client = MatVisClient(tag=tag) if tag else get_client()
     return client.prefetch(source, tier=tier)
 
 
@@ -191,5 +217,5 @@ def rowmap_entry(
     tag: str | None = None,
 ) -> dict[str, dict[str, int]]:
     """Get raw byte-offset info for DIY consumers."""
-    client = MatVisClient(tag=tag) if tag else _get_client()
+    client = MatVisClient(tag=tag) if tag else get_client()
     return client.rowmap_entry(source, material_id, tier=tier)
