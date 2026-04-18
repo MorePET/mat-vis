@@ -1,0 +1,67 @@
+---
+# Derive KTX2 tier from existing PNG release.
+# Streams from release PNGs (HTTP range reads), transcodes to KTX2,
+# packs into parquet. No upstream re-download.
+
+name: Derive KTX2
+
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Source (or "all" for every available)'
+        required: true
+        default: 'ambientcg'
+        type: choice
+        options:
+          - ambientcg
+          - polyhaven
+          - gpuopen
+          - all
+      source-tier:
+        description: 'PNG tier to transcode from'
+        required: true
+        default: '1k'
+        type: choice
+        options:
+          - 128
+          - 256
+          - 512
+          - 1k
+          - 2k
+      target-tier:
+        description: 'Target KTX2 tier name'
+        required: false
+        default: 'ktx2-1k'
+        type: string
+      release-tag:
+        description: 'Release tag'
+        required: false
+        default: 'v2026.04.0'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  derive-ktx2:
+    name: Derive ${{ inputs.target-tier }} from ${{ inputs.source-tier }} (${{ inputs.source }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dagger/dagger-for-github@v8.4.1
+        with:
+          verb: call
+          module: .dagger
+          args: >-
+            derive-ktx2-to-release
+            --src=.
+            --source=${{ inputs.source }}
+            --source-tier=${{ inputs.source-tier }}
+            --target-tier=${{ inputs.target-tier }}
+            --release-tag=${{ inputs.release-tag }}
+            --registry-pass=env:GITHUB_TOKEN
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

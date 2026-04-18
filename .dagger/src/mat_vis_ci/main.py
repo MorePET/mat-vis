@@ -594,10 +594,12 @@ class MatVisCi:
     # ── bake pipeline ─────────────────────────────────────────────
 
     @function
-    def _baker_container(self, context: dagger.Directory) -> dagger.Container:
-        """Baker container with code + gh CLI + git."""
+    def _baker_container(
+        self, context: dagger.Directory, with_ktx2: bool = False
+    ) -> dagger.Container:
+        """Baker container with code + gh CLI + git. Optionally with toktx for KTX2."""
         pip_cache = dag.cache_volume("pip-cache")
-        return (
+        ctr = (
             dag.container()
             .from_("python:3.12-slim")
             .with_exec(["apt-get", "update", "-qq"])
@@ -609,7 +611,20 @@ class MatVisCi:
                     "curl -fsSL https://github.com/cli/cli/releases/download/v2.74.1/gh_2.74.1_linux_amd64.tar.gz | tar xz --strip-components=2 -C /usr/local/bin gh_2.74.1_linux_amd64/bin/gh",
                 ]
             )
-            .with_mounted_cache("/root/.cache/pip", pip_cache)
+        )
+        if with_ktx2:
+            # Install toktx from KTX-Software .deb (Khronos)
+            ctr = ctr.with_exec(
+                [
+                    "sh",
+                    "-c",
+                    "apt-get install -y -qq libgomp1 ca-certificates && "
+                    "curl -fsSL -o /tmp/ktx.deb https://github.com/KhronosGroup/KTX-Software/releases/download/v4.4.0/KTX-Software-4.4.0-Linux-x86_64.deb && "
+                    "dpkg -i /tmp/ktx.deb && rm /tmp/ktx.deb",
+                ]
+            )
+        return (
+            ctr.with_mounted_cache("/root/.cache/pip", pip_cache)
             .with_mounted_directory("/app", context)
             .with_workdir("/app")
             .with_exec(["pip", "install", "--quiet", "-e", ".[baker]"])
@@ -679,7 +694,97 @@ class MatVisCi:
                 ]
             )
 
+            # Pack original .mtlx files into JSON map (gpuopen has real graphs)
+            baker = baker.with_exec(
+                [
+                    "sh",
+                    "-c",
+                    f"""
+                if [ -d /tmp/out/mtlx/{source} ] && find /tmp/out/mtlx/{source} -name '*.mtlx' -print -quit | grep -q .; then
+                    mat-vis-baker pack-mtlx /tmp/out --source {source} --mtlx-dir /tmp/out/mtlx
+                    if [ -f /tmp/out/{source}-mtlx.json ]; then
+                        gh release upload {release_tag} /tmp/out/{source}-mtlx.json --clobber || true
+                    fi
+                fi
+            """,
+                ]
+            )
+
             # Rebuild manifest from all release assets
+            baker = baker.with_exec(
+                [
+                    "python3",
+                    "-c",
+                    f"""
+from pathlib import Path
+from mat_vis_baker.manifest import rebuild_manifest_from_release, write_manifest
+manifest = rebuild_manifest_from_release('{release_tag}')
+write_manifest(manifest, Path('/tmp/release-manifest.json'))
+""",
+                ]
+            )
+            baker = baker.with_exec(
+                [
+                    "sh",
+                    "-c",
+                    f"gh release upload {release_tag} /tmp/release-manifest.json --clobber",
+                ]
+            )
+
+        return await baker.stdout()
+
+    @function
+    async def derive_ktx2_to_release(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        source_tier: Annotated[str, Doc("PNG tier to transcode from")] = "1k",
+        target_tier: Annotated[str, Doc("KTX2 tier name")] = "ktx2-1k",
+        source: Annotated[str, Doc("Restrict to one source (or 'all')")] = "all",
+        release_tag: Annotated[str, Doc("Release tag")] = "v0000.00.0",
+        registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
+    ) -> str:
+        """Derive KTX2 tier from existing PNG release, upload to same release.
+
+        Container has toktx (KTX-Software) installed. Streams from release
+        PNGs (HTTP range reads), transcodes to KTX2, packs into parquet.
+        """
+        context = src or dag.host().directory(".")
+        baker = self._baker_container(context, with_ktx2=True)
+
+        if registry_pass is not None:
+            baker = baker.with_secret_variable("GH_TOKEN", registry_pass)
+
+        cmd = [
+            "mat-vis-baker",
+            "derive-ktx2",
+            "/tmp/out",
+            "--release-tag",
+            release_tag,
+            "--source-tier",
+            source_tier,
+            "--target-tier",
+            target_tier,
+        ]
+        if source != "all":
+            cmd.extend(["--source", source])
+
+        baker = baker.with_exec(cmd)
+
+        # Upload all KTX2 parquets + rowmaps
+        if release_tag != "v0000.00.0" and registry_pass is not None:
+            baker = baker.with_exec(
+                [
+                    "sh",
+                    "-c",
+                    f"""
+                for f in /tmp/out/*.parquet /tmp/out/*-rowmap.json; do
+                    [ -f "$f" ] || continue
+                    gh release upload {release_tag} "$f" --clobber || true
+                done
+            """,
+                ]
+            )
+            # Rebuild manifest
             baker = baker.with_exec(
                 [
                     "python3",
