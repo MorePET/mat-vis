@@ -157,7 +157,11 @@ def _is_rate_limited(err: urllib.error.HTTPError) -> bool:
     return False
 
 
-def _get(url: str, headers: dict | None = None) -> bytes:
+def _get(
+    url: str,
+    headers: dict | None = None,
+    return_final_url: bool = False,
+) -> bytes | tuple[bytes, str]:
     """HTTP GET with User-Agent, automatic retry on rate limits / transient errors.
 
     Retries up to MAX_RETRIES on 429 / 503 / rate-limited 403, respecting
@@ -166,6 +170,11 @@ def _get(url: str, headers: dict | None = None) -> bytes:
     user sees what's happening. Raises ``RateLimitError`` after exhaustion.
 
     Non-rate-limit HTTP errors (404, 500, etc.) pass through unchanged.
+
+    With ``return_final_url=True``, returns ``(bytes, resolved_url)`` — the
+    URL after urllib followed any redirects. Useful for caching the
+    resolved CDN URL of a GitHub Release asset (avoids repeated redirect
+    hits on the rate-limited github.com side).
     """
     hdrs = {"User-Agent": USER_AGENT}
     if headers:
@@ -176,7 +185,10 @@ def _get(url: str, headers: dict | None = None) -> bytes:
         try:
             req = urllib.request.Request(url, headers=hdrs)
             with urllib.request.urlopen(req, timeout=60) as resp:
-                return resp.read()
+                data = resp.read()
+                if return_final_url:
+                    return data, resp.url
+                return data
         except urllib.error.HTTPError as e:
             last_err = e
             if not _is_rate_limited(e) or attempt >= MAX_RETRIES:
@@ -258,6 +270,11 @@ class MatVisClient:
         self._manifest: dict | None = None
         self._rowmaps: dict[str, dict] = {}
         self._indexes: dict[str, list[dict]] = {}
+        # In-memory cache of resolved redirect URLs (github.com -> signed CDN).
+        # GitHub's signed URLs expire ~5 min; we cache for 4 min to be safe.
+        # Avoids hitting the rate-limited github.com redirect on every
+        # range read to the same parquet.
+        self._redirect_cache: dict[str, tuple[str, float]] = {}
         self._tag = tag
 
         if manifest_url:
@@ -773,6 +790,22 @@ class MatVisClient:
             for ch, info in mat.items()
         }
 
+    def _resolved_url(self, url: str) -> tuple[str, bool]:
+        """Return (url_to_use, is_cached). Resolves github.com releases URL to
+        its signed CDN URL and caches for 4 min. Used to amortize the
+        rate-limited redirect across many range reads on the same parquet.
+        """
+        now = time.time()
+        cached = self._redirect_cache.get(url)
+        if cached and cached[1] > now:
+            return cached[0], True
+        return url, False
+
+    def _cache_resolved(self, original_url: str, resolved_url: str) -> None:
+        """Store a resolved CDN URL with a 4-minute TTL."""
+        if resolved_url and resolved_url != original_url:
+            self._redirect_cache[original_url] = (resolved_url, time.time() + 240)
+
     def fetch_texture(
         self,
         source: str,
@@ -800,11 +833,31 @@ class MatVisClient:
         tier_data = self.manifest["tiers"][tier]
         base_url = tier_data["base_url"]
         parquet_file = rng.get("parquet_file") or rm.get("parquet_file", "")
-        url = base_url + parquet_file
+        original_url = base_url + parquet_file
 
-        # HTTP range read
+        # Use cached resolved (signed CDN) URL if available — avoids the
+        # rate-limited github.com redirect on repeat range reads.
+        url, is_cached = self._resolved_url(original_url)
         range_header = f"bytes={offset}-{offset + length - 1}"
-        data = _get(url, headers={"Range": range_header})
+
+        try:
+            if is_cached:
+                data = _get(url, headers={"Range": range_header})
+            else:
+                data, resolved = _get(url, headers={"Range": range_header}, return_final_url=True)
+                self._cache_resolved(original_url, resolved)
+        except urllib.error.HTTPError as e:
+            # Signed URL may have expired between cache and use — retry once with fresh.
+            if is_cached and e.code in (403, 404):
+                self._redirect_cache.pop(original_url, None)
+                data, resolved = _get(
+                    original_url,
+                    headers={"Range": range_header},
+                    return_final_url=True,
+                )
+                self._cache_resolved(original_url, resolved)
+            else:
+                raise
 
         # Verify PNG
         if data[:4] != b"\x89PNG":
