@@ -43,21 +43,15 @@ jobs:
           module: .dagger
           args: test-clients --src=. --tag=v2026.04.0
 
-  validate-release:
-    name: Validate release assets
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dagger/dagger-for-github@v8.4.1
-        with:
-          verb: call
-          module: .dagger
-          args: validate-release --src=. --tag=v2026.04.0
+  # validate-release lives in promote-data-release.yml (pre-promotion gate)
+  # and release-validate.yml (daily drift check). It tests the state of a
+  # published GitHub Release, not the code in this PR, so it does not
+  # belong on the PR merge gate — see #80.
 
   push:
     name: Push baker image to GHCR
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [ci, integration, client-tests, validate-release]
+    needs: [ci, integration, client-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: read
