@@ -161,6 +161,7 @@ def fetch(
     output_dir: Path,
     *,
     limit: int | None = None,
+    offset: int = 0,
     session: requests.Session | None = None,
     mtlx_dir: Path | None = None,
 ) -> list[MaterialRecord]:
@@ -171,6 +172,8 @@ def fetch(
     assets = discover(session=s)
 
     slugs = list(assets.keys())
+    if offset:
+        slugs = slugs[offset:]
     if limit:
         slugs = slugs[:limit]
 

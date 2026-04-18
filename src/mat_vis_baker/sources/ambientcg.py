@@ -208,6 +208,7 @@ def fetch(
     output_dir: Path,
     *,
     limit: int | None = None,
+    offset: int = 0,
     session: requests.Session | None = None,
     mtlx_dir: Path | None = None,
 ) -> list[MaterialRecord]:
@@ -219,6 +220,8 @@ def fetch(
 
     entries = _filter_with_downloads(entries, tier)
     log.info("%d materials have downloads for tier %s", len(entries), tier)
+    if offset:
+        entries = entries[offset:]
     if limit:
         entries = entries[:limit]
 
