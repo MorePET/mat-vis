@@ -70,11 +70,10 @@ def test_fetch_texture_accepts_tag_kwarg(tmp_cache):
     c._manifest = MOCK_MANIFEST_V1
 
     def fake_get_json(url):
-        # base client asks for v1 rowmap; tag-override asks for v2
-        if "v2026.05.0" in url:
-            return MOCK_MANIFEST_V2
-        if "v2026.04.0" in url:
-            return MOCK_MANIFEST_V1
+        # manifest requests include "release-manifest.json"; rowmaps
+        # include "rowmap.json"; everything else fallback.
+        if "release-manifest.json" in url:
+            return MOCK_MANIFEST_V2 if "v2026.05.0" in url else MOCK_MANIFEST_V1
         return MOCK_ROWMAP
 
     def fake_get(url, headers=None, return_final_url=False):
@@ -97,8 +96,8 @@ def test_fetch_texture_tag_override_does_not_mutate_client(tmp_cache):
     c._manifest = MOCK_MANIFEST_V1
 
     def fake_get_json(url):
-        if "v2026.05.0" in url:
-            return MOCK_MANIFEST_V2
+        if "release-manifest.json" in url:
+            return MOCK_MANIFEST_V2 if "v2026.05.0" in url else MOCK_MANIFEST_V1
         return MOCK_ROWMAP
 
     def fake_get(url, headers=None, return_final_url=False):
