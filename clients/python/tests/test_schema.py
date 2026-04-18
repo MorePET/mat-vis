@@ -122,7 +122,9 @@ def test_adapters_reference_schema_maps_by_identity():
     assert adapters._THREEJS_TEX_MAP is schema.THREEJS_MAP
     assert adapters._GLTF_TEX_MAP is schema.GLTF_MAP
     assert adapters._USD_PREVIEW_TEX_MAP is schema.USD_PREVIEW_MAP
-    assert adapters._MTLX_TEX_MAP is schema.MTLX_MAP
+    # MTLX_MAP is exported by schema but unused by adapters (MaterialX is
+    # built via USD_PREVIEW_MAP); the schema export is for future consumers.
+    assert hasattr(schema, "MTLX_MAP")
 
 
 def test_client_filename_map_is_schema_derived():

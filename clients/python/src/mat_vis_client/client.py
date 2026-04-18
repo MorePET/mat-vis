@@ -130,23 +130,109 @@ RETRY_MAX_WAIT_SECONDS = int(os.environ.get("MAT_VIS_RETRY_MAX_WAIT", "60"))
 
 
 class MatVisError(Exception):
-    """Base class for mat-vis-client errors."""
+    """Base class for mat-vis-client errors.
+
+    Every exception surfaced to callers is a ``MatVisError`` subclass —
+    raw ``urllib.error.HTTPError`` / ``URLError`` never leaks out.
+    """
+
+
+class NotFoundError(MatVisError):
+    """A key was not found in a mat-vis registry (material / channel / etc).
+
+    Structured fields let callers branch without string-matching messages:
+
+    - ``key``: the missing name (e.g. ``"Rock999"``)
+    - ``available``: sorted list of valid names at this level
+    - ``context``: optional path qualifier (e.g. ``"ambientcg/1k"``)
+    - ``kind``: class-level label ("material", "source", ...)
+    """
+
+    kind: str = "item"
+
+    def __init__(
+        self,
+        key: str,
+        available: list[str] | None = None,
+        context: str = "",
+    ) -> None:
+        self.key = key
+        self.available = list(available or [])
+        self.context = context
+        where = f" in {context}" if context else ""
+        hint = f". Available: {self.available}" if self.available else ""
+        super().__init__(f"{self.kind} {key!r} not found{where}{hint}")
+
+
+class MaterialNotFoundError(NotFoundError):
+    kind = "material"
+
+
+class SourceNotFoundError(NotFoundError):
+    kind = "source"
+
+
+class TierNotFoundError(NotFoundError):
+    kind = "tier"
+
+
+class ChannelNotFoundError(NotFoundError):
+    kind = "channel"
+
+
+# Dispatch table: _lookup() picks the right typed subclass from ``kind``.
+# Unknown kinds fall back to MatVisError (legacy call sites still work).
+_NOT_FOUND_BY_KIND: dict[str, type[NotFoundError]] = {
+    "material": MaterialNotFoundError,
+    "source": SourceNotFoundError,
+    "tier": TierNotFoundError,
+    "channel": ChannelNotFoundError,
+}
 
 
 def _lookup(mapping: dict, key: str, *, kind: str, context: str = "") -> object:
-    """Dict lookup that raises ``MatVisError`` with an "Available: [...]"
-    suggestion list instead of a bare ``KeyError``.
+    """Dict lookup that raises the typed ``NotFoundError`` subclass for
+    ``kind`` (with an ``available=[...]`` hint) instead of ``KeyError``.
 
-    Catches the common typo case (wrong source/tier/material/channel) and
-    turns it into an actionable error message. Caller-supplied ``kind`` is
-    the thing being looked up (e.g. "material", "channel"); ``context``
-    adds a path qualifier like "ambientcg/1k" so the message is locatable.
+    Example: ``_lookup(materials, "Rock999", kind="material", context="ambientcg/1k")``
+    raises :class:`MaterialNotFoundError` carrying ``.key`` / ``.available`` /
+    ``.context``.
     """
     if key in mapping:
         return mapping[key]
     available = sorted(mapping.keys())
+    cls = _NOT_FOUND_BY_KIND.get(kind)
+    if cls is not None:
+        raise cls(key=key, available=available, context=context)
+    # Unknown kind — preserve legacy MatVisError for back-compat.
     where = f" in {context}" if context else ""
     raise MatVisError(f"{kind} {key!r} not found{where}. Available: {available}")
+
+
+class HTTPFetchError(MatVisError):
+    """HTTP fetch failed with a non-rate-limit error (404, 500, ...).
+
+    Wraps ``urllib.error.HTTPError`` so callers never see raw urllib
+    exceptions. Carries ``.url``, ``.code``, ``.reason``.
+    """
+
+    def __init__(self, url: str, code: int, reason: str = ""):
+        self.url = url
+        self.code = code
+        self.reason = reason
+        super().__init__(f"HTTP {code} for {url}{': ' + reason if reason else ''}")
+
+
+class NetworkError(MatVisError):
+    """Network-level failure (DNS / connection / timeout) after retries.
+
+    Wraps ``urllib.error.URLError``. Carries ``.url`` and ``.reason``.
+    """
+
+    def __init__(self, url: str, reason: str):
+        self.url = url
+        self.reason = reason
+        super().__init__(f"Network error for {url}: {reason}")
 
 
 class RateLimitError(MatVisError):
@@ -234,8 +320,15 @@ def _get(
                 return data
         except urllib.error.HTTPError as e:
             last_err = e
-            if not _is_rate_limited(e) or attempt >= MAX_RETRIES:
-                raise
+            if not _is_rate_limited(e):
+                # Non-transient HTTP error — wrap and surface immediately.
+                raise HTTPFetchError(url, e.code, e.reason or "") from e
+            if attempt >= MAX_RETRIES:
+                # Rate-limit exhaustion → typed RateLimitError.
+                wait = _parse_retry_after(e.headers, int(BACKOFF_BASE_SECONDS * (2**attempt)))
+                raise RateLimitError(
+                    url, wait, f"Rate limited on {url} after {MAX_RETRIES} retries."
+                ) from e
             wait = _parse_retry_after(e.headers, int(BACKOFF_BASE_SECONDS * (2**attempt)))
             print(
                 f"mat-vis-client: rate limited (HTTP {e.code}), "
@@ -247,7 +340,7 @@ def _get(
             # Network-level error (DNS / connection reset / timeout). Retry.
             last_err = e
             if attempt >= MAX_RETRIES:
-                raise
+                raise NetworkError(url, str(e.reason)) from e
             wait = min(int(BACKOFF_BASE_SECONDS * (2**attempt)), RETRY_MAX_WAIT_SECONDS)
             print(
                 f"mat-vis-client: network error ({e.reason}), "
@@ -257,7 +350,7 @@ def _get(
             time.sleep(wait)
 
     # Should be unreachable (loop always raises or returns), but fail loud
-    raise RateLimitError(url, 0, f"exhausted {MAX_RETRIES} retries") from last_err
+    raise MatVisError(f"exhausted {MAX_RETRIES} retries for {url}") from last_err
 
 
 def _get_json(url: str) -> dict | list:
@@ -976,7 +1069,7 @@ class MatVisClient:
             else:
                 data, resolved = _get(url, headers={"Range": range_header}, return_final_url=True)
                 self._cache_resolved(original_url, resolved)
-        except urllib.error.HTTPError as e:
+        except HTTPFetchError as e:
             # Signed URL may have expired between cache and use — retry once with fresh.
             if is_cached and e.code in (403, 404):
                 self._redirect_cache.pop(original_url, None)
