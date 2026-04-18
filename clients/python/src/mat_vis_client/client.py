@@ -792,15 +792,21 @@ class MatVisClient:
                 self._cache_write_text(cache_path, json.dumps(self._indexes[source], indent=2))
         return self._indexes[source]
 
+    _SCALAR_WIDEN = 0.2  # scalar shorthand → range half-width
+
     def search(
         self,
         category: str | None = None,
         *,
+        roughness: float | None = None,
+        metalness: float | None = None,
         roughness_range: tuple[float, float] | None = None,
         metalness_range: tuple[float, float] | None = None,
         source: str | None = None,
         tier: str = "1k",
         tag: str | None = None,
+        score: bool = False,
+        limit: int | None = None,
     ) -> list[dict]:
         """Search materials by category and scalar ranges.
 
@@ -809,20 +815,46 @@ class MatVisClient:
 
         Args:
             category: Filter by material category (e.g. "metal", "wood").
+            roughness: Scalar shorthand. Matches within ± ``_SCALAR_WIDEN``.
+                Mutually exclusive with ``roughness_range``.
+            metalness: Scalar shorthand. Same semantics as ``roughness``.
             roughness_range: (min, max) roughness filter, inclusive.
             metalness_range: (min, max) metalness filter, inclusive.
             source: Limit search to one source. If None, searches all
                     sources available for the given tier.
             tier: Only return materials that have this tier available.
             tag: Optional release tag override (see .at()).
+            score: When True and a scalar shorthand is passed, attach a
+                ``score`` field (absolute distance) and sort ascending.
+            limit: Cap the returned list length.
         """
         if tag is not None and tag != self._tag:
             return self.at(tag).search(
                 category,
+                roughness=roughness,
+                metalness=metalness,
                 roughness_range=roughness_range,
                 metalness_range=metalness_range,
                 source=source,
                 tier=tier,
+                score=score,
+                limit=limit,
+            )
+        # Scalar + range on the same dimension is ambiguous — reject.
+        if roughness is not None and roughness_range is not None:
+            raise MatVisError("pass roughness OR roughness_range, not both")
+        if metalness is not None and metalness_range is not None:
+            raise MatVisError("pass metalness OR metalness_range, not both")
+        # Scalar shorthand widens into an inclusive range.
+        if roughness is not None:
+            roughness_range = (
+                max(0.0, roughness - self._SCALAR_WIDEN),
+                min(1.0, roughness + self._SCALAR_WIDEN),
+            )
+        if metalness is not None:
+            metalness_range = (
+                max(0.0, metalness - self._SCALAR_WIDEN),
+                min(1.0, metalness + self._SCALAR_WIDEN),
             )
         if category:
             valid = self.categories()  # discovered from manifest
@@ -851,6 +883,18 @@ class MatVisClient:
                     continue
                 results.append(entry)
 
+        if score and (roughness is not None or metalness is not None):
+            for r in results:
+                s = 0.0
+                if roughness is not None and r.get("roughness") is not None:
+                    s += abs(r["roughness"] - roughness)
+                if metalness is not None and r.get("metalness") is not None:
+                    s += abs(r["metalness"] - metalness)
+                r["score"] = s
+            results.sort(key=lambda r: r["score"])
+
+        if limit is not None:
+            results = results[:limit]
         return results
 
     # ── Bulk operations ─────────────────────────────────────────

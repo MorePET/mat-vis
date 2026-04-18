@@ -162,40 +162,27 @@ def search(
     roughness: float | None = None,
     metalness: float | None = None,
     source: str | None = None,
+    tier: str = "1k",
     tag: str | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """Search the mat-vis index by category and scalar similarity.
 
-    Returns results sorted by score (lower = closer match).
+    Thin forwarder to :meth:`MatVisClient.search` with ``score=True`` —
+    the scoring/sorting + default ``limit=20`` are the only module-level
+    convenience on top of the method. Every other argument is just passed
+    through.
     """
-    client = MatVisClient(tag=tag) if tag else get_client()
-
-    roughness_range = None
-    if roughness is not None:
-        roughness_range = (max(0.0, roughness - 0.2), min(1.0, roughness + 0.2))
-
-    metalness_range = None
-    if metalness is not None:
-        metalness_range = (max(0.0, metalness - 0.2), min(1.0, metalness + 0.2))
-
-    results = client.search(
-        category=category,
+    return get_client().search(
+        category,
+        roughness=roughness,
+        metalness=metalness,
         source=source,
-        roughness_range=roughness_range,
-        metalness_range=metalness_range,
+        tier=tier,
+        tag=tag,
+        score=True,
+        limit=limit,
     )
-
-    for r in results:
-        score = 0.0
-        if roughness is not None and r.get("roughness") is not None:
-            score += abs(r["roughness"] - roughness)
-        if metalness is not None and r.get("metalness") is not None:
-            score += abs(r["metalness"] - metalness)
-        r["score"] = score
-
-    results.sort(key=lambda r: r["score"])
-    return results[:limit]
 
 
 def prefetch(
