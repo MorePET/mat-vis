@@ -84,6 +84,15 @@ jobs:
             echo "✓ No open data PRs"
           fi
 
+      - name: Validate release assets (gate)
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          verb: call
+          module: .dagger
+          args: >-
+            validate-release --src=.
+            --tag=${{ inputs.release-tag }}
+
       - name: Promote release
         if: inputs.dry-run == false
         env:
