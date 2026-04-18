@@ -91,8 +91,9 @@ def rebuild_manifest_from_release(release_tag: str) -> dict:
 
     manifest: dict = {"version": 1, "release_tag": release_tag, "tiers": {}}
 
-    pq_re = re.compile(r"^mat-vis-(\w+)-(\w+)-(\w+)\.parquet$")
-    rm_re = re.compile(r"^(\w+)-(\w+)-(\w+)-rowmap\.json$")
+    # Match category and optional chunk number (e.g. -other or -other-2).
+    pq_re = re.compile(r"^mat-vis-(\w+)-(\w+)-(\w+?)(?:-\d+)?\.parquet$")
+    rm_re = re.compile(r"^(\w+)-(\w+)-(\w+?)(?:-\d+)?-rowmap\.json$")
 
     parquets: dict[tuple[str, str], list[str]] = {}
     rowmaps: dict[tuple[str, str], list[str]] = {}
