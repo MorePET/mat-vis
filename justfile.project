@@ -147,33 +147,50 @@ release-check:
 # them in order and verify each passed before advancing to the next. The
 # chain is explicit because each step is irreversible or partially so.
 
-# 1/5 — DRY-RUN a category bake. Produces parquet + rowmap in ./out/<tag>/
-#       but does not upload. Inspect before committing to 2-5.
-#       Usage: just gap-dry polyhaven 2k organic v2026.04.0
+# 1/5 — DRY-RUN a category bake via bake.yml. Fetches + bakes on a GH
+#       runner, skips any release upload. Watch the workflow run to see
+#       what the real bake would produce. Usage:
+#         just gap-dry polyhaven 2k organic v2026.04.0
 [group('data-ops')]
 gap-dry source tier category tag:
-    @mkdir -p out/{{ tag }}
-    uv run --with . mat-vis-baker all {{ source }} {{ tier }} ./out/{{ tag }} \
-        --release-tag {{ tag }} \
-        --category {{ category }} \
-        --dry-run
-    @echo "--- dry-run complete. Expected outputs:"
-    @ls -lh ./out/{{ tag }}/mat-vis-{{ source }}-{{ tier }}-{{ category }}*.parquet 2>/dev/null || true
-    @ls -lh ./out/{{ tag }}/{{ source }}-{{ tier }}-{{ category }}*-rowmap.json 2>/dev/null || true
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Firing bake.yml (dry-run) for {{ source }}/{{ tier }}/{{ category }} against {{ tag }}..."
+    gh workflow run bake.yml \
+        -f source={{ source }} \
+        -f tier={{ tier }} \
+        -f category={{ category }} \
+        -f release-tag={{ tag }} \
+        -f dry-run=true \
+        -f upload-chunks=false
+    sleep 8
+    run_id=$(gh run list --workflow=bake.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+    echo "Watching run ${run_id}..."
+    gh run watch "${run_id}" --exit-status
+    echo "--- dry-run {{ source }}/{{ tier }}/{{ category }} complete"
 
-# 2/5 — REAL bake with upload. Requires you to have run gap-dry first and
-#       reviewed the output. Uploads parquet + rowmap to the release tag.
-#       Usage: just gap-bake polyhaven 2k organic v2026.04.0
+# 2/5 — REAL bake with upload via bake.yml. Uploads parquet + rowmap for
+#       the target category cell to the release tag. Usage:
+#         just gap-bake polyhaven 2k organic v2026.04.0
 [group('data-ops')]
 gap-bake source tier category tag:
-    @echo "!! This uploads to release {{ tag }}. Ctrl-C within 3s to abort."
-    @sleep 3
-    @mkdir -p out/{{ tag }}
-    uv run --with . mat-vis-baker all {{ source }} {{ tier }} ./out/{{ tag }} \
-        --release-tag {{ tag }} \
-        --category {{ category }} \
-        --upload-chunks
-    @echo "--- bake + upload done for {{ source }}/{{ tier }}/{{ category }}"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "!! This will upload to release {{ tag }}. Ctrl-C within 5s to abort."
+    sleep 5
+    echo "Firing bake.yml (real) for {{ source }}/{{ tier }}/{{ category }} against {{ tag }}..."
+    gh workflow run bake.yml \
+        -f source={{ source }} \
+        -f tier={{ tier }} \
+        -f category={{ category }} \
+        -f release-tag={{ tag }} \
+        -f dry-run=false \
+        -f upload-chunks=true
+    sleep 8
+    run_id=$(gh run list --workflow=bake.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+    echo "Watching run ${run_id}..."
+    gh run watch "${run_id}" --exit-status
+    echo "--- bake + upload done for {{ source }}/{{ tier }}/{{ category }}"
 
 # 3/5 — VERIFY the parquet + rowmap just uploaded are actually on the release.
 #       Separate step because gap-bake claims success based on exit code;

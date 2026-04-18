@@ -52,6 +52,28 @@ on:  # yamllint disable-line rule:truthy
         required: false
         default: 'v2026.04.0'
         type: string
+      category:
+        description: 'Only bake materials in one normalized category (empty = all)'
+        required: false
+        default: ''
+        type: choice
+        options:
+          - ''
+          - ceramic
+          - concrete
+          - fabric
+          - glass
+          - metal
+          - organic
+          - other
+          - plastic
+          - stone
+          - wood
+      dry-run:
+        description: 'Fetch + bake but skip release uploads'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -78,6 +100,8 @@ jobs:
             --batch-size=${{ inputs.batch-size }}
             --upload-chunks=${{ inputs.upload-chunks }}
             --release-tag=${{ inputs.release-tag }}
+            --category=${{ inputs.category }}
+            --dry-run=${{ inputs.dry-run }}
             --registry-pass=env:GITHUB_TOKEN
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
