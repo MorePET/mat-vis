@@ -833,6 +833,78 @@ write_manifest(manifest, Path('/tmp/release-manifest.json'))
 
         return baker.with_exec(bake_cmd).directory("/tmp/out")
 
+    @function
+    async def regenerate_rowmaps(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        release_tag: Annotated[str, Doc("Release tag")] = "v2026.04.0",
+        registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
+    ) -> str:
+        """Regenerate all rowmap JSONs for a release using the current scanner.
+
+        Downloads each parquet, rescans with current generate_rowmap_from_parquet,
+        uploads new rowmap. Use after fixing the rowmap scanner to repair
+        existing release assets without re-baking.
+        """
+        context = src or dag.host().directory(".")
+        baker = self._baker_container(context)
+        if registry_pass is not None:
+            baker = baker.with_secret_variable("GH_TOKEN", registry_pass)
+
+        script = f"""
+import json, os, re, subprocess, urllib.request
+from pathlib import Path
+from mat_vis_baker.parquet_writer import generate_rowmap_from_parquet, write_rowmap
+
+TAG = '{release_tag}'
+BASE = f'https://github.com/MorePET/mat-vis/releases/download/{{TAG}}'
+work = Path('/tmp/regen'); work.mkdir(exist_ok=True)
+
+# List release assets
+assets = subprocess.run(
+    ['gh', 'release', 'view', TAG, '--json', 'assets', '--jq', '.assets[].name'],
+    capture_output=True, text=True, check=True,
+).stdout.strip().split('\\n')
+
+pq_re = re.compile(r'^mat-vis-(\\w+)-(\\w+)-(\\w+?)(?:-\\d+)?\\.parquet$')
+parquets = [a for a in assets if pq_re.match(a)]
+print(f'Found {{len(parquets)}} parquet files')
+
+for i, pq_name in enumerate(sorted(parquets), 1):
+    m = pq_re.match(pq_name)
+    if not m: continue
+    source, tier, _ = m.groups()
+    pq_path = work / pq_name
+    print(f'[{{i}}/{{len(parquets)}}] {{pq_name}}')
+
+    # Download
+    urllib.request.urlretrieve(f'{{BASE}}/{{pq_name}}', pq_path)
+
+    # Generate rowmap
+    rm = generate_rowmap_from_parquet(pq_path, source, tier, TAG)
+    n_mat = len(rm['materials'])
+    n_chan = sum(len(c) for c in rm['materials'].values())
+    print(f'  → {{n_mat}} materials, {{n_chan}} channels')
+
+    # Write rowmap with matching name
+    stem = pq_path.stem.replace(f'mat-vis-{{source}}-{{tier}}-', f'{{source}}-{{tier}}-')
+    rm_path = work / f'{{stem}}-rowmap.json'
+    write_rowmap(rm, rm_path)
+
+    # Upload rowmap, delete parquet to free disk
+    subprocess.run(['gh', 'release', 'upload', TAG, str(rm_path), '--clobber'], check=False)
+    pq_path.unlink()
+
+# Rebuild manifest
+from mat_vis_baker.manifest import rebuild_manifest_from_release, write_manifest
+mf = rebuild_manifest_from_release(TAG)
+mf_path = work / 'release-manifest.json'
+write_manifest(mf, mf_path)
+subprocess.run(['gh', 'release', 'upload', TAG, str(mf_path), '--clobber'], check=False)
+print('Manifest rebuilt and uploaded')
+"""
+        return await baker.with_exec(["python3", "-c", script]).stdout()
+
     # ── source probes ─────────────────────────────────────────────
 
     @function
