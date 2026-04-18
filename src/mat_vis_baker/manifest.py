@@ -29,7 +29,8 @@ def generate_manifest(
 ) -> dict:
     """Build a release manifest from the bake output directory."""
     manifest: dict = {
-        "version": 1,
+        "schema_version": 1,
+        "version": 1,  # legacy alias — drop in schema v2
         "release_tag": release_tag,
         "tiers": {},
     }
@@ -89,7 +90,12 @@ def rebuild_manifest_from_release(release_tag: str) -> dict:
     asset_names = result.stdout.strip().split("\n")
     base_url = f"{GITHUB_BASE}/{release_tag}/"
 
-    manifest: dict = {"version": 1, "release_tag": release_tag, "tiers": {}}
+    manifest: dict = {
+        "schema_version": 1,
+        "version": 1,  # legacy alias — drop in schema v2
+        "release_tag": release_tag,
+        "tiers": {},
+    }
 
     # Parse name: mat-vis-{source}-{tier}-{category}[-{chunk}].parquet
     # Tier can be a simple string (1k, 128) or hyphenated (ktx2-128, mtlx).

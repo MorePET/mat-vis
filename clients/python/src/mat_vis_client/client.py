@@ -112,8 +112,35 @@ def _in_range(value: float | None, lo: float, hi: float) -> bool:
     return lo <= value <= hi
 
 
+# Schema versions this client understands. Manifest declares its own
+# schema_version field; if the manifest version is outside this set,
+# the client refuses to operate rather than silently misreading data.
+COMPATIBLE_SCHEMA_VERSIONS = frozenset([1])
+
+
 class MatVisClient:
-    """Lightweight client for mat-vis texture data."""
+    """Lightweight client for mat-vis texture data.
+
+    The client is decoupled from the data: client version is semver
+    (API stability), data releases are calver (upstream snapshot).
+    Compatibility is negotiated via ``schema_version`` in the manifest.
+
+    Data source selection (in precedence order):
+
+    1. ``manifest_url=...`` — explicit URL (custom mirror, air-gapped setup)
+    2. ``tag="v2026.04.0"`` — specific release tag on MorePET/mat-vis
+    3. default — latest release (resolves ``releases/latest/download/...``)
+
+    Plus ``cache_dir=Path(...)`` to override ``$MAT_VIS_CACHE`` /
+    ``~/.cache/mat-vis``.
+
+    Examples::
+
+        client = MatVisClient()                               # latest release
+        client = MatVisClient(tag="v2026.04.0")               # pinned
+        client = MatVisClient(manifest_url="https://mirror/manifest.json")
+        client = MatVisClient(cache_dir=Path("/scratch/mat-vis"))
+    """
 
     def __init__(
         self,
@@ -137,7 +164,7 @@ class MatVisClient:
 
     @property
     def manifest(self) -> dict:
-        """Fetch and cache the release manifest."""
+        """Fetch and cache the release manifest. Validates schema_version."""
         if self._manifest is None:
             cache_path = self._cache_dir / ".manifest.json"
             if cache_path.exists():
@@ -146,7 +173,23 @@ class MatVisClient:
                 self._manifest = _get_json(self._manifest_url)
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache_path.write_text(json.dumps(self._manifest, indent=2))
+            self._check_schema_version(self._manifest)
         return self._manifest
+
+    @staticmethod
+    def _check_schema_version(manifest: dict) -> None:
+        """Refuse to operate on manifests with incompatible schema.
+
+        Accepts legacy 'version' field (older manifests used 'version: 1')
+        and the canonical 'schema_version' field (v2+).
+        """
+        schema = manifest.get("schema_version", manifest.get("version", 1))
+        if schema not in COMPATIBLE_SCHEMA_VERSIONS:
+            raise RuntimeError(
+                f"mat-vis-client does not support manifest schema_version={schema}. "
+                f"This client supports: {sorted(COMPATIBLE_SCHEMA_VERSIONS)}. "
+                f"Upgrade with: pip install -U mat-vis-client"
+            )
 
     def sources(self, tier: str = "1k") -> list[str]:
         """List available sources for a tier."""

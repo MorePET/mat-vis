@@ -10,6 +10,7 @@ rejected, and what would trigger revisiting.
 3. [0003 — Resolution tiers + category partitioning at 4K+](0003-resolution-tiers-and-partitioning.md)
 4. [0004 — Lazy local cache as default access mode](0004-access-modes-lazy-local-cache-default.md)
 5. [0005 — ~~SQL shim in clients~~ — superseded by ADR-0001](0005-sql-shim-embedded-in-clients.md)
+6. [0006 — Release versioning: client semver + data calver + delta overlays](0006-release-versioning-and-delta-overlays.md)
 
 ## Template
 
