@@ -63,8 +63,9 @@ def cmd_all(args: argparse.Namespace) -> int:
         CHANNEL_COLS,
         _SCHEMA,
         RowmapCollector,
-        build_rowmap_from_sidecar,
-        write_rowmap,
+        build_rowmap_from_sidecar,  # used by per-chunk upload path
+        emit_rowmaps_for_bake,
+        write_rowmap,  # used by per-chunk upload path
     )
     from mat_vis_baker.upload import (
         UploadError,
@@ -399,28 +400,30 @@ def cmd_all(args: argparse.Namespace) -> int:
         log.error("no successful materials")
         return 1
 
-    # ── generate rowmaps (sidecar path) for any partitions still on disk ──
+    # ── generate rowmaps for any partitions still on disk ──
     # These are partitions we did NOT upload-and-delete inside the streaming
     # loop (i.e. when --upload-chunks is off). The sidecar collectors were
     # captured at close time so this is authoritative, no scanning.
+    # Uses the consolidated emit_rowmaps_for_bake primitive so every bake
+    # pipeline (this one + ktx2 + derive-from-release) goes through the
+    # same code path — no more copy-pasted loops with drifting bugs.
     log.info("=== rowmap generation (sidecar) ===")
     t_rm = time.monotonic()
-    total_bytes = 0
-    for pq_path in finalized_paths:
-        if not pq_path.exists():
-            continue  # uploaded + deleted already
-        collector = finalized_collectors.get(pq_path, RowmapCollector())
-        rowmap = build_rowmap_from_sidecar(pq_path, collector, source, tier, args.release_tag)
-        # Derive rowmap filename: mat-vis-X-Y-Z[-N].parquet -> X-Y-Z[-N]-rowmap.json
-        stem = pq_path.stem.replace(f"mat-vis-{source}-{tier}-", f"{source}-{tier}-")
-        rm_path = output_dir / f"{stem}-rowmap.json"
-        write_rowmap(rowmap, rm_path)
-        total_bytes += pq_path.stat().st_size
+    rm_paths = emit_rowmaps_for_bake(
+        finalized_paths,
+        finalized_collectors,
+        source=source,
+        tier=tier,
+        release_tag=args.release_tag,
+        output_dir=output_dir,
+    )
+    total_bytes = sum(p.stat().st_size for p in finalized_paths if p.exists())
     log.info(
-        "PERF rowmap: %.1fs, %d partitions, %.1f GB",
+        "PERF rowmap: %.1fs, %d partitions, %.1f GB, %d rowmaps written",
         time.monotonic() - t_rm,
         len(finalized_paths),
         total_bytes / 1e9,
+        len(rm_paths),
     )
 
     # ── post-bake reconciliation (upload_chunks path) ──

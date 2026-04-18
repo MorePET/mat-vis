@@ -29,8 +29,7 @@ from mat_vis_baker.parquet_writer import (
     CHANNEL_COLS,
     _SCHEMA,
     RowmapCollector,
-    build_rowmap_from_sidecar,
-    write_rowmap,
+    emit_rowmaps_for_bake,
 )
 
 log = logging.getLogger("mat-vis-baker.derive-from-release")
@@ -243,13 +242,27 @@ def derive_from_release(
     )
 
     # ── generate rowmaps (sidecar — authoritative, no magic-byte scan) ──
+    # Iterate writers.keys(), not records_by_cat.keys() — same fix as
+    # ktx2.py. See emit_rowmaps_for_bake for the reason.
     t1 = time.monotonic()
-    for category in sorted(records_by_cat.keys()):
-        pq_path = output_dir / f"mat-vis-{source}-{target_tier}-{category}.parquet"
-        collector = collectors.get(category, RowmapCollector())
-        rowmap = build_rowmap_from_sidecar(pq_path, collector, source, target_tier, release_tag)
-        rm_path = output_dir / f"{source}-{target_tier}-{category}-rowmap.json"
-        write_rowmap(rowmap, rm_path)
+    parquet_paths = [
+        output_dir / f"mat-vis-{source}-{target_tier}-{cat}.parquet"
+        for cat in sorted(writers.keys())
+    ]
+    collectors_by_path = {
+        output_dir / f"mat-vis-{source}-{target_tier}-{cat}.parquet": collectors.get(
+            cat, RowmapCollector()
+        )
+        for cat in writers.keys()
+    }
+    emit_rowmaps_for_bake(
+        parquet_paths,
+        collectors_by_path,
+        source=source,
+        tier=target_tier,
+        release_tag=release_tag,
+        output_dir=output_dir,
+    )
 
     # ── write index ──
     from mat_vis_baker.index_builder import build_index, write_index
