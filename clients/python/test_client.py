@@ -37,6 +37,18 @@ TINY_PNG = (
 )
 
 
+def _mock_get(*args, **kwargs):
+    """Test double for client._get — mirrors its ``return_final_url`` contract.
+
+    Real ``_get`` returns ``bytes`` normally and ``(bytes, url)`` when
+    ``return_final_url=True``; this helper matches both. Returns
+    :data:`TINY_PNG` as the byte payload.
+    """
+    if kwargs.get("return_final_url"):
+        return TINY_PNG, args[0] if args else ""
+    return TINY_PNG
+
+
 MOCK_MANIFEST = {
     "version": 1,
     "release_tag": "v2026.04.0",
@@ -52,8 +64,25 @@ MOCK_MANIFEST = {
                     "parquet_files": ["polyhaven-1k.parquet"],
                     "rowmap_file": "polyhaven-1k-rowmap.json",
                 },
+                "gpuopen": {
+                    "parquet_files": ["gpuopen-1k.parquet"],
+                    "rowmap_file": "gpuopen-1k-rowmap.json",
+                },
             },
         }
+    },
+}
+
+# Rowmap suitable for the gpuopen "test-uuid" material — mirrors the
+# ambientcg fixture's structure so MtlxSource.original.export() has
+# concrete channels to rewrite texture paths against.
+MOCK_ROWMAP_GPUOPEN = {
+    "parquet_file": "gpuopen-1k.parquet",
+    "materials": {
+        "test-uuid": {
+            "color": {"offset": 0, "length": 1024},
+            "roughness": {"offset": 1024, "length": 512},
+        },
     },
 }
 
@@ -130,6 +159,9 @@ def mock_client():
         # Pre-populate manifest cache so no HTTP needed
         cache_path = Path(tmp) / ".manifest.json"
         cache_path.write_text(json.dumps(MOCK_MANIFEST))
+        # Suppress the background update-check HTTP calls that would
+        # otherwise consume our mocked _get_json side_effect iterations.
+        client._update_warned = True
         yield client
 
 
@@ -251,7 +283,7 @@ class TestClientSearch:
 
 class TestClientPrefetch:
     @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
-    @patch("mat_vis_client.client._get", return_value=TINY_PNG)
+    @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_prefetch_downloads_all(self, mock_http, mock_json, mock_client):
         progress = []
         n = mock_client.prefetch(
@@ -265,7 +297,7 @@ class TestClientPrefetch:
         assert progress[-1][2] == 2  # total
 
     @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
-    @patch("mat_vis_client.client._get", return_value=TINY_PNG)
+    @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_fetch_all_textures(self, mock_http, mock_json, mock_client):
         textures = mock_client.fetch_all_textures("ambientcg", "Rock064", "1k")
         assert set(textures.keys()) == {"color", "normal", "roughness"}
@@ -511,7 +543,7 @@ class TestExportMtlx:
 
 class TestMaterialize:
     @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
-    @patch("mat_vis_client.client._get", return_value=TINY_PNG)
+    @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_materialize_writes_pngs(self, mock_http, mock_json, mock_client):
         with tempfile.TemporaryDirectory() as tmp:
             tex_dir = mock_client.materialize("ambientcg", "Rock064", "1k", tmp)
@@ -522,7 +554,7 @@ class TestMaterialize:
             assert (tex_dir / "color.png").read_bytes()[:4] == b"\x89PNG"
 
     @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
-    @patch("mat_vis_client.client._get", return_value=TINY_PNG)
+    @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_materialize_skips_existing(self, mock_http, mock_json, mock_client):
         with tempfile.TemporaryDirectory() as tmp:
             # First call writes
@@ -534,11 +566,16 @@ class TestMaterialize:
             assert mock_http.call_count == call_count_1  # no new HTTP calls
 
     @patch("mat_vis_client.client._get_json")
-    @patch("mat_vis_client.client._get", return_value=TINY_PNG)
+    @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_to_mtlx_generates_valid_document(self, mock_http, mock_json, mock_client):
+        # Deprecated but still functional.
         mock_json.side_effect = [MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG, MOCK_ROWMAP]
+        import warnings
+
         with tempfile.TemporaryDirectory() as tmp:
-            mtlx_path = mock_client.to_mtlx("ambientcg", "Rock064", "1k", tmp)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                mtlx_path = mock_client.to_mtlx("ambientcg", "Rock064", "1k", tmp)
             assert mtlx_path.exists()
             assert mtlx_path.suffix == ".mtlx"
 
@@ -549,25 +586,229 @@ class TestMaterialize:
             assert 'version="1.38"' in content
 
 
+# ── MtlxSource façade tests ────────────────────────────────────
+
+
+class TestMtlxSource:
+    """Tests for the dotted client.mtlx(...).xml / .export / .original API."""
+
+    def test_synthesized_creation_is_lazy(self, mock_client):
+        """Creating the façade must not trigger any HTTP calls."""
+        with (
+            patch("mat_vis_client.client._get_json") as mock_json,
+            patch("mat_vis_client.client._get") as mock_get,
+        ):
+            source = mock_client.mtlx("ambientcg", "Rock064", "1k")
+            assert source.source == "ambientcg"
+            assert source.material_id == "Rock064"
+            assert source.tier == "1k"
+            assert source.is_original is False
+            assert mock_json.call_count == 0
+            assert mock_get.call_count == 0
+
+    @patch("mat_vis_client.client._get_json")
+    def test_synthesized_xml_does_not_fetch_pngs(self, mock_json, mock_client):
+        """.xml only needs the rowmap + index, no texture byte fetches."""
+        mock_json.side_effect = [MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG]
+        with patch("mat_vis_client.client._get") as mock_get:
+            xml = mock_client.mtlx("ambientcg", "Rock064", "1k").xml
+            # No _get (which fetches PNG bytes) should have been called.
+            assert mock_get.call_count == 0
+
+        assert xml.startswith("<?xml")
+        assert 'version="1.38"' in xml
+        assert "UsdPreviewSurface" in xml
+        assert "color.png" in xml
+
+    @patch("mat_vis_client.client._get_json")
+    def test_synthesized_xml_is_cached(self, mock_json, mock_client):
+        """Second .xml access returns the cached string."""
+        mock_json.side_effect = [MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG]
+        source = mock_client.mtlx("ambientcg", "Rock064", "1k")
+        xml1 = source.xml
+        xml2 = source.xml
+        assert xml1 is xml2
+
+    @patch("mat_vis_client.client._get_json")
+    @patch("mat_vis_client.client._get", side_effect=_mock_get)
+    def test_synthesized_export_writes_files(self, mock_http, mock_json, mock_client):
+        """.export(path) writes channel PNGs + a .mtlx file."""
+        mock_json.side_effect = [MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG, MOCK_ROWMAP]
+        with tempfile.TemporaryDirectory() as tmp:
+            mtlx_path = mock_client.mtlx("ambientcg", "Rock064", "1k").export(tmp)
+            assert mtlx_path.exists()
+            assert mtlx_path.suffix == ".mtlx"
+            assert mtlx_path.parent.name == "Rock064"
+            # PNG channels written
+            assert (mtlx_path.parent / "color.png").exists()
+            assert (mtlx_path.parent / "normal.png").exists()
+            assert (mtlx_path.parent / "roughness.png").exists()
+            # Document references them
+            assert "color.png" in mtlx_path.read_text()
+
+    @patch("mat_vis_client.client._get_json")
+    def test_original_returns_none_for_ambientcg(self, mock_json, mock_client):
+        """.original is None when the source has no upstream mtlx map."""
+        mock_json.side_effect = Exception("404")
+        source = mock_client.mtlx("ambientcg", "Rock064", "1k")
+        assert source.original is None
+
+    @patch("mat_vis_client.client._get_json")
+    def test_original_returns_none_for_unknown_material(self, mock_json, mock_client):
+        """.original is None when the material isn't in the upstream map."""
+        mock_json.return_value = {"other-uuid": "<materialx version='1.38'/>"}
+        source = mock_client.mtlx("gpuopen", "nonexistent-uuid", "1k")
+        assert source.original is None
+
+    @patch("mat_vis_client.client._get_json")
+    def test_original_returns_mtlxsource_for_gpuopen(self, mock_json, mock_client):
+        """.original returns a new MtlxSource when upstream exists."""
+        upstream_xml = '<?xml version="1.0"?><materialx version="1.38"><nodegraph/></materialx>'
+        mock_json.return_value = {"test-uuid": upstream_xml}
+        source = mock_client.mtlx("gpuopen", "test-uuid", "1k")
+        orig = source.original
+        assert orig is not None
+        assert orig.is_original is True
+        assert orig.source == "gpuopen"
+        assert orig.material_id == "test-uuid"
+
+    @patch("mat_vis_client.client._get_json")
+    def test_original_xml_returns_raw_upstream(self, mock_json, mock_client):
+        """.original.xml returns the raw upstream XML, not rewritten."""
+        upstream_xml = (
+            '<?xml version="1.0"?><materialx version="1.38">'
+            '<image name="img1"><input name="file" value="BaseColor.png"/></image>'
+            "</materialx>"
+        )
+        mock_json.return_value = {"test-uuid": upstream_xml}
+        xml = mock_client.mtlx("gpuopen", "test-uuid", "1k").original.xml
+        assert xml == upstream_xml
+
+    def test_original_on_original_returns_none(self, mock_client):
+        """Calling .original on an already-original source returns None."""
+        from mat_vis_client import MtlxSource
+
+        fake_original = MtlxSource(mock_client, "gpuopen", "x", "1k", is_original=True)
+        assert fake_original.original is None
+
+    @patch("mat_vis_client.client._get_json")
+    @patch("mat_vis_client.client._get", side_effect=_mock_get)
+    def test_original_export_rewrites_paths(self, mock_http, mock_json, mock_client):
+        """.original.export(path) writes upstream XML with local texture paths."""
+        upstream_xml = (
+            '<?xml version="1.0"?><materialx version="1.38">'
+            '<image name="img1"><input name="file" value="BaseColor.png"/></image>'
+            '<image name="img2"><input name="file" value="Roughness.png"/></image>'
+            "</materialx>"
+        )
+        # Calls in order: mtlx-originals map, rowmap (first materialize/channels call
+        # populates the in-process rowmap cache — subsequent calls are cached).
+        mock_json.side_effect = [
+            {"test-uuid": upstream_xml},
+            MOCK_ROWMAP_GPUOPEN,
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            orig = mock_client.mtlx("gpuopen", "test-uuid", "1k").original
+            assert orig is not None
+            mtlx_path = orig.export(tmp)
+            content = mtlx_path.read_text()
+            # Upstream filenames replaced with local paths
+            assert "BaseColor.png" not in content
+            assert "Roughness.png" not in content
+            # gpuopen rowmap fixture exposes color + roughness channels.
+            assert "color.png" in content
+            assert "roughness.png" in content
+
+    def test_original_check_caches_at_client_level(self, mock_client):
+        """Repeated .original checks hit the client cache, not the network."""
+        with patch("mat_vis_client.client._get_json") as mock_json:
+            mock_json.return_value = {"test-uuid": "<materialx/>"}
+            s1 = mock_client.mtlx("gpuopen", "test-uuid", "1k")
+            s2 = mock_client.mtlx("gpuopen", "another-uuid", "1k")
+            assert s1.original is not None
+            assert s2.original is None
+            # Only one network call for the whole source's map, shared by both.
+            assert mock_json.call_count == 1
+
+    def test_deprecated_to_mtlx_warns(self, mock_client):
+        """client.to_mtlx emits DeprecationWarning pointing at .mtlx(...).export."""
+        import warnings
+
+        with (
+            patch("mat_vis_client.client._get_json") as mock_json,
+            patch("mat_vis_client.client._get", side_effect=_mock_get),
+        ):
+            mock_json.side_effect = [MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG, MOCK_ROWMAP]
+            with tempfile.TemporaryDirectory() as tmp:
+                with warnings.catch_warnings(record=True) as w:
+                    warnings.simplefilter("always")
+                    mock_client.to_mtlx("ambientcg", "Rock064", "1k", tmp)
+                assert any(
+                    issubclass(wi.category, DeprecationWarning) and "mtlx(" in str(wi.message)
+                    for wi in w
+                )
+
+    def test_deprecated_fetch_mtlx_original_warns(self, mock_client):
+        """client.fetch_mtlx_original emits DeprecationWarning."""
+        import warnings
+
+        with patch("mat_vis_client.client._get_json", return_value={}):
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                result = mock_client.fetch_mtlx_original("ambientcg", "Rock064")
+            assert result is None
+            assert any(issubclass(wi.category, DeprecationWarning) for wi in w)
+
+    def test_deprecated_materialize_mtlx_warns(self, mock_client):
+        """client.materialize_mtlx emits DeprecationWarning."""
+        import warnings
+
+        with (
+            patch("mat_vis_client.client._get_json") as mock_json,
+            patch("mat_vis_client.client._get", side_effect=_mock_get),
+        ):
+            # no-originals path: fetch originals (empty), then materialize + synthesize
+            mock_json.side_effect = [{}, MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG, MOCK_ROWMAP]
+            with tempfile.TemporaryDirectory() as tmp:
+                with warnings.catch_warnings(record=True) as w:
+                    warnings.simplefilter("always")
+                    mock_client.materialize_mtlx("ambientcg", "Rock064", "1k", tmp)
+                assert any(issubclass(wi.category, DeprecationWarning) for wi in w)
+
+
 class TestFetchMtlxOriginal:
+    """Retained for backward compat — method still works, just warns."""
+
     @patch("mat_vis_client.client._get_json")
     def test_returns_xml_for_known_material(self, mock_json, mock_client):
+        import warnings
+
         mock_json.return_value = {
             "test-uuid": '<?xml version="1.0"?><materialx version="1.38"><nodegraph/></materialx>'
         }
-        xml = mock_client.fetch_mtlx_original("gpuopen", "test-uuid")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            xml = mock_client.fetch_mtlx_original("gpuopen", "test-uuid")
         assert xml is not None
         assert "<materialx" in xml
 
     @patch("mat_vis_client.client._get_json")
     def test_returns_none_for_unknown(self, mock_json, mock_client):
+        import warnings
+
         mock_json.return_value = {"other-uuid": "<materialx/>"}
-        xml = mock_client.fetch_mtlx_original("gpuopen", "nonexistent")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            xml = mock_client.fetch_mtlx_original("gpuopen", "nonexistent")
         assert xml is None
 
     @patch("mat_vis_client.client._get_json", side_effect=Exception("404"))
     def test_returns_none_when_no_mtlx_asset(self, mock_json, mock_client):
-        xml = mock_client.fetch_mtlx_original("ambientcg", "Rock064")
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            xml = mock_client.fetch_mtlx_original("ambientcg", "Rock064")
         assert xml is None
 
 

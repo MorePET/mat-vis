@@ -211,62 +211,25 @@ def to_gltf(
 # ── MaterialX adapter ──────────────────────────────────────────
 
 
-def export_mtlx(
+def _build_mtlx_tree(
     scalars: dict,
-    textures: dict[str, bytes] | None = None,
-    output_dir: str | Path = ".",
-    *,
-    material_name: str = "Material",
-    texture_dir: str | Path | None = None,
-    channels: list[str] | None = None,
-) -> Path:
-    """Export as MaterialX .mtlx XML with referenced PNG files.
+    tex_filenames: dict[str, str],
+    material_name: str,
+) -> ET.Element:
+    """Build a MaterialX 1.38 ElementTree for a UsdPreviewSurface material.
 
-    Uses UsdPreviewSurface with a nodegraph for texture reads — valid
-    MaterialX 1.38 that works with USD/Hydra renderers.
-
-    Two modes:
-        1. Pass ``textures`` dict: PNGs are written to output_dir,
-           mtlx references them by filename.
-        2. Pass ``texture_dir`` + ``channels``: no PNG writing, mtlx
-           references existing files in texture_dir.
+    Pure in-memory — no disk IO. Callers write the tree or serialize it
+    to a string via :func:`_mtlx_tree_to_string`.
 
     Args:
-        scalars: Material scalars (metalness, roughness, color_hex, ior, etc).
-        textures: Channel name -> PNG bytes. Written to output_dir.
-        output_dir: Directory for .mtlx (and .png files if textures provided).
+        scalars: Material scalars (metalness, roughness, ior, etc).
+        tex_filenames: Channel name -> texture file path string (already
+            resolved; empty dict is valid — yields a scalar-only mat).
         material_name: Name for the material in the .mtlx document.
-        texture_dir: Path to existing texture PNGs. If set, textures param
-            is ignored and no PNGs are written.
-        channels: Channel names when using texture_dir mode.
 
     Returns:
-        Path to the written .mtlx file.
+        Root ``<materialx>`` element.
     """
-    textures = textures or {}
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    # Determine available channels and texture paths
-    if texture_dir is not None:
-        tex_dir = Path(texture_dir)
-        available_channels = channels or []
-        tex_filenames: dict[str, str] = {}
-        for ch in available_channels:
-            png_path = tex_dir / f"{ch}.png"
-            if png_path.exists():
-                tex_filenames[ch] = str(png_path)
-    else:
-        # Write PNGs and record filenames
-        tex_filenames = {}
-        for channel, png_bytes in textures.items():
-            if channel not in _USD_PREVIEW_TEX_MAP:
-                continue
-            png_filename = f"{material_name}_{channel}.png"
-            (out / png_filename).write_bytes(png_bytes)
-            tex_filenames[channel] = png_filename
-
-    # Build MaterialX document
     root = ET.Element("materialx", version="1.38")
 
     # Nodegraph with image reads
@@ -332,10 +295,118 @@ def export_mtlx(
         mat, "input", name="surfaceshader", type="surfaceshader", nodename=f"{shader_name}"
     )
 
-    # Write
     ET.indent(root, space="  ")
-    mtlx_path = out / f"{material_name}.mtlx"
-    with open(mtlx_path, "w") as f:
-        f.write(ET.tostring(root, encoding="unicode", xml_declaration=True))
+    return root
 
+
+def _mtlx_tree_to_string(root: ET.Element) -> str:
+    """Serialize a MaterialX ElementTree to a string with XML declaration."""
+    return ET.tostring(root, encoding="unicode", xml_declaration=True)
+
+
+def _resolve_tex_filenames(
+    textures: dict[str, bytes] | None,
+    output_dir: Path,
+    material_name: str,
+    texture_dir: str | Path | None,
+    channels: list[str] | None,
+) -> dict[str, str]:
+    """Resolve the channel -> file path map for a mtlx document.
+
+    In ``texture_dir`` mode: returns paths to existing PNGs in that dir.
+    Otherwise: writes the ``textures`` dict as PNGs into ``output_dir``
+    and returns the written basenames.
+    """
+    textures = textures or {}
+    if texture_dir is not None:
+        tex_dir = Path(texture_dir)
+        available_channels = channels or []
+        tex_filenames: dict[str, str] = {}
+        for ch in available_channels:
+            png_path = tex_dir / f"{ch}.png"
+            if png_path.exists():
+                tex_filenames[ch] = str(png_path)
+        return tex_filenames
+
+    tex_filenames = {}
+    for channel, png_bytes in textures.items():
+        if channel not in _USD_PREVIEW_TEX_MAP:
+            continue
+        png_filename = f"{material_name}_{channel}.png"
+        (output_dir / png_filename).write_bytes(png_bytes)
+        tex_filenames[channel] = png_filename
+    return tex_filenames
+
+
+def generate_mtlx_xml(
+    scalars: dict,
+    *,
+    material_name: str = "Material",
+    texture_dir: str | Path | None = None,
+    channels: list[str] | None = None,
+) -> str:
+    """Return a MaterialX 1.38 XML document as a string.
+
+    Pure in-memory — no files written. Used by :class:`MtlxSource.xml`
+    to expose the synthesized document without materializing textures.
+
+    Args:
+        scalars: Material scalars (metalness, roughness, color_hex, ior, etc).
+        material_name: Name for the material in the .mtlx document.
+        texture_dir: Directory of existing texture PNGs to reference.
+            If None, no texture nodes are emitted.
+        channels: Channel names (color, normal, roughness, ...) present
+            in ``texture_dir``; others are skipped.
+    """
+    tex_filenames: dict[str, str] = {}
+    if texture_dir is not None:
+        tex_dir = Path(texture_dir)
+        for ch in channels or []:
+            png_path = tex_dir / f"{ch}.png"
+            if png_path.exists():
+                tex_filenames[ch] = str(png_path)
+    root = _build_mtlx_tree(scalars, tex_filenames, material_name)
+    return _mtlx_tree_to_string(root)
+
+
+def export_mtlx(
+    scalars: dict,
+    textures: dict[str, bytes] | None = None,
+    output_dir: str | Path = ".",
+    *,
+    material_name: str = "Material",
+    texture_dir: str | Path | None = None,
+    channels: list[str] | None = None,
+) -> Path:
+    """Export as MaterialX .mtlx XML with referenced PNG files.
+
+    Uses UsdPreviewSurface with a nodegraph for texture reads — valid
+    MaterialX 1.38 that works with USD/Hydra renderers.
+
+    Two modes:
+        1. Pass ``textures`` dict: PNGs are written to output_dir,
+           mtlx references them by filename.
+        2. Pass ``texture_dir`` + ``channels``: no PNG writing, mtlx
+           references existing files in texture_dir.
+
+    Args:
+        scalars: Material scalars (metalness, roughness, color_hex, ior, etc).
+        textures: Channel name -> PNG bytes. Written to output_dir.
+        output_dir: Directory for .mtlx (and .png files if textures provided).
+        material_name: Name for the material in the .mtlx document.
+        texture_dir: Path to existing texture PNGs. If set, textures param
+            is ignored and no PNGs are written.
+        channels: Channel names when using texture_dir mode.
+
+    Returns:
+        Path to the written .mtlx file.
+    """
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    tex_filenames = _resolve_tex_filenames(textures, out, material_name, texture_dir, channels)
+    root = _build_mtlx_tree(scalars, tex_filenames, material_name)
+
+    mtlx_path = out / f"{material_name}.mtlx"
+    mtlx_path.write_text(_mtlx_tree_to_string(root), encoding="utf-8")
     return mtlx_path

@@ -627,27 +627,27 @@ class MatVisClient:
 
         return out
 
-    def to_mtlx(
-        self,
-        source: str,
-        material_id: str,
-        tier: str = "1k",
-        output_dir: str | Path = ".",
-    ) -> Path:
-        """Materialize textures and generate a MaterialX document.
+    # ── MaterialX API (dotted) ─────────────────────────────────
 
-        Writes PNGs to output_dir/{material_id}/ and creates a .mtlx
-        file referencing them with local paths. The result is loadable
-        by any standard MaterialX renderer.
+    def mtlx(self, source: str, material_id: str, tier: str = "1k") -> MtlxSource:
+        """Get a lazy :class:`MtlxSource` for a material.
 
-        Returns path to the .mtlx file.
+        Use ``.xml`` for the document string, ``.export(path)`` to write
+        files, and ``.original`` for the upstream-author variant (None
+        if not available for this source).
+
+        Creation is free — no network IO happens until ``.xml`` or
+        ``.export(...)`` is called.
         """
-        from mat_vis_client.adapters import export_mtlx
+        return MtlxSource(self, source, material_id, tier, is_original=False)
 
-        tex_dir = self.materialize(source, material_id, tier, output_dir)
-        chs = self.channels(source, material_id, tier)
+    def _scalars_for(self, source: str, material_id: str) -> dict:
+        """Look up PBR scalars for a material from the source index.
 
-        # Get scalars from index if available
+        Silent on failure — returns ``{}`` if the index is unavailable or
+        the material isn't found. Used by :class:`MtlxSource` to fill in
+        shader scalar inputs when a texture channel is absent.
+        """
         scalars: dict = {}
         try:
             for entry in self.index(source):
@@ -658,37 +658,62 @@ class MatVisClient:
                     break
         except Exception:
             pass
+        return scalars
 
-        return export_mtlx(
-            scalars=scalars,
-            output_dir=str(tex_dir),
-            material_name=material_id,
-            texture_dir=str(tex_dir),
-            channels=chs,
-        )
+    def _fetch_mtlx_original_map(self, source: str) -> dict[str, str]:
+        """Fetch and cache the {source}-mtlx.json map. Empty dict on miss.
 
-    # ── Original MaterialX (gpuopen) ───────────────────────────
-
-    def fetch_mtlx_original(self, source: str, material_id: str) -> str | None:
-        """Fetch original upstream MaterialX XML for a material.
-
-        Downloads and caches the {source}-mtlx.json map from the release,
-        then returns the XML string for the given material_id.
-        Returns None if the source has no original mtlx or material not found.
+        First access hits the network and fetches the full JSON map (gpuopen
+        is ~22 MB). Subsequent calls return the in-process cache. Any fetch
+        error is cached as ``{}`` so we don't retry every call.
         """
         if not hasattr(self, "_mtlx_originals"):
             self._mtlx_originals: dict[str, dict[str, str]] = {}
-
         if source not in self._mtlx_originals:
             tag = self.manifest.get("release_tag", self._tag or "")
             url = f"{GITHUB_RELEASES}/download/{tag}/{source}-mtlx.json"
             try:
-                data = _get_json(url)
-                self._mtlx_originals[source] = data
+                self._mtlx_originals[source] = _get_json(url)
             except Exception:
                 self._mtlx_originals[source] = {}
+        return self._mtlx_originals[source]
 
-        return self._mtlx_originals[source].get(material_id)
+    # ── Deprecated mtlx shims ──────────────────────────────────
+
+    def to_mtlx(
+        self,
+        source: str,
+        material_id: str,
+        tier: str = "1k",
+        output_dir: str | Path = ".",
+    ) -> Path:
+        """Deprecated: use ``client.mtlx(src, id, tier).export(output_dir)``."""
+        import warnings
+
+        warnings.warn(
+            "client.to_mtlx() is deprecated. "
+            "Use client.mtlx(source, material_id, tier).export(output_dir) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.mtlx(source, material_id, tier).export(output_dir)
+
+    def fetch_mtlx_original(self, source: str, material_id: str) -> str | None:
+        """Deprecated: use ``client.mtlx(src, id).original`` (None if unavailable).
+
+        Returns the raw upstream MaterialX XML string, or ``None`` if the
+        source has no original mtlx or the material isn't in the map.
+        """
+        import warnings
+
+        warnings.warn(
+            "client.fetch_mtlx_original() is deprecated. "
+            "Use client.mtlx(source, material_id).original and check for None; "
+            "then read .xml from the returned MtlxSource.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._fetch_mtlx_original_map(source).get(material_id)
 
     def materialize_mtlx(
         self,
@@ -697,76 +722,26 @@ class MatVisClient:
         tier: str = "1k",
         output_dir: str | Path = ".",
     ) -> Path | None:
-        """Fetch original MaterialX, rewrite texture paths, write to disk.
+        """Deprecated: use ``client.mtlx(src, id, tier).original.export(path)``.
 
-        For materials with original upstream mtlx (gpuopen), fetches the
-        XML, materializes the PNG textures, then rewrites texture file
-        references to point at the local PNGs.
-
-        Falls back to generated UsdPreviewSurface if no original exists.
-
-        Returns path to the .mtlx file, or None on failure.
+        Falls back to the synthesized variant when no upstream mtlx exists
+        (preserves pre-0.2 behavior).
         """
-        import re
+        import warnings
 
-        xml_str = self.fetch_mtlx_original(source, material_id)
-        if xml_str is None:
-            # Fall back to generated
-            return self.to_mtlx(source, material_id, tier, output_dir)
-
-        # Materialize textures
-        tex_dir = self.materialize(source, material_id, tier, output_dir)
-        chs = self.channels(source, material_id, tier)
-
-        # Build a map of possible original filenames → our channel filenames
-        # GPUOpen uses names like BaseColor.png, Normal.png, Roughness.png
-        _FILENAME_TO_CHANNEL = {
-            "basecolor": "color",
-            "base_color": "color",
-            "diffuse": "color",
-            "normal": "normal",
-            "roughness": "roughness",
-            "specular_roughness": "roughness",
-            "metallic": "metalness",
-            "metalness": "metalness",
-            "occlusion": "ao",
-            "ao": "ao",
-            "ambientocclusion": "ao",
-            "displacement": "displacement",
-            "height": "displacement",
-            "emission": "emission",
-            "emissive": "emission",
-        }
-
-        def _rewrite_path(match: re.Match) -> str:
-            """Replace texture filename with local path."""
-            orig = match.group(1)
-            stem = Path(orig).stem.lower().replace(" ", "").replace("-", "").replace("_", "")
-            # Try direct match
-            for pattern, channel in _FILENAME_TO_CHANNEL.items():
-                clean_pattern = pattern.replace("_", "")
-                if clean_pattern in stem and channel in chs:
-                    return f'value="{tex_dir / (channel + ".png")}"'
-            # Try substring
-            for pattern, channel in _FILENAME_TO_CHANNEL.items():
-                clean_pattern = pattern.replace("_", "")
-                if clean_pattern in stem:
-                    local = tex_dir / f"{channel}.png"
-                    if local.exists():
-                        return f'value="{local}"'
-            return match.group(0)
-
-        # Rewrite all filename values in the XML
-        rewritten = re.sub(
-            r'value="([^"]*\.(?:png|jpg|jpeg|tif|tiff|exr))"',
-            _rewrite_path,
-            xml_str,
-            flags=re.IGNORECASE,
+        warnings.warn(
+            "client.materialize_mtlx() is deprecated. "
+            "Use client.mtlx(source, material_id, tier).original.export(output_dir); "
+            "handle the None case explicitly.",
+            DeprecationWarning,
+            stacklevel=2,
         )
-
-        mtlx_path = tex_dir / f"{material_id}.mtlx"
-        mtlx_path.write_text(rewritten, encoding="utf-8")
-        return mtlx_path
+        source_obj = self.mtlx(source, material_id, tier)
+        original = source_obj.original
+        if original is None:
+            # Preserve previous fallback-to-synthesized behavior.
+            return source_obj.export(output_dir)
+        return original.export(output_dir)
 
     def rowmap_entry(
         self,
@@ -1031,6 +1006,240 @@ class MatVisClient:
                 file=sys.stderr,
             )
             self._cap_warned = True
+
+
+# ── MaterialX façade ────────────────────────────────────────────
+
+
+class MtlxSource:
+    """Lazy façade for a material's MaterialX document.
+
+    Two forms, both reachable from :meth:`MatVisClient.mtlx`:
+
+    * **Synthesized** — ``client.mtlx(src, id, tier)``. Always available
+      (UsdPreviewSurface wrapper over our PNG channels).
+    * **Original** — ``client.mtlx(src, id, tier).original`` or ``None``.
+      The upstream-author MaterialX document. Currently only gpuopen
+      ships these; other sources return ``None``.
+
+    Both variants expose the same two accessors:
+
+    * ``.xml`` — the document as a string (no files written)
+    * ``.export(output_dir)`` — writes channel PNGs + the ``.mtlx``
+      file referencing them by local path; returns the mtlx path
+
+    No network IO happens in ``__init__``. First access to ``.xml``,
+    ``.export(...)``, or ``.original`` is what triggers fetching.
+    """
+
+    def __init__(
+        self,
+        client: MatVisClient,
+        source: str,
+        material_id: str,
+        tier: str,
+        *,
+        is_original: bool = False,
+    ):
+        self._client = client
+        self._source = source
+        self._material_id = material_id
+        self._tier = tier
+        self._is_original = is_original
+        self._xml_cache: str | None = None
+
+    @property
+    def source(self) -> str:
+        """The mat-vis source name (e.g. ``"ambientcg"``, ``"gpuopen"``)."""
+        return self._source
+
+    @property
+    def material_id(self) -> str:
+        """The material identifier within the source."""
+        return self._material_id
+
+    @property
+    def tier(self) -> str:
+        """The resolution tier (e.g. ``"1k"``, ``"2k"``)."""
+        return self._tier
+
+    @property
+    def is_original(self) -> bool:
+        """True if this is the upstream-author document, not synthesized."""
+        return self._is_original
+
+    @property
+    def xml(self) -> str:
+        """Return the MaterialX XML as a string.
+
+        * Synthesized: generated in-memory from scalars + channel list.
+          No PNGs are written and no texture bytes are fetched.
+        * Original: pulls the upstream XML from the cached per-source
+          ``{source}-mtlx.json`` map on first access. Subsequent calls
+          on the same instance return the cached string.
+
+        Raises:
+            LookupError: if this is an original variant but the
+                material disappeared from the upstream map between
+                ``.original`` creation and ``.xml`` access (rare —
+                shouldn't happen since ``.original`` checks presence).
+        """
+        if self._xml_cache is not None:
+            return self._xml_cache
+
+        if self._is_original:
+            xml_str = self._client._fetch_mtlx_original_map(self._source).get(self._material_id)
+            if xml_str is None:
+                raise LookupError(f"No original MaterialX for {self._source}/{self._material_id}")
+            self._xml_cache = xml_str
+            return xml_str
+
+        # Synthesized: build XML from scalars + channel list, referencing
+        # PNGs by <material_id>/<channel>.png (relative paths that line up
+        # with what .export() writes). No PNG bytes fetched.
+        chs = self._client.channels(self._source, self._material_id, self._tier)
+        scalars = self._client._scalars_for(self._source, self._material_id)
+        # Reference PNGs relative to the mtlx file — matches the layout
+        # .export() produces (.mtlx alongside channel PNGs in one dir).
+        self._xml_cache = _render_synthesized_mtlx_xml(
+            scalars=scalars,
+            channels=chs,
+            material_name=self._material_id,
+        )
+        return self._xml_cache
+
+    def export(self, output_dir: str | Path) -> Path:
+        """Materialize PNGs + write the ``.mtlx`` file. Returns the mtlx path.
+
+        Layout (same for synthesized and original):
+        ``<output_dir>/<material_id>/<channel>.png`` + ``<material_id>.mtlx``.
+
+        * Synthesized: generates the document with local PNG references.
+        * Original: fetches upstream XML, then rewrites texture filename
+          references to point at the local PNGs using a heuristic
+          name-to-channel map (``BaseColor.png`` → ``color.png`` etc.).
+        """
+        from mat_vis_client.adapters import export_mtlx
+
+        tex_dir = self._client.materialize(self._source, self._material_id, self._tier, output_dir)
+        chs = self._client.channels(self._source, self._material_id, self._tier)
+
+        if not self._is_original:
+            scalars = self._client._scalars_for(self._source, self._material_id)
+            return export_mtlx(
+                scalars=scalars,
+                output_dir=str(tex_dir),
+                material_name=self._material_id,
+                texture_dir=str(tex_dir),
+                channels=chs,
+            )
+
+        # Original: fetch upstream, rewrite filename values to local PNGs.
+        xml_str = self.xml  # raises LookupError if gone from the map
+        rewritten = _rewrite_mtlx_texture_paths(xml_str, tex_dir, chs)
+        mtlx_path = tex_dir / f"{self._material_id}.mtlx"
+        mtlx_path.write_text(rewritten, encoding="utf-8")
+        return mtlx_path
+
+    @property
+    def original(self) -> MtlxSource | None:
+        """Return the upstream-author variant if available, else ``None``.
+
+        Only synthesized :class:`MtlxSource` instances have ``.original``
+        — calling it on an already-original source returns ``None``.
+
+        Fast check: the per-source "does this source offer originals"
+        verdict is cached at the client level (first call fetches the
+        full ``{source}-mtlx.json`` map; subsequent calls hit memory).
+        """
+        if self._is_original:
+            return None
+        mtlx_map = self._client._fetch_mtlx_original_map(self._source)
+        if self._material_id not in mtlx_map:
+            return None
+        return MtlxSource(
+            self._client,
+            self._source,
+            self._material_id,
+            self._tier,
+            is_original=True,
+        )
+
+
+def _render_synthesized_mtlx_xml(
+    *,
+    scalars: dict,
+    channels: list[str],
+    material_name: str,
+) -> str:
+    """Build the synthesized MaterialX XML string with PNG refs like
+    ``<material_name>/<channel>.png`` (relative — matches :meth:`export`).
+    """
+    # We reference PNGs as "<material_name>/<channel>.png" which matches
+    # the layout export() produces (mtlx is written into the material
+    # dir, so relative refs would just be "<channel>.png"). But xml
+    # without export happens too — keep refs scoped by material for
+    # consumers who write files themselves.
+    from mat_vis_client.adapters import _build_mtlx_tree, _mtlx_tree_to_string
+
+    tex_filenames = {ch: f"{material_name}/{ch}.png" for ch in channels}
+    root = _build_mtlx_tree(scalars, tex_filenames, material_name)
+    return _mtlx_tree_to_string(root)
+
+
+# GPUOpen upstream names → our mat-vis channel names.
+# Used by the original-mtlx path-rewriter so a <input file value="BaseColor.png"/>
+# is redirected to our local "color.png" after materialization.
+_FILENAME_TO_CHANNEL: dict[str, str] = {
+    "basecolor": "color",
+    "base_color": "color",
+    "diffuse": "color",
+    "normal": "normal",
+    "roughness": "roughness",
+    "specular_roughness": "roughness",
+    "metallic": "metalness",
+    "metalness": "metalness",
+    "occlusion": "ao",
+    "ao": "ao",
+    "ambientocclusion": "ao",
+    "displacement": "displacement",
+    "height": "displacement",
+    "emission": "emission",
+    "emissive": "emission",
+}
+
+
+def _rewrite_mtlx_texture_paths(xml_str: str, tex_dir: Path, channels: list[str]) -> str:
+    """Rewrite texture filename values in upstream MaterialX XML to
+    point at the local PNGs in ``tex_dir``.
+
+    Matches ``value="...png|jpg|jpeg|tif|tiff|exr"`` anywhere in the XML
+    and rewrites if the stem matches a known channel name (case-insensitive,
+    ignoring ``_``/``-``/`` ``).
+    """
+    import re
+
+    def _rewrite(match: re.Match) -> str:
+        orig = match.group(1)
+        stem = Path(orig).stem.lower().replace(" ", "").replace("-", "").replace("_", "")
+        for pattern, channel in _FILENAME_TO_CHANNEL.items():
+            clean_pattern = pattern.replace("_", "")
+            if clean_pattern in stem and channel in channels:
+                return f'value="{tex_dir / (channel + ".png")}"'
+        for pattern, channel in _FILENAME_TO_CHANNEL.items():
+            clean_pattern = pattern.replace("_", "")
+            if clean_pattern in stem:
+                local = tex_dir / f"{channel}.png"
+                if local.exists():
+                    return f'value="{local}"'
+        return match.group(0)
+
+    return re.sub(
+        r'value="([^"]*\.(?:png|jpg|jpeg|tif|tiff|exr))"',
+        _rewrite,
+        xml_str,
+        flags=re.IGNORECASE,
+    )
 
 
 # ── CLI ─────────────────────────────────────────────────────────
