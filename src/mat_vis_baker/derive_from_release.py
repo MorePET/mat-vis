@@ -25,7 +25,13 @@ from mat_vis_baker.common import (
     TIER_TO_PX,
     MaterialRecord,
 )
-from mat_vis_baker.parquet_writer import CHANNEL_COLS, _SCHEMA
+from mat_vis_baker.parquet_writer import (
+    CHANNEL_COLS,
+    _SCHEMA,
+    RowmapCollector,
+    build_rowmap_from_sidecar,
+    write_rowmap,
+)
 
 log = logging.getLogger("mat-vis-baker.derive-from-release")
 
@@ -131,6 +137,7 @@ def derive_from_release(
     use_dictionary = {col: col not in CHANNEL_COLS for col in [f.name for f in _SCHEMA]}
 
     writers: dict[str, pq.ParquetWriter] = {}
+    collectors: dict[str, RowmapCollector] = {}
     records_by_cat: dict[str, list[MaterialRecord]] = defaultdict(list)
     n_ok = 0
     n_fail = 0
@@ -158,6 +165,7 @@ def derive_from_release(
                 "baked_at": [now],
             }
             row_channels = []
+            channel_lengths: dict[str, int] = {}
             for ch in CANONICAL_CHANNELS:
                 if ch in channels:
                     try:
@@ -165,6 +173,7 @@ def derive_from_release(
                         resized = _resize_png(png_bytes, target_px)
                         row[ch] = [resized]
                         row_channels.append(ch)
+                        channel_lengths[ch] = len(resized)
                     except Exception:
                         log.warning("%s/%s: fetch/resize failed, nulling channel", mid, ch)
                         row[ch] = [None]
@@ -186,6 +195,9 @@ def derive_from_release(
                     compression=compression,
                     use_dictionary=use_dictionary,
                 )
+                collectors[category] = RowmapCollector()
+
+            collectors[category].record(mid, channel_lengths)
 
             table = pa.table(row, schema=_SCHEMA)
             writers[category].write_table(table)
@@ -230,13 +242,12 @@ def derive_from_release(
         t_derive,
     )
 
-    # ── generate rowmaps ──
-    from mat_vis_baker.parquet_writer import generate_rowmap_from_parquet, write_rowmap
-
+    # ── generate rowmaps (sidecar — authoritative, no magic-byte scan) ──
     t1 = time.monotonic()
-    for category, cat_records in sorted(records_by_cat.items()):
+    for category in sorted(records_by_cat.keys()):
         pq_path = output_dir / f"mat-vis-{source}-{target_tier}-{category}.parquet"
-        rowmap = generate_rowmap_from_parquet(pq_path, source, target_tier, release_tag)
+        collector = collectors.get(category, RowmapCollector())
+        rowmap = build_rowmap_from_sidecar(pq_path, collector, source, target_tier, release_tag)
         rm_path = output_dir / f"{source}-{target_tier}-{category}-rowmap.json"
         write_rowmap(rowmap, rm_path)
 
