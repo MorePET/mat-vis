@@ -133,6 +133,22 @@ class MatVisError(Exception):
     """Base class for mat-vis-client errors."""
 
 
+def _lookup(mapping: dict, key: str, *, kind: str, context: str = "") -> object:
+    """Dict lookup that raises ``MatVisError`` with an "Available: [...]"
+    suggestion list instead of a bare ``KeyError``.
+
+    Catches the common typo case (wrong source/tier/material/channel) and
+    turns it into an actionable error message. Caller-supplied ``kind`` is
+    the thing being looked up (e.g. "material", "channel"); ``context``
+    adds a path qualifier like "ambientcg/1k" so the message is locatable.
+    """
+    if key in mapping:
+        return mapping[key]
+    available = sorted(mapping.keys())
+    where = f" in {context}" if context else ""
+    raise MatVisError(f"{kind} {key!r} not found{where}. Available: {available}")
+
+
 class RateLimitError(MatVisError):
     """GitHub rate limit hit. Carries retry_after in seconds."""
 
@@ -162,8 +178,13 @@ def _parse_retry_after(headers, default: int) -> int:
 
 
 def _is_rate_limited(err: urllib.error.HTTPError) -> bool:
-    """True if this HTTPError is a rate-limit signal (429, 503, or 403+headers)."""
-    if err.code in (429, 503):
+    """True if this HTTPError is transient and worth retrying.
+
+    Covers: 429 (rate limit), 502/503/504 (proxy/service transient),
+    403 with rate-limit headers or body. Non-transient 4xx/5xx (400, 401,
+    404, 500, ...) return False so they propagate immediately.
+    """
+    if err.code in (429, 502, 503, 504):
         return True
     if err.code == 403:
         remaining = err.headers.get("X-RateLimit-Remaining") if err.headers else None
@@ -524,9 +545,12 @@ class MatVisClient:
         """Fetch and cache rowmaps. Merges partitioned rowmaps into one."""
         key = f"{source}-{tier}-{category or 'all'}"
         if key not in self._rowmaps:
-            tier_data = self.manifest["tiers"][tier]
+            tiers = self.manifest.get("tiers", {})
+            tier_data = _lookup(tiers, tier, kind="tier")
             base_url = tier_data["base_url"]
-            src_data = tier_data["sources"][source]
+            src_data = _lookup(
+                tier_data.get("sources", {}), source, kind="source", context=f"tier {tier!r}"
+            )
 
             rowmap_files = src_data.get("rowmap_files", [])
             if not rowmap_files:
@@ -856,7 +880,12 @@ class MatVisClient:
         Returns a dict of channel -> {offset, length, parquet_file}.
         """
         rm = self.rowmap(source, tier)
-        mat = rm["materials"][material_id]
+        mat = _lookup(
+            rm.get("materials", {}),
+            material_id,
+            kind="material",
+            context=f"{source}/{tier}",
+        )
         fallback_pq = rm.get("parquet_file", "")
         return {
             ch: {
@@ -901,8 +930,18 @@ class MatVisClient:
 
         # Find in rowmap
         rm = self.rowmap(source, tier)
-        mat = rm["materials"][material_id]
-        rng = mat[channel]
+        mat = _lookup(
+            rm.get("materials", {}),
+            material_id,
+            kind="material",
+            context=f"{source}/{tier}",
+        )
+        rng = _lookup(
+            mat,
+            channel,
+            kind="channel",
+            context=f"{source}/{tier}/{material_id}",
+        )
         offset = rng["offset"]
         length = rng["length"]
 

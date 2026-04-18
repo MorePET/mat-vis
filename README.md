@@ -81,6 +81,34 @@ Sub-1k tiers are derived from 1k parquets via `derive-from-release`
 
 ## Client usage
 
+### Feature matrix
+
+The Python client is the reference implementation and full-featured. JS and Rust
+clients are minimal range-read fetchers — the shell / SQL bindings are a couple
+of curl lines. Pick based on runtime needs.
+
+| Feature                                        | Python       | JS           | Rust         | Shell | SQL  |
+| ---------------------------------------------- | :----------: | :----------: | :----------: | :---: | :--: |
+| `fetch_texture` (ranged PNG reads)             | ✅           | ✅           | ✅           | ✅    | —    |
+| Manifest + rowmap discovery                    | ✅           | ✅           | ✅           | ✅    | —    |
+| Per-material materials list                    | ✅           | ✅           | ✅           | —     | —    |
+| Local file cache (`~/.cache/mat-vis/`)         | ✅           | —            | —            | —     | —    |
+| Cache soft-cap + `MAT_VIS_CACHE_MAX_SIZE`      | ✅           | —            | —            | —     | —    |
+| Range-read size cap (`MAT_VIS_MAX_FETCH_SIZE`) | ✅           | —            | —            | —     | —    |
+| Rate-limit auto-retry (429/503/403)            | ✅           | —            | —            | —     | —    |
+| Redirect / signed-URL cache                    | ✅           | —            | —            | —     | —    |
+| `search` by category + scalar ranges           | ✅           | —            | —            | —     | ✅   |
+| `prefetch` bulk download                       | ✅           | —            | —            | —     | —    |
+| MaterialX export (synthesized)                 | ✅           | —            | —            | —     | —    |
+| MaterialX original (gpuopen)                   | ✅           | —            | —            | —     | —    |
+| Format adapters (three.js, glTF)               | ✅           | —            | —            | —     | —    |
+| Typed `RateLimitError` / `MatVisError`         | ✅           | —            | —            | —     | —    |
+| CLI                                            | ✅           | ✅ (Node)    | ✅           | ✅    | —    |
+
+If you need search, prefetch, MaterialX, or format adapters, use Python.
+For drop-in range reads in a browser or lightweight Rust binary, the smaller
+clients have what you need.
+
 ### Python
 
 ```python

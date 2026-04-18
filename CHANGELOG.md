@@ -22,6 +22,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## mat-vis-client 0.4.0
+
+Polish release following the post-0.3.1 review. DX-focused; no breaking API changes.
+
+### Added
+
+- **Friendly not-found errors** (item G) — missing tier / source / material / channel
+  now raise `MatVisError` with an `"Available: [...]"` suggestion list instead of a
+  bare `KeyError`. Catches the common typo case and points at the real options.
+- **502 + 504 to the retry list** — `_get` was already retrying 429/503 and
+  rate-limited 403; GitHub Releases' edge regularly returns 504 under load and
+  pre-0.4.0 those propagated as hard errors. Now retried with the same backoff.
+- **Per-client feature matrix** in `README.md` (item H) — table showing what
+  Python/JS/Rust/shell/SQL clients actually support (search, prefetch, cache,
+  adapters, rate-limit retry, MaterialX).
+- **`clients/python/README.md`** — dedicated PyPI-facing README; the project
+  page now renders proper docs instead of the one-line inline description.
+
+### Changed
+
+- **PyPI classifier** `Development Status :: 3 - Alpha` → `4 - Beta` (item M).
+  API stability: `MatVisClient`, `MatVisError`, `RateLimitError`, `MtlxSource`
+  and the module-level `search`/`prefetch` helpers are considered stable through
+  the 0.x series.
+- **`readme =` in pyproject.toml** — inline string swapped for
+  `{file = "README.md", content-type = "text/markdown"}` (item N). This is what
+  drives the rendered long description on PyPI.
+- Python version classifiers expanded (3.10 / 3.11 / 3.12 / 3.13) to match the
+  supported-versions matrix.
+
+### Fixed
+
+- **Live test regression** — `TestLiveFetchTexture::test_fetch_nonexistent_material_raises`
+  updated to expect the new `MatVisError` (was asserting the now-replaced bare `KeyError`).
+
+### Tests (+13)
+
+- 5 `TestFriendlyNotFoundErrors` cases (unknown tier / source / material / channel
+  across `fetch_texture` + `rowmap_entry`)
+- 7 `TestRateLimitRetry` cases covering every retry branch in `_get`:
+  429 / 502 / 503 / 504, 403+`X-RateLimit-Remaining:0`, 403+body, `URLError`,
+  non-rate-limit 403 passes through
+- 1 `TestMtlxOriginalFetchError` case pinning the silent-empty-cache-on-fetch-error
+  behavior of `_fetch_mtlx_original_map` (item J)
+
+Total suite: **173 passed**, 0 skipped.
+
 ## mat-vis-client 0.3.1
 
 Hotfix release following the 0.3.0 post-release security + SSoT review.
