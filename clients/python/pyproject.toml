@@ -1,17 +1,22 @@
 [project]
 name = "mat-vis-client"
-version = "0.3.1"
+version = "0.4.0"
 description = "Pure Python client for mat-vis PBR textures — HTTP range reads, zero deps"
-readme = {text = "Pure Python client for mat-vis PBR textures. Fetch materials via HTTP range reads from GitHub Releases. Zero dependencies.", content-type = "text/plain"}
+readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Lars Gerchow" }]
 keywords = ["materials", "pbr", "textures", "mat-vis"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
+    "Topic :: Multimedia :: Graphics",
 ]
 dependencies = []
 

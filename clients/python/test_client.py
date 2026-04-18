@@ -547,6 +547,202 @@ class TestReadmeExamplesRun:
         assert "Rock064" in ids, f"stone search should find Rock064; got {ids}"
 
 
+class TestRateLimitRetry:
+    """Item I: retry branches in ``_get`` for rate-limit variants and
+    URLError (network-level failures). Current client retries:
+
+      * HTTP 429 / 503 — always
+      * HTTP 403 with ``X-RateLimit-Remaining: 0`` header
+      * HTTP 403 with "rate limit" in body
+      * ``URLError`` — any network-level (DNS / reset / timeout)
+
+    Non-rate-limit 4xx/5xx pass through unchanged."""
+
+    @staticmethod
+    def _http_error(code: int, *, headers=None, body: bytes = b""):
+        import io
+        from urllib.error import HTTPError
+
+        return HTTPError("http://test/x", code, "err", headers or {}, io.BytesIO(body))
+
+    @staticmethod
+    def _ok_response(data: bytes = b"OK"):
+        # Minimal urllib response: context manager + .read() + .url.
+        class _Resp:
+            url = "http://final/x"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return data
+
+        return _Resp()
+
+    @patch("mat_vis_client.client.time.sleep")  # no real waits
+    @patch("mat_vis_client.client.urllib.request.urlopen")
+    def test_403_with_ratelimit_remaining_zero_retries(self, mock_open, _sleep):
+        from mat_vis_client.client import _get
+
+        mock_open.side_effect = [
+            self._http_error(403, headers={"X-RateLimit-Remaining": "0"}),
+            self._ok_response(b"yay"),
+        ]
+        assert _get("http://test/x") == b"yay"
+        assert mock_open.call_count == 2
+
+    @patch("mat_vis_client.client.time.sleep")
+    @patch("mat_vis_client.client.urllib.request.urlopen")
+    def test_403_with_rate_limit_body_retries(self, mock_open, _sleep):
+        from mat_vis_client.client import _get
+
+        mock_open.side_effect = [
+            self._http_error(403, headers={}, body=b"API rate limit exceeded"),
+            self._ok_response(b"ok"),
+        ]
+        assert _get("http://test/x") == b"ok"
+        assert mock_open.call_count == 2
+
+    @patch("mat_vis_client.client.time.sleep")
+    @patch("mat_vis_client.client.urllib.request.urlopen")
+    def test_503_retries(self, mock_open, _sleep):
+        from mat_vis_client.client import _get
+
+        mock_open.side_effect = [
+            self._http_error(503),
+            self._ok_response(b"ok"),
+        ]
+        assert _get("http://test/x") == b"ok"
+
+    @patch("mat_vis_client.client.time.sleep")
+    @patch("mat_vis_client.client.urllib.request.urlopen")
+    def test_504_gateway_timeout_retries(self, mock_open, _sleep):
+        """Regression: GitHub Releases edge regularly returns 504 under load.
+        Pre-0.4.0 these propagated as hard errors; now they retry like 503."""
+        from mat_vis_client.client import _get
+
+        mock_open.side_effect = [
+            self._http_error(504),
+            self._ok_response(b"ok"),
+        ]
+        assert _get("http://test/x") == b"ok"
+
+    @patch("mat_vis_client.client.time.sleep")
+    @patch("mat_vis_client.client.urllib.request.urlopen")
+    def test_502_bad_gateway_retries(self, mock_open, _sleep):
+        from mat_vis_client.client import _get
+
+        mock_open.side_effect = [
+            self._http_error(502),
+            self._ok_response(b"ok"),
+        ]
+        assert _get("http://test/x") == b"ok"
+
+    @patch("mat_vis_client.client.time.sleep")
+    @patch("mat_vis_client.client.urllib.request.urlopen")
+    def test_urlerror_retries(self, mock_open, _sleep):
+        from urllib.error import URLError
+
+        from mat_vis_client.client import _get
+
+        mock_open.side_effect = [
+            URLError("connection reset"),
+            self._ok_response(b"ok"),
+        ]
+        assert _get("http://test/x") == b"ok"
+
+    @patch("mat_vis_client.client.time.sleep")
+    @patch("mat_vis_client.client.urllib.request.urlopen")
+    def test_non_ratelimit_403_is_not_retried(self, mock_open, _sleep):
+        from urllib.error import HTTPError
+
+        from mat_vis_client.client import _get
+
+        # Plain 403 with no rate-limit signal → propagate, no retry
+        mock_open.side_effect = [self._http_error(403)]
+        with pytest.raises(HTTPError):
+            _get("http://test/x")
+        assert mock_open.call_count == 1
+
+
+class TestMtlxOriginalFetchError:
+    """Item J: MtlxSource.original silently caches ``{}`` on fetch failure
+    (intentional — per-call retries would hammer a broken endpoint). Pin
+    the behavior in a test so the contract is documented."""
+
+    @patch("mat_vis_client.client._get_json")
+    def test_fetch_error_caches_empty_map_and_returns_none(self, mock_get_json, mock_client):
+        from urllib.error import URLError
+
+        mock_get_json.side_effect = URLError("boom")
+
+        src = mock_client.mtlx("gpuopen", "any-id", "1k")
+        # .original checks presence against the upstream map; fetch fails
+        # → empty map cached → returned as no-original-available.
+        assert src.original is None
+
+        # Second call uses the cache — no new network hit.
+        assert src.original is None
+        assert mock_get_json.call_count == 1
+
+
+class TestFriendlyNotFoundErrors:
+    """Item G: missing tier / source / material / channel must raise
+    MatVisError with an Available-list suggestion, not a bare KeyError."""
+
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get", side_effect=_mock_get)
+    def test_unknown_tier_suggests_available(self, mock_http, mock_json, mock_client):
+        from mat_vis_client import MatVisError
+
+        with pytest.raises(MatVisError, match=r"tier '2k' not found.*Available: \['1k'\]"):
+            mock_client.fetch_texture("ambientcg", "Rock064", "color", "2k")
+
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get", side_effect=_mock_get)
+    def test_unknown_source_suggests_available(self, mock_http, mock_json, mock_client):
+        from mat_vis_client import MatVisError
+
+        with pytest.raises(MatVisError, match=r"source 'nope' not found in tier '1k'"):
+            mock_client.fetch_texture("nope", "Rock064", "color", "1k")
+
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get", side_effect=_mock_get)
+    def test_unknown_material_suggests_available(self, mock_http, mock_json, mock_client):
+        from mat_vis_client import MatVisError
+
+        with pytest.raises(MatVisError) as exc:
+            mock_client.fetch_texture("ambientcg", "DOES_NOT_EXIST", "color", "1k")
+        msg = str(exc.value)
+        assert "material 'DOES_NOT_EXIST' not found" in msg
+        assert "ambientcg/1k" in msg
+        assert "Rock064" in msg  # canonical list present
+        assert "Metal032" in msg
+
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get", side_effect=_mock_get)
+    def test_unknown_channel_suggests_available(self, mock_http, mock_json, mock_client):
+        from mat_vis_client import MatVisError
+
+        with pytest.raises(MatVisError) as exc:
+            mock_client.fetch_texture("ambientcg", "Rock064", "displacement", "1k")
+        msg = str(exc.value)
+        assert "channel 'displacement' not found" in msg
+        assert "ambientcg/1k/Rock064" in msg
+        assert "color" in msg
+        assert "normal" in msg
+
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    def test_rowmap_entry_unknown_material(self, mock_json, mock_client):
+        from mat_vis_client import MatVisError
+
+        with pytest.raises(MatVisError, match="material 'XXX' not found"):
+            mock_client.rowmap_entry("ambientcg", "XXX", "1k")
+
+
 class TestFetchTextureSafety:
     """Guard range-read cap against malicious/corrupt rowmaps."""
 
@@ -1156,5 +1352,8 @@ class TestLiveFetchTexture:
             assert data[:4] == b"\x89PNG", f"{mid}/{ch} is not PNG"
 
     def test_fetch_nonexistent_material_raises(self, live_client):
-        with pytest.raises(KeyError):
+        # 0.4.0: KeyError replaced by MatVisError carrying an Available list.
+        from mat_vis_client import MatVisError
+
+        with pytest.raises(MatVisError, match="material 'NONEXISTENT_XYZ' not found"):
             live_client.fetch_texture("ambientcg", "NONEXISTENT_XYZ", "color", "1k")

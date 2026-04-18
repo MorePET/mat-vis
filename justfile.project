@@ -78,27 +78,64 @@ clean-artifacts:
 # ===============================================================================
 # PROJECT-SPECIFIC RECIPES
 # ===============================================================================
-# Uncomment and customize for your project:
-# # Run the application
-# [group('app')]
-# run *args:
-#     uv run python -m {{project}} {{args}}
-# # Run database migrations (if using sidecar)
-# [group('app')]
-# migrate:
-#     just sidecar postgres migrate
-#
-# # Prepare release branch (manual workflow dispatch helper)
-# [group('release')]
-# prepare-release version:
-#     gh workflow run prepare-release.yml --ref dev -f "version={{ version }}"
-#
-# # Finalize and publish release (manual workflow dispatch helper)
-# [group('release')]
-# finalize-release version:
-#     gh workflow run release.yml --ref release/{{ version }} -f "version={{ version }}" -f "release-kind=final" -f "dry-run=false"
-#
-# # Publish candidate release (manual workflow dispatch helper)
-# [group('release')]
-# publish-candidate version:
-#     gh workflow run release.yml --ref release/{{ version }} -f "version={{ version }}" -f "release-kind=candidate" -f "dry-run=false"
+
+# Run the full test suite (unit + live network tests)
+[group('test')]
+test-all *args:
+    uv run --with pytest pytest tests/ clients/python/test_client.py {{ args }}
+
+# Run only fast tests (skips live GitHub Releases network tests)
+[group('test')]
+test-fast *args:
+    MAT_VIS_SKIP_LIVE_TESTS=1 uv run --with pytest pytest tests/ clients/python/test_client.py {{ args }}
+
+# Sync every client's version literal from its package manifest
+# (Python standalone from pyproject; JS .mjs from package.json).
+# Rust uses env!(CARGO_PKG_VERSION) so nothing to sync.
+[group('release')]
+sync-versions:
+    python3 scripts/sync-standalone-version.py
+    python3 scripts/sync-js-version.py
+
+# Build the Python client sdist + wheel and run twine's metadata check.
+# Catches pyproject / README / classifier issues before tagging.
+[group('release')]
+build-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd clients/python
+    rm -rf dist/
+    uv build
+    uv run --with twine python -m twine check dist/*
+    rm -rf dist/
+
+# Verify a published wheel on PyPI: polls the JSON API until the version
+# is listed, installs into a fresh venv, and asserts __version__ +
+# USER_AGENT match the requested version. Usage: `just verify-pypi 0.4.0`
+[group('release')]
+verify-pypi version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "waiting for mat-vis-client {{ version }} on PyPI..."
+    for attempt in $(seq 1 24); do
+      if curl -sfSL "https://pypi.org/pypi/mat-vis-client/{{ version }}/json" -o /dev/null; then
+        echo "PyPI has {{ version }} (attempt $attempt)"; break
+      fi
+      sleep 5
+    done
+    uv run --with "mat-vis-client=={{ version }}" --refresh-package mat-vis-client python3 -c "
+    from mat_vis_client import __version__
+    from mat_vis_client.client import USER_AGENT
+    assert __version__ == '{{ version }}', f'__version__={__version__!r}'
+    assert USER_AGENT == f'mat-vis-client/{{ version }} (Python)', f'UA={USER_AGENT!r}'
+    print(f'OK: {__version__} / {USER_AGENT}')
+    "
+
+# Pre-tag checklist: sync scripts + fast tests + wheel metadata check.
+# Safe to run any time; fail means don't tag yet.
+[group('release')]
+release-check:
+    just sync-versions
+    just test-fast
+    just build-check
+    @echo "--- release-check passed. Ready to tag."
