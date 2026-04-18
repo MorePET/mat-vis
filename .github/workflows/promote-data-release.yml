@@ -25,6 +25,7 @@ on:  # yamllint disable-line rule:truthy
 
 permissions:
   contents: write
+  issues: write          # needed to open promotion-blocked issue on failure
 
 jobs:
   promote:
@@ -103,3 +104,48 @@ jobs:
           echo "✓ Release $TAG promoted — no longer pre-release"
           echo ""
           echo "Release URL: https://github.com/MorePET/mat-vis/releases/tag/$TAG"
+
+      - name: Open promotion-blocked issue on any step failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.release-tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        # Surfaces a promote-failure as a tracked issue. The prior mode
+        # was silent-red in the Actions UI — v2026.04.0 shipped around
+        # promote-data-release.yml entirely (tag existed 2 min before
+        # the workflow did, see #79) and nobody noticed for a day. Same
+        # dedupe pattern as release-validate.yml.
+        run: |
+          set -euo pipefail
+          title="[promote-blocked] ${TAG}: promote-data-release failed"
+          body="promote-data-release failed for **${TAG}**.
+
+          - Run: ${RUN_URL}
+
+          Likely causes: validate-release gate caught a manifest/parquet
+          mismatch, a missing asset (see #79), or a missing mtlx bundle.
+          The release is NOT promoted — pre-release flag still set.
+          Do not manually flip the flag without fixing what failed;
+          that's how v2026.04.0 shipped broken.
+
+          This issue was opened automatically by
+          .github/workflows/promote-data-release.yml after a run
+          failed. It will not re-open if already present."
+
+          existing=$(gh issue list \
+            --repo "${{ github.repository }}" \
+            --search "in:title \"[promote-blocked] ${TAG}\" is:open" \
+            --json number --jq '.[0].number // empty')
+
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" \
+              --repo "${{ github.repository }}" \
+              --body "Promote failed again at $(date -u +%Y-%m-%dT%H:%MZ). Run: ${RUN_URL}"
+          else
+            gh issue create \
+              --repo "${{ github.repository }}" \
+              --title "${title}" \
+              --body "${body}" \
+              --label "bug,area:data,priority:high"
+          fi
