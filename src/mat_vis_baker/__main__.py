@@ -59,11 +59,18 @@ def cmd_all(args: argparse.Namespace) -> int:
     from mat_vis_baker.bake import bake_material
     from mat_vis_baker.common import BAKER_VERSION, CANONICAL_CHANNELS, hash_textures
     from mat_vis_baker.index_builder import build_index, write_index
-    from mat_vis_baker.parquet_writer import (  # noqa: F401
+    from mat_vis_baker.parquet_writer import (
         CHANNEL_COLS,
         _SCHEMA,
-        generate_rowmap_from_parquet,
+        RowmapCollector,
+        build_rowmap_from_sidecar,
         write_rowmap,
+    )
+    from mat_vis_baker.upload import (
+        UploadError,
+        load_progress,
+        save_progress,
+        upload_with_verify,
     )
 
     source = args.source
@@ -96,23 +103,45 @@ def cmd_all(args: argparse.Namespace) -> int:
     }
     use_dictionary = {col: col not in CHANNEL_COLS for col in [f.name for f in _SCHEMA]}
 
-    # Per-category state: writer + chunk number + bytes in current chunk
+    # Per-category state: writer + chunk number + rowmap sidecar
     writers: dict[str, pq.ParquetWriter] = {}
     chunk_nums: dict[str, int] = {}
+    # (cat, chunk) -> RowmapCollector for the currently-open writer
+    collectors: dict[tuple[str, int], RowmapCollector] = {}
     finalized_paths: list[Path] = []  # closed parquet files (for rowmap pass)
+    finalized_collectors: dict[Path, RowmapCollector] = {}
+    # Expected uploaded assets (for post-bake reconciliation)
+    expected_assets: list[tuple[Path, int]] = []  # (path, size)
+    completed_categories: set[str] = set()
     all_records: list = []
     n_ok = 0
     n_failed = 0
     t0 = time.monotonic()
-    offset = args.offset or 0
     user_limit = args.limit  # total cap if set
-    fetched_so_far = 0
 
     # Max bytes per parquet partition before splitting (GitHub asset limit is 2 GB).
     MAX_PARTITION_BYTES = 1_800_000_000
 
     # Optional upload callback — when a chunk closes, upload it + delete locally.
     upload_release_tag = args.release_tag if getattr(args, "upload_chunks", False) else None
+
+    # ── resume marker ──
+    cli_offset = args.offset or 0
+    offset = cli_offset
+    resumed = False
+    if cli_offset == 0:
+        prog = load_progress(output_dir)
+        if prog and prog.get("source") == source and prog.get("tier") == tier:
+            offset = int(prog.get("offset_done") or 0)
+            if offset > 0:
+                resumed = True
+                log.info(
+                    "resuming from progress marker: offset=%d (source=%s tier=%s)",
+                    offset,
+                    source,
+                    tier,
+                )
+    fetched_so_far = 0
 
     def _partition_path(cat: str, chunk: int) -> Path:
         # First chunk is unnumbered for backward compat; subsequent chunks get -N
@@ -122,47 +151,70 @@ def cmd_all(args: argparse.Namespace) -> int:
 
     def _open_writer(cat: str, chunk: int) -> pq.ParquetWriter:
         pq_path = _partition_path(cat, chunk)
+        # Write to .part; we'll os.replace on close.
+        part_path = pq_path.with_name(pq_path.name + ".part")
+        if part_path.exists():
+            part_path.unlink()
+        collectors[(cat, chunk)] = RowmapCollector()
         return pq.ParquetWriter(
-            pq_path, _SCHEMA, compression=compression, use_dictionary=use_dictionary
+            part_path, _SCHEMA, compression=compression, use_dictionary=use_dictionary
         )
 
     def _close_and_maybe_upload(cat: str) -> None:
-        """Close current writer for cat, optionally upload+delete the parquet."""
+        """Close current writer for cat, optionally upload+delete the parquet.
+
+        Writes go to ``foo.parquet.part`` while the writer is open; on close,
+        we fsync and ``os.replace`` to ``foo.parquet``. If uploading, we use
+        ``upload_with_verify`` and only unlink the local file after the
+        remote size has been confirmed.
+        """
+        import os as _os
+
         if cat not in writers:
             return
         writers[cat].close()
         del writers[cat]
         chunk = chunk_nums.get(cat, 1)
         pq_path = _partition_path(cat, chunk)
+        part_path = pq_path.with_name(pq_path.name + ".part")
+
+        # fsync the .part before swapping in — crash between close and replace
+        # leaves a truncated file otherwise.
+        fd = _os.open(str(part_path), _os.O_RDONLY)
+        try:
+            _os.fsync(fd)
+        finally:
+            _os.close(fd)
+        _os.replace(part_path, pq_path)
+
         finalized_paths.append(pq_path)
+        collector = collectors.pop((cat, chunk), RowmapCollector())
+        finalized_collectors[pq_path] = collector
         log.info(
-            "closed partition %s (%.1f MB)",
+            "closed partition %s (%.1f MB, %d rows in rowmap)",
             pq_path.name,
             pq_path.stat().st_size / 1e6,
+            len(collector.rows),
         )
         if upload_release_tag:
-            # Upload the parquet to release immediately, then delete to free disk
-            import subprocess
-
-            subprocess.run(
-                ["gh", "release", "upload", upload_release_tag, str(pq_path), "--clobber"],
-                check=False,
-            )
-            # Generate rowmap before deleting
-            from mat_vis_baker.parquet_writer import generate_rowmap_from_parquet
-
-            rowmap = generate_rowmap_from_parquet(pq_path, source, tier, upload_release_tag)
+            # Build rowmap FROM SIDECAR — authoritative, no magic-byte scan.
+            rowmap = build_rowmap_from_sidecar(pq_path, collector, source, tier, upload_release_tag)
             rm_path = (
                 output_dir
                 / f"{pq_path.stem.replace(f'mat-vis-{source}-{tier}-', f'{source}-{tier}-')}-rowmap.json"
             )
             write_rowmap(rowmap, rm_path)
-            subprocess.run(
-                ["gh", "release", "upload", upload_release_tag, str(rm_path), "--clobber"],
-                check=False,
-            )
+
+            # Upload parquet first, then rowmap — fail loud on either.
+            pq_size = pq_path.stat().st_size
+            rm_size = rm_path.stat().st_size
+            upload_with_verify(pq_path, upload_release_tag)
+            upload_with_verify(rm_path, upload_release_tag)
+            expected_assets.append((pq_path, pq_size))
+            expected_assets.append((rm_path, rm_size))
             pq_path.unlink(missing_ok=True)
-            log.info("uploaded + deleted local %s, freed disk", pq_path.name)
+            log.info("uploaded + verified + deleted local %s", pq_path.name)
+        completed_categories.add(cat)
 
     log.info(
         "=== streaming bake: %s %s, batch=%d, offset=%d, limit=%s, max_partition=%.1f GB ===",
@@ -222,22 +274,32 @@ def cmd_all(args: argparse.Namespace) -> int:
                     "baker_version": [BAKER_VERSION],
                     "baked_at": [now],
                 }
+                channel_lengths: dict[str, int] = {}
                 for ch in CANONICAL_CHANNELS:
                     path = rec.texture_paths.get(ch)
-                    row[ch] = [path.read_bytes() if path and path.exists() else None]
+                    data = path.read_bytes() if path and path.exists() else None
+                    row[ch] = [data]
+                    if data is not None:
+                        channel_lengths[ch] = len(data)
+
+                collectors[(cat, chunk_nums[cat])].record(rec.id, channel_lengths)
 
                 table = pa.table(row, schema=_SCHEMA)
                 writers[cat].write_table(table)
                 del row, table
                 n_ok += 1
 
-                # Check partition size — split if over limit
-                pq_path = _partition_path(cat, chunk_nums[cat])
-                if pq_path.exists() and pq_path.stat().st_size >= MAX_PARTITION_BYTES:
+                # Check partition size — split if over limit. The writer is
+                # currently writing to ``foo.parquet.part`` (see _open_writer),
+                # so size-check on that path.
+                pq_part_path = _partition_path(cat, chunk_nums[cat]).with_name(
+                    _partition_path(cat, chunk_nums[cat]).name + ".part"
+                )
+                if pq_part_path.exists() and pq_part_path.stat().st_size >= MAX_PARTITION_BYTES:
                     log.info(
                         "partition %s reached %.1f GB, rotating",
-                        pq_path.name,
-                        pq_path.stat().st_size / 1e9,
+                        pq_part_path.name,
+                        pq_part_path.stat().st_size / 1e9,
                     )
                     _close_and_maybe_upload(cat)
                     chunk_nums[cat] += 1
@@ -269,6 +331,21 @@ def cmd_all(args: argparse.Namespace) -> int:
             )
 
             offset += len(batch)
+
+            # Persist resume marker each batch
+            try:
+                save_progress(
+                    output_dir,
+                    source=source,
+                    tier=tier,
+                    offset_done=offset,
+                    chunk_nums=chunk_nums,
+                    completed_categories=sorted(completed_categories),
+                    release_tag=args.release_tag,
+                )
+            except Exception as e:  # pragma: no cover — marker is best-effort
+                log.warning("failed to save progress marker: %s", e)
+
             # If batch came back smaller than requested, we're at the end
             if len(batch) < batch_limit:
                 log.info("partial batch (%d < %d), done", len(batch), batch_limit)
@@ -280,25 +357,30 @@ def cmd_all(args: argparse.Namespace) -> int:
 
     t_stream = time.monotonic() - t0
     log.info(
-        "PERF stream: %.1fs, %d ok / %d total (%.1f mat/s)",
+        "PERF stream: %.1fs, %d ok / %d total (%.1f mat/s)%s",
         t_stream,
         n_ok,
         n_ok + n_failed,
         n_ok / max(t_stream, 0.1),
+        " (resumed)" if resumed else "",
     )
 
     if n_ok == 0:
         log.error("no successful materials")
         return 1
 
-    # ── generate rowmaps for any partitions still on disk (when not uploading) ──
-    log.info("=== rowmap generation ===")
+    # ── generate rowmaps (sidecar path) for any partitions still on disk ──
+    # These are partitions we did NOT upload-and-delete inside the streaming
+    # loop (i.e. when --upload-chunks is off). The sidecar collectors were
+    # captured at close time so this is authoritative, no scanning.
+    log.info("=== rowmap generation (sidecar) ===")
     t_rm = time.monotonic()
     total_bytes = 0
     for pq_path in finalized_paths:
         if not pq_path.exists():
             continue  # uploaded + deleted already
-        rowmap = generate_rowmap_from_parquet(pq_path, source, tier, args.release_tag)
+        collector = finalized_collectors.get(pq_path, RowmapCollector())
+        rowmap = build_rowmap_from_sidecar(pq_path, collector, source, tier, args.release_tag)
         # Derive rowmap filename: mat-vis-X-Y-Z[-N].parquet -> X-Y-Z[-N]-rowmap.json
         stem = pq_path.stem.replace(f"mat-vis-{source}-{tier}-", f"{source}-{tier}-")
         rm_path = output_dir / f"{stem}-rowmap.json"
@@ -310,6 +392,29 @@ def cmd_all(args: argparse.Namespace) -> int:
         len(finalized_paths),
         total_bytes / 1e9,
     )
+
+    # ── post-bake reconciliation (upload_chunks path) ──
+    # Every parquet we promised to the release must now be there at the
+    # expected size. Fail loud if anything is missing or the wrong size.
+    if upload_release_tag and expected_assets:
+        from mat_vis_baker.upload import verify_upload_size
+
+        log.info("=== reconciling %d uploaded assets ===", len(expected_assets))
+        recon_failures: list[str] = []
+        for asset_path, expected_size in expected_assets:
+            if not verify_upload_size(upload_release_tag, asset_path.name, expected_size):
+                recon_failures.append(asset_path.name)
+        if recon_failures:
+            log.error(
+                "reconciliation FAILED — %d asset(s) missing or wrong size: %s",
+                len(recon_failures),
+                ", ".join(recon_failures),
+            )
+            raise UploadError(
+                f"reconciliation failed: {len(recon_failures)} asset(s): "
+                + ", ".join(recon_failures)
+            )
+        log.info("reconciliation OK — all %d assets verified", len(expected_assets))
 
     # ── index + manifest + catalog ──
     log.info("=== index + manifest + catalog ===")
