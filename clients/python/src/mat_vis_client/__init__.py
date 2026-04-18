@@ -2,14 +2,16 @@
 
 Module-level convenience API:
 
-    from mat_vis_client import search, fetch, prefetch, get_manifest
+    from mat_vis_client import MatVisClient, search, prefetch, get_manifest
     from mat_vis_client import to_threejs, to_gltf, export_mtlx
 
     # Search materials by category/scalars
     results = search(category="metal", roughness=0.3)
 
-    # Fetch textures (HTTP range reads, cached locally)
-    textures = fetch("ambientcg", "Metal032", tier="1k")
+    # Fetch textures (HTTP range reads, cached locally). Use the client
+    # directly so real errors (rate limits, 404s) surface to the caller.
+    client = MatVisClient()
+    textures = client.fetch_all_textures("ambientcg", "Metal032", tier="1k")
 
     # Bulk prefetch for offline use
     prefetch("ambientcg", tier="1k")
@@ -29,6 +31,7 @@ from mat_vis_client.adapters import export_mtlx, to_gltf, to_threejs
 from mat_vis_client.client import (
     MatVisClient,
     MatVisError,
+    MtlxSource,
     RateLimitError,
     _in_range,
 )
@@ -36,10 +39,10 @@ from mat_vis_client.client import (
 __all__ = [
     "MatVisClient",
     "MatVisError",
+    "MtlxSource",
     "RateLimitError",
     "_in_range",
     "search",
-    "fetch",
     "prefetch",
     "rowmap_entry",
     "get_manifest",
@@ -151,25 +154,6 @@ def search(
 
     results.sort(key=lambda r: r["score"])
     return results[:limit]
-
-
-def fetch(
-    source: str,
-    material_id: str,
-    *,
-    tier: str = "1k",
-    tag: str | None = None,
-) -> dict[str, bytes]:
-    """Fetch textures for a material via rowmap + HTTP range read.
-
-    Returns dict of channel → PNG bytes. Empty dict on failure.
-    """
-    client = MatVisClient(tag=tag) if tag else _get_client()
-    try:
-        return client.fetch_all_textures(source, material_id, tier=tier)
-    except Exception as exc:
-        log.warning("fetch(%s/%s): %s", source, material_id, exc)
-        return {}
 
 
 def prefetch(

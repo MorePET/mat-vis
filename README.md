@@ -100,7 +100,17 @@ for mat_id in client.materials("ambientcg", "1k"):
 # search across all sources
 results = client.search("marble")
 
-# export to three.js / glTF / MaterialX
+# MaterialX export — dotted API
+# Synthesized (always works: UsdPreviewSurface wrapper over our PNGs)
+mtlx_path = client.mtlx("ambientcg", "Rock064", tier="1k").export("./out")
+
+# Original upstream document (gpuopen today; None elsewhere)
+orig = client.mtlx("gpuopen", "<material-uuid>").original
+if orig is not None:
+    xml = orig.xml                      # raw upstream XML
+    orig.export("./out")                # PNGs + upstream mtlx with local paths
+
+# Low-level adapters (generic: scalars dict + textures dict)
 from mat_vis_client.adapters import to_threejs, to_gltf, export_mtlx
 ```
 
