@@ -22,6 +22,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## mat-vis-client 0.4.1
+
+Hotfix from the post-0.4.0 code review. No API changes.
+
+### Fixed
+
+- **Unified User-Agent** ([#70](https://github.com/MorePET/mat-vis/issues/70)) — the zero-install standalone mirror used to identify itself as `mat-vis-client-standalone/<v>`; the installable package used `mat-vis-client/<v>`. Split UA populations fragmented server-side observability and rate-limit buckets for what is operationally one client. Both now emit `mat-vis-client/<v> (Python)`.
+- **Pre-publish pytest gate in pypi.yml** ([#73](https://github.com/MorePET/mat-vis/issues/73)) — `.github/workflows/pypi.yml` now runs the full test suite before `publish`. Previously `ci.yml` ran on main/dev but not on `client/v*` tags, so the drift tests added in 0.3.1 didn't gate releases. Explicit "if tests fail, don't publish" ordering.
+- **Tag vs pyproject.version assertion in pypi.yml** ([#74](https://github.com/MorePET/mat-vis/issues/74)) — `publish` now fails fast if the pushed tag doesn't match the version in `clients/python/pyproject.toml`. Prevents the "wrong wheel on PyPI" failure mode where the two drift and the wheel is irreversibly published under the pyproject version.
+
+### Tests (+1)
+
+- `tests/test_version_sync.py::test_standalone_user_agent_matches_packaged` — pins the unified UA so neither the AST drift test nor the runtime version check can miss a string-literal divergence.
+
+Total suite: **173 passed**, 0 skipped.
+
 ## mat-vis-client 0.4.0
 
 Polish release following the post-0.3.1 review. DX-focused; no breaking API changes.
