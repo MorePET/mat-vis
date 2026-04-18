@@ -223,6 +223,8 @@ class MatVisClient:
     def index(self, source: str) -> list[dict]:
         """Fetch and cache the material index for a source.
 
+        Tries git (raw.githubusercontent.com) first, falls back to
+        release asset (some sources only ship the index on the release).
         Returns a list of material entries per index-schema.json.
         """
         if source not in self._indexes:
@@ -230,8 +232,20 @@ class MatVisClient:
             if cache_path.exists():
                 self._indexes[source] = json.loads(cache_path.read_text())
             else:
-                url = self._index_url(source)
-                self._indexes[source] = _get_json(url)
+                # Try git first, then fall back to release asset
+                data = None
+                try:
+                    data = _get_json(self._index_url(source))
+                except Exception:
+                    tag = self.manifest.get("release_tag", self._tag or "")
+                    if tag:
+                        try:
+                            data = _get_json(f"{GITHUB_RELEASES}/download/{tag}/{source}.json")
+                        except Exception:
+                            pass
+                if data is None:
+                    raise FileNotFoundError(f"Index for {source!r} not found in git or release")
+                self._indexes[source] = data
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache_path.write_text(json.dumps(self._indexes[source], indent=2))
         return self._indexes[source]
