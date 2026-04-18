@@ -1,6 +1,6 @@
 [project]
 name = "mat-vis-client"
-version = "0.4.1"
+version = "0.5.0"
 description = "Pure Python client for mat-vis PBR textures — HTTP range reads, zero deps"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10"
