@@ -1033,69 +1033,6 @@ class MatVisClient:
 
     # ── Deprecated mtlx shims ──────────────────────────────────
 
-    def to_mtlx(
-        self,
-        source: str,
-        material_id: str,
-        tier: str = "1k",
-        output_dir: str | Path = ".",
-    ) -> Path:
-        """Deprecated: use ``client.mtlx(src, id, tier).export(output_dir)``."""
-        import warnings
-
-        warnings.warn(
-            "client.to_mtlx() is deprecated. "
-            "Use client.mtlx(source, material_id, tier).export(output_dir) instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.mtlx(source, material_id, tier).export(output_dir)
-
-    def fetch_mtlx_original(self, source: str, material_id: str) -> str | None:
-        """Deprecated: use ``client.mtlx(src, id).original`` (None if unavailable).
-
-        Returns the raw upstream MaterialX XML string, or ``None`` if the
-        source has no original mtlx or the material isn't in the map.
-        """
-        import warnings
-
-        warnings.warn(
-            "client.fetch_mtlx_original() is deprecated. "
-            "Use client.mtlx(source, material_id).original and check for None; "
-            "then read .xml from the returned MtlxSource.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self._fetch_mtlx_original_map(source).get(material_id)
-
-    def materialize_mtlx(
-        self,
-        source: str,
-        material_id: str,
-        tier: str = "1k",
-        output_dir: str | Path = ".",
-    ) -> Path | None:
-        """Deprecated: use ``client.mtlx(src, id, tier).original.export(path)``.
-
-        Falls back to the synthesized variant when no upstream mtlx exists
-        (preserves pre-0.2 behavior).
-        """
-        import warnings
-
-        warnings.warn(
-            "client.materialize_mtlx() is deprecated. "
-            "Use client.mtlx(source, material_id, tier).original.export(output_dir); "
-            "handle the None case explicitly.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        source_obj = self.mtlx(source, material_id, tier)
-        original = source_obj.original
-        if original is None:
-            # Preserve previous fallback-to-synthesized behavior.
-            return source_obj.export(output_dir)
-        return original.export(output_dir)
-
     def rowmap_entry(
         self,
         source: str,
@@ -1459,9 +1396,12 @@ class MtlxSource:
         """True if this is the upstream-author document, not synthesized."""
         return self._is_original
 
-    @property
     def xml(self) -> str:
         """Return the MaterialX XML as a string.
+
+        Method, not a property: callers make the network cost explicit.
+        This also ports straight to JS/Rust reference clients, which
+        don't have attribute-triggered IO.
 
         * Synthesized: generated in-memory from scalars + channel list.
           No PNGs are written and no texture bytes are fetched.
@@ -1472,8 +1412,8 @@ class MtlxSource:
         Raises:
             LookupError: if this is an original variant but the
                 material disappeared from the upstream map between
-                ``.original`` creation and ``.xml`` access (rare —
-                shouldn't happen since ``.original`` checks presence).
+                ``original()`` and ``xml()`` (rare — shouldn't happen
+                since ``original()`` checks presence).
         """
         if self._xml_cache is not None:
             return self._xml_cache
@@ -1526,22 +1466,22 @@ class MtlxSource:
             )
 
         # Original: fetch upstream, rewrite filename values to local PNGs.
-        xml_str = self.xml  # raises LookupError if gone from the map
+        xml_str = self.xml()  # raises LookupError if gone from the map
         rewritten = _rewrite_mtlx_texture_paths(xml_str, tex_dir, chs)
         mtlx_path = tex_dir / f"{self._material_id}.mtlx"
         mtlx_path.write_text(rewritten, encoding="utf-8")
         return mtlx_path
 
-    @property
     def original(self) -> MtlxSource | None:
         """Return the upstream-author variant if available, else ``None``.
 
-        Only synthesized :class:`MtlxSource` instances have ``.original``
-        — calling it on an already-original source returns ``None``.
+        Method, not a property: first call for a given source fetches a
+        JSON map from the network. Only synthesized :class:`MtlxSource`
+        instances have an original — calling ``original()`` on an already-
+        original instance returns ``None``.
 
-        Fast check: the per-source "does this source offer originals"
-        verdict is cached at the client level (first call fetches the
-        full ``{source}-mtlx.json`` map; subsequent calls hit memory).
+        Fast after first call: the per-source ``{source}-mtlx.json`` map
+        is cached at the client level.
         """
         if self._is_original:
             return None
