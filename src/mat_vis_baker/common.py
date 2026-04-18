@@ -6,6 +6,8 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 import requests
@@ -32,7 +34,13 @@ VALID_TIERS = ["128", "256", "512", "1k", "2k", "4k", "8k"]
 
 TIER_TO_PX = {"128": 128, "256": 256, "512": 512, "1k": 1024, "2k": 2048, "4k": 4096, "8k": 8192}
 
-BAKER_VERSION = "0.1.0"
+# SSoT for baker version: pyproject.toml. Baker stamps this into parquet
+# metadata and HTTP User-Agent; derive from installed metadata so the two
+# can never drift from each other or from the wheel.
+try:
+    BAKER_VERSION = _pkg_version("mat-vis")
+except PackageNotFoundError:
+    BAKER_VERSION = "0.0.0+dev"
 
 USER_AGENT = f"mat-vis-baker/{BAKER_VERSION}"
 

@@ -14,7 +14,10 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const REPO: &str = "MorePET/mat-vis";
-const UA: &str = "mat-vis-client/0.1 (Rust)";
+// SSoT: Cargo.toml version. `concat!` + `env!` fold at compile time, so
+// bumping `[package].version` is the only edit needed for a release —
+// the HTTP User-Agent string follows automatically.
+const UA: &str = concat!("mat-vis-client/", env!("CARGO_PKG_VERSION"), " (Rust)");
 
 #[derive(Deserialize)]
 struct Manifest {

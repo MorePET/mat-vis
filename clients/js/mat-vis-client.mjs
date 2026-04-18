@@ -16,7 +16,12 @@
 
 const REPO = 'MorePET/mat-vis';
 const RELEASES = `https://github.com/${REPO}/releases`;
-const UA = 'mat-vis-client/0.1 (JavaScript)';
+
+// SSoT: clients/js/package.json. Kept in sync by
+// scripts/sync-js-version.py (pre-commit) — a drift test in tests/
+// fails CI if these disagree. Do not hand-edit.
+export const VERSION = '0.1.0';
+const UA = `mat-vis-client/${VERSION} (JavaScript)`;
 
 export class MatVisClient {
   #manifestUrl;

@@ -1,0 +1,40 @@
+{
+  "name": "mat-vis-client",
+  "version": "0.1.0",
+  "description": "Pure JavaScript client for mat-vis PBR textures — HTTP range reads, zero deps, browser + Node 18+",
+  "type": "module",
+  "main": "mat-vis-client.mjs",
+  "exports": {
+    ".": "./mat-vis-client.mjs"
+  },
+  "bin": {
+    "mat-vis-client": "./mat-vis-client.mjs"
+  },
+  "files": [
+    "mat-vis-client.mjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MorePET/mat-vis.git",
+    "directory": "clients/js"
+  },
+  "bugs": {
+    "url": "https://github.com/MorePET/mat-vis/issues"
+  },
+  "homepage": "https://github.com/MorePET/mat-vis",
+  "keywords": [
+    "materials",
+    "pbr",
+    "textures",
+    "mat-vis",
+    "3d",
+    "gltf",
+    "materialx"
+  ],
+  "license": "MIT",
+  "author": "Lars Gerchow"
+}
