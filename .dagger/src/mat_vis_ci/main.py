@@ -483,6 +483,13 @@ class MatVisCi:
             .with_mounted_directory("/app", context)
             .with_workdir("/app")
             .with_exec(["pip", "install", "--quiet", "-e", ".[baker,dev]"])
+            # Install the client package too so cross-module tests
+            # (e.g. tests/test_version_sync.py::test_client_runtime_version_matches_pyproject,
+            # which does ``from mat_vis_client import __version__``) can
+            # import it. Without this, the top-level tests/ suite can
+            # only see the baker package even though it guards client
+            # invariants.
+            .with_exec(["pip", "install", "--quiet", "-e", "./clients/python"])
             .with_exec(["pytest", "tests/", "-v"])
             .stdout()
         )
