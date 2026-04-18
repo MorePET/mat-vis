@@ -218,6 +218,22 @@ def get_json(url):
     return json.loads(get(url))
 
 
+def head_ok(url):
+    """Return True if HEAD on the URL succeeds (200 after following redirects).
+
+    Used to assert a parquet exists on the release without downloading it —
+    the file is typically 100 MB to 2 GB, and we only need to know it's
+    there. GitHub's release URL 302s to a signed CDN URL; urllib follows.
+    """
+    hdrs = {"User-Agent": USER_AGENT}
+    req = urllib.request.Request(url, headers=hdrs, method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
 tag = os.environ.get("VALIDATE_TAG", "v2026.04.0")
 release_base = f"https://github.com/MorePET/mat-vis/releases/download/{tag}"
 manifest_url = f"{release_base}/release-manifest.json"
@@ -298,6 +314,19 @@ def validate_source_tier(source, tier, tier_info, required):
             continue
         if not pq_file:
             local_failures.append(f"{label}: {rm_file} missing parquet_file")
+            continue
+
+        # Manifest consistency: rowmap claims a parquet; assert it's uploaded.
+        # Catches the "silently missing parquet" failure mode directly, without
+        # relying on random-sample range reads to stumble over the missing file
+        # (the v2026.04.0 release shipped with 4 dangling rowmaps that the old
+        # count-parity check caught in aggregate but couldn't identify by name).
+        pq_url = base_url + pq_file
+        if not head_ok(pq_url):
+            local_failures.append(
+                f"{label}: rowmap {rm_file} points at parquet {pq_file} "
+                f"which is not uploaded to the release"
+            )
             continue
 
         total_materials += len(materials)
