@@ -101,14 +101,108 @@ CATEGORIES = frozenset(
 )
 
 
+# Rate limit / retry knobs (env-configurable).
+MAX_RETRIES = int(os.environ.get("MAT_VIS_MAX_RETRIES", "5"))
+BACKOFF_BASE_SECONDS = float(os.environ.get("MAT_VIS_BACKOFF_BASE", "1.0"))
+RETRY_MAX_WAIT_SECONDS = int(os.environ.get("MAT_VIS_RETRY_MAX_WAIT", "60"))
+
+
+class MatVisError(Exception):
+    """Base class for mat-vis-client errors."""
+
+
+class RateLimitError(MatVisError):
+    """GitHub rate limit hit. Carries retry_after in seconds."""
+
+    def __init__(self, url: str, retry_after: int, message: str = ""):
+        self.url = url
+        self.retry_after = retry_after
+        super().__init__(message or f"Rate limited on {url}. Retry after {retry_after}s.")
+
+
+def _parse_retry_after(headers, default: int) -> int:
+    """Extract retry delay from Retry-After / X-RateLimit-Reset headers."""
+    retry_after = headers.get("Retry-After") if headers else None
+    if retry_after:
+        try:
+            return min(int(retry_after), RETRY_MAX_WAIT_SECONDS)
+        except (ValueError, TypeError):
+            pass
+    reset = headers.get("X-RateLimit-Reset") if headers else None
+    if reset:
+        try:
+            wait = int(reset) - int(time.time())
+            if 0 < wait <= RETRY_MAX_WAIT_SECONDS:
+                return wait
+        except (ValueError, TypeError):
+            pass
+    return min(default, RETRY_MAX_WAIT_SECONDS)
+
+
+def _is_rate_limited(err: urllib.error.HTTPError) -> bool:
+    """True if this HTTPError is a rate-limit signal (429, 503, or 403+headers)."""
+    if err.code in (429, 503):
+        return True
+    if err.code == 403:
+        remaining = err.headers.get("X-RateLimit-Remaining") if err.headers else None
+        if remaining == "0":
+            return True
+        body_start = ""
+        try:
+            body_start = str(err.read()[:200]).lower()
+        except Exception:
+            pass
+        if "rate limit" in body_start or "api rate limit" in body_start:
+            return True
+    return False
+
+
 def _get(url: str, headers: dict | None = None) -> bytes:
-    """HTTP GET with User-Agent."""
+    """HTTP GET with User-Agent, automatic retry on rate limits / transient errors.
+
+    Retries up to MAX_RETRIES on 429 / 503 / rate-limited 403, respecting
+    Retry-After and X-RateLimit-Reset headers. Exponential backoff when the
+    server doesn't specify. Emits one-line stderr notice per retry so the
+    user sees what's happening. Raises ``RateLimitError`` after exhaustion.
+
+    Non-rate-limit HTTP errors (404, 500, etc.) pass through unchanged.
+    """
     hdrs = {"User-Agent": USER_AGENT}
     if headers:
         hdrs.update(headers)
-    req = urllib.request.Request(url, headers=hdrs)
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read()
+
+    last_err: Exception | None = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            req = urllib.request.Request(url, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if not _is_rate_limited(e) or attempt >= MAX_RETRIES:
+                raise
+            wait = _parse_retry_after(e.headers, int(BACKOFF_BASE_SECONDS * (2**attempt)))
+            print(
+                f"mat-vis-client: rate limited (HTTP {e.code}), "
+                f"retry {attempt + 1}/{MAX_RETRIES} in {wait}s",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+        except urllib.error.URLError as e:
+            # Network-level error (DNS / connection reset / timeout). Retry.
+            last_err = e
+            if attempt >= MAX_RETRIES:
+                raise
+            wait = min(int(BACKOFF_BASE_SECONDS * (2**attempt)), RETRY_MAX_WAIT_SECONDS)
+            print(
+                f"mat-vis-client: network error ({e.reason}), "
+                f"retry {attempt + 1}/{MAX_RETRIES} in {wait}s",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+
+    # Should be unreachable (loop always raises or returns), but fail loud
+    raise RateLimitError(url, 0, f"exhausted {MAX_RETRIES} retries") from last_err
 
 
 def _get_json(url: str) -> dict | list:
