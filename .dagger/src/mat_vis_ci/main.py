@@ -731,58 +731,77 @@ class MatVisCi:
 
         baker = baker.with_exec(bake_cmd)
 
-        # Upload remaining (non-chunk) assets to release
+        # Upload remaining (non-chunk) assets to release. The user-supplied
+        # release_tag and source values are passed via env vars, NEVER
+        # interpolated into the shell string (see #61).
         if release_tag != "v0000.00.0" and registry_pass is not None:
+            baker = baker.with_env_variable("RELEASE_TAG", release_tag).with_env_variable(
+                "SOURCE", source
+            )
+            # Upload loose assets (leftover parquets / rowmaps / index JSON).
+            # Shell is used only for the glob + loop; values come from env.
             baker = baker.with_exec(
                 [
                     "sh",
                     "-c",
-                    f"""
-                for f in /tmp/out/*.parquet /tmp/out/*-rowmap.json /tmp/out/*.json; do
-                    [ -f "$f" ] || continue
-                    case "$(basename "$f")" in
-                        release-manifest.json) ;;
-                        *) gh release upload {release_tag} "$f" --clobber || true ;;
-                    esac
-                done
-            """,
+                    "set -e; for f in /tmp/out/*.parquet /tmp/out/*-rowmap.json "
+                    "/tmp/out/*.json; do "
+                    '[ -f "$f" ] || continue; '
+                    'case "$(basename "$f")" in '
+                    "release-manifest.json) ;; "
+                    '*) gh release upload "$RELEASE_TAG" "$f" --clobber || true ;; '
+                    "esac; "
+                    "done",
                 ]
             )
 
-            # Pack original .mtlx files into JSON map (gpuopen has real graphs)
+            # Pack original .mtlx files into JSON map (gpuopen has real graphs).
+            # Same rule: env vars only.
             baker = baker.with_exec(
                 [
                     "sh",
                     "-c",
-                    f"""
-                if [ -d /tmp/out/mtlx/{source} ] && find /tmp/out/mtlx/{source} -name '*.mtlx' -print -quit | grep -q .; then
-                    mat-vis-baker pack-mtlx /tmp/out --source {source} --mtlx-dir /tmp/out/mtlx
-                    if [ -f /tmp/out/{source}-mtlx.json ]; then
-                        gh release upload {release_tag} /tmp/out/{source}-mtlx.json --clobber || true
-                    fi
-                fi
-            """,
+                    "set -e; "
+                    'if [ -d "/tmp/out/mtlx/$SOURCE" ] && '
+                    'find "/tmp/out/mtlx/$SOURCE" -name "*.mtlx" -print -quit | '
+                    "grep -q .; then "
+                    'mat-vis-baker pack-mtlx /tmp/out --source "$SOURCE" '
+                    "--mtlx-dir /tmp/out/mtlx; "
+                    'if [ -f "/tmp/out/${SOURCE}-mtlx.json" ]; then '
+                    'gh release upload "$RELEASE_TAG" '
+                    '"/tmp/out/${SOURCE}-mtlx.json" --clobber || true; '
+                    "fi; "
+                    "fi",
                 ]
             )
 
-            # Rebuild manifest from all release assets
+            # Rebuild manifest from all release assets. Python script reads
+            # the tag from os.environ — no f-string interpolation.
             baker = baker.with_exec(
                 [
                     "python3",
                     "-c",
-                    f"""
-from pathlib import Path
-from mat_vis_baker.manifest import rebuild_manifest_from_release, write_manifest
-manifest = rebuild_manifest_from_release('{release_tag}')
-write_manifest(manifest, Path('/tmp/release-manifest.json'))
-""",
+                    (
+                        "import os\n"
+                        "from pathlib import Path\n"
+                        "from mat_vis_baker.manifest import "
+                        "rebuild_manifest_from_release, write_manifest\n"
+                        "manifest = rebuild_manifest_from_release("
+                        "os.environ['RELEASE_TAG'])\n"
+                        "write_manifest(manifest, "
+                        "Path('/tmp/release-manifest.json'))\n"
+                    ),
                 ]
             )
+            # Pure-argv: no shell at all for the manifest upload.
             baker = baker.with_exec(
                 [
-                    "sh",
-                    "-c",
-                    f"gh release upload {release_tag} /tmp/release-manifest.json --clobber",
+                    "gh",
+                    "release",
+                    "upload",
+                    release_tag,
+                    "/tmp/release-manifest.json",
+                    "--clobber",
                 ]
             )
 
@@ -825,18 +844,17 @@ write_manifest(manifest, Path('/tmp/release-manifest.json'))
 
         baker = baker.with_exec(cmd)
 
-        # Upload all KTX2 parquets + rowmaps
+        # Upload all KTX2 parquets + rowmaps. release_tag flows via env.
         if release_tag != "v0000.00.0" and registry_pass is not None:
+            baker = baker.with_env_variable("RELEASE_TAG", release_tag)
             baker = baker.with_exec(
                 [
                     "sh",
                     "-c",
-                    f"""
-                for f in /tmp/out/*.parquet /tmp/out/*-rowmap.json; do
-                    [ -f "$f" ] || continue
-                    gh release upload {release_tag} "$f" --clobber || true
-                done
-            """,
+                    "set -e; for f in /tmp/out/*.parquet /tmp/out/*-rowmap.json; "
+                    'do [ -f "$f" ] || continue; '
+                    'gh release upload "$RELEASE_TAG" "$f" --clobber || true; '
+                    "done",
                 ]
             )
             # Rebuild manifest
@@ -844,19 +862,26 @@ write_manifest(manifest, Path('/tmp/release-manifest.json'))
                 [
                     "python3",
                     "-c",
-                    f"""
-from pathlib import Path
-from mat_vis_baker.manifest import rebuild_manifest_from_release, write_manifest
-manifest = rebuild_manifest_from_release('{release_tag}')
-write_manifest(manifest, Path('/tmp/release-manifest.json'))
-""",
+                    (
+                        "import os\n"
+                        "from pathlib import Path\n"
+                        "from mat_vis_baker.manifest import "
+                        "rebuild_manifest_from_release, write_manifest\n"
+                        "manifest = rebuild_manifest_from_release("
+                        "os.environ['RELEASE_TAG'])\n"
+                        "write_manifest(manifest, "
+                        "Path('/tmp/release-manifest.json'))\n"
+                    ),
                 ]
             )
             baker = baker.with_exec(
                 [
-                    "sh",
-                    "-c",
-                    f"gh release upload {release_tag} /tmp/release-manifest.json --clobber",
+                    "gh",
+                    "release",
+                    "upload",
+                    release_tag,
+                    "/tmp/release-manifest.json",
+                    "--clobber",
                 ]
             )
 
@@ -896,69 +921,77 @@ write_manifest(manifest, Path('/tmp/release-manifest.json'))
         release_tag: Annotated[str, Doc("Release tag")] = "v2026.04.0",
         registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
     ) -> str:
-        """Regenerate all rowmap JSONs for a release using the current scanner.
+        """Regenerate all rowmap JSONs for a release using the legacy scanner.
 
-        Downloads each parquet, rescans with current generate_rowmap_from_parquet,
-        uploads new rowmap. Use after fixing the rowmap scanner to repair
-        existing release assets without re-baking.
+        This is the retrofit path for parquets baked before the sidecar
+        rowmap emission existed (#57). It downloads each parquet and runs
+        the legacy magic-byte scanner. Use after fixing the scanner to
+        repair existing release assets without re-baking.
+
+        ``release_tag`` flows to the inline script via the ``RELEASE_TAG``
+        env var — never interpolated into the source (#61).
         """
         context = src or dag.host().directory(".")
         baker = self._baker_container(context)
         if registry_pass is not None:
             baker = baker.with_secret_variable("GH_TOKEN", registry_pass)
+        baker = baker.with_env_variable("RELEASE_TAG", release_tag)
 
-        script = f"""
-import json, os, re, subprocess, urllib.request
-from pathlib import Path
-from mat_vis_baker.parquet_writer import generate_rowmap_from_parquet, write_rowmap
-
-TAG = '{release_tag}'
-BASE = f'https://github.com/MorePET/mat-vis/releases/download/{{TAG}}'
-work = Path('/tmp/regen'); work.mkdir(exist_ok=True)
-
-# List release assets
-assets = subprocess.run(
-    ['gh', 'release', 'view', TAG, '--json', 'assets', '--jq', '.assets[].name'],
-    capture_output=True, text=True, check=True,
-).stdout.strip().split('\\n')
-
-pq_re = re.compile(r'^mat-vis-(\\w+)-(\\w+)-(\\w+?)(?:-\\d+)?\\.parquet$')
-parquets = [a for a in assets if pq_re.match(a)]
-print(f'Found {{len(parquets)}} parquet files')
-
-for i, pq_name in enumerate(sorted(parquets), 1):
-    m = pq_re.match(pq_name)
-    if not m: continue
-    source, tier, _ = m.groups()
-    pq_path = work / pq_name
-    print(f'[{{i}}/{{len(parquets)}}] {{pq_name}}')
-
-    # Download
-    urllib.request.urlretrieve(f'{{BASE}}/{{pq_name}}', pq_path)
-
-    # Generate rowmap
-    rm = generate_rowmap_from_parquet(pq_path, source, tier, TAG)
-    n_mat = len(rm['materials'])
-    n_chan = sum(len(c) for c in rm['materials'].values())
-    print(f'  → {{n_mat}} materials, {{n_chan}} channels')
-
-    # Write rowmap with matching name
-    stem = pq_path.stem.replace(f'mat-vis-{{source}}-{{tier}}-', f'{{source}}-{{tier}}-')
-    rm_path = work / f'{{stem}}-rowmap.json'
-    write_rowmap(rm, rm_path)
-
-    # Upload rowmap, delete parquet to free disk
-    subprocess.run(['gh', 'release', 'upload', TAG, str(rm_path), '--clobber'], check=False)
-    pq_path.unlink()
-
-# Rebuild manifest
-from mat_vis_baker.manifest import rebuild_manifest_from_release, write_manifest
-mf = rebuild_manifest_from_release(TAG)
-mf_path = work / 'release-manifest.json'
-write_manifest(mf, mf_path)
-subprocess.run(['gh', 'release', 'upload', TAG, str(mf_path), '--clobber'], check=False)
-print('Manifest rebuilt and uploaded')
-"""
+        # Static Python script — no f-string interpolation. Reads the tag
+        # from os.environ at runtime.
+        script = (
+            "import os, re, subprocess, urllib.request\n"
+            "from pathlib import Path\n"
+            "from mat_vis_baker.parquet_writer import "
+            "generate_rowmap_from_parquet_legacy, write_rowmap\n"
+            "\n"
+            "TAG = os.environ['RELEASE_TAG']\n"
+            "BASE = f'https://github.com/MorePET/mat-vis/releases/download/{TAG}'\n"
+            "work = Path('/tmp/regen'); work.mkdir(exist_ok=True)\n"
+            "\n"
+            "# List release assets\n"
+            "assets = subprocess.run(\n"
+            "    ['gh', 'release', 'view', TAG, '--json', 'assets', "
+            "'--jq', '.assets[].name'],\n"
+            "    capture_output=True, text=True, check=True,\n"
+            ").stdout.strip().split('\\n')\n"
+            "\n"
+            "pq_re = re.compile(r'^mat-vis-(\\w+)-(\\w+)-(\\w+?)(?:-\\d+)?\\.parquet$')\n"
+            "parquets = [a for a in assets if pq_re.match(a)]\n"
+            "print(f'Found {len(parquets)} parquet files')\n"
+            "\n"
+            "for i, pq_name in enumerate(sorted(parquets), 1):\n"
+            "    m = pq_re.match(pq_name)\n"
+            "    if not m: continue\n"
+            "    source, tier, _ = m.groups()\n"
+            "    pq_path = work / pq_name\n"
+            "    print(f'[{i}/{len(parquets)}] {pq_name}')\n"
+            "\n"
+            "    urllib.request.urlretrieve(f'{BASE}/{pq_name}', pq_path)\n"
+            "\n"
+            "    rm = generate_rowmap_from_parquet_legacy(pq_path, source, tier, TAG)\n"
+            "    n_mat = len(rm['materials'])\n"
+            "    n_chan = sum(len(c) for c in rm['materials'].values())\n"
+            "    print(f'  -> {n_mat} materials, {n_chan} channels')\n"
+            "\n"
+            "    stem = pq_path.stem.replace("
+            "f'mat-vis-{source}-{tier}-', f'{source}-{tier}-')\n"
+            "    rm_path = work / f'{stem}-rowmap.json'\n"
+            "    write_rowmap(rm, rm_path)\n"
+            "\n"
+            "    subprocess.run(['gh', 'release', 'upload', TAG, "
+            "str(rm_path), '--clobber'], check=False)\n"
+            "    pq_path.unlink()\n"
+            "\n"
+            "from mat_vis_baker.manifest import "
+            "rebuild_manifest_from_release, write_manifest\n"
+            "mf = rebuild_manifest_from_release(TAG)\n"
+            "mf_path = work / 'release-manifest.json'\n"
+            "write_manifest(mf, mf_path)\n"
+            "subprocess.run(['gh', 'release', 'upload', TAG, "
+            "str(mf_path), '--clobber'], check=False)\n"
+            "print('Manifest rebuilt and uploaded')\n"
+        )
         return await baker.with_exec(["python3", "-c", script]).stdout()
 
     @function
@@ -969,25 +1002,40 @@ print('Manifest rebuilt and uploaded')
         registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
     ) -> str:
         """Rebuild manifest only (no rowmap regeneration). Fast — just re-reads
-        release assets and regenerates release-manifest.json."""
+        release assets and regenerates release-manifest.json.
+
+        ``release_tag`` flows via env var, not shell-string interpolation (#61).
+        """
         context = src or dag.host().directory(".")
         baker = self._baker_container(context)
         if registry_pass is not None:
             baker = baker.with_secret_variable("GH_TOKEN", registry_pass)
+        baker = baker.with_env_variable("RELEASE_TAG", release_tag)
 
+        # Two argv-only execs: build the manifest, then upload it.
+        baker = baker.with_exec(
+            [
+                "python3",
+                "-c",
+                (
+                    "import os\n"
+                    "from pathlib import Path\n"
+                    "from mat_vis_baker.manifest import "
+                    "rebuild_manifest_from_release, write_manifest\n"
+                    "mf = rebuild_manifest_from_release(os.environ['RELEASE_TAG'])\n"
+                    "write_manifest(mf, Path('/tmp/release-manifest.json'))\n"
+                    "print('manifest has ' + str(len(mf['tiers'])) + ' tiers')\n"
+                ),
+            ]
+        )
         return await baker.with_exec(
             [
-                "sh",
-                "-c",
-                f"""
-python3 -c "
-from pathlib import Path
-from mat_vis_baker.manifest import rebuild_manifest_from_release, write_manifest
-mf = rebuild_manifest_from_release('{release_tag}')
-write_manifest(mf, Path('/tmp/release-manifest.json'))
-print(f'manifest has ' + str(len(mf['tiers'])) + ' tiers')
-" && gh release upload {release_tag} /tmp/release-manifest.json --clobber
-""",
+                "gh",
+                "release",
+                "upload",
+                release_tag,
+                "/tmp/release-manifest.json",
+                "--clobber",
             ]
         ).stdout()
 
