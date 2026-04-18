@@ -51,18 +51,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Debug — list Dagger functions
-        uses: dagger/dagger-for-github@v8.4.1
-        with:
-          verb: functions
-          module: .dagger
-
       - uses: dagger/dagger-for-github@v8.4.1
         with:
           verb: call
           module: .dagger
           args: >-
-            derive-ktx2-to-release
+            derive-ktx-2-to-release
             --src=.
             --source=${{ inputs.source }}
             --source-tier=${{ inputs.source-tier }}
