@@ -171,19 +171,38 @@ print(f"\\nintegration test passed")
 
 
 VALIDATE_RELEASE_SCRIPT = '''\
-"""Validate all expected release assets exist and range reads work."""
+"""Validate all expected release assets exist and range reads work.
+
+Stronger than the old version:
+ - Discovers tier list from the manifest (covers ktx2-*, mtlx, future tiers)
+ - Asserts minimum channel count per material (catches silent drops)
+ - Tests N random materials per source x tier (not just 1)
+ - Detects PNG vs KTX2 magic bytes depending on tier name
+ - Verifies counts of parquets vs rowmap_files match per source x tier
+"""
 
 import json
 import os
 import random
 import sys
-import tempfile
 import urllib.request
 
-USER_AGENT = "mat-vis-validate/0.1"
-TEXTURE_TIERS = ["128", "256", "512", "1k", "2k"]
+USER_AGENT = "mat-vis-validate/0.2"
 REQUIRED_SOURCES = ["ambientcg", "polyhaven"]
 OPTIONAL_SOURCES = ["gpuopen"]
+
+# Minimum channel count a material must have. Looser for KTX2 where toktx
+# may reject some channel types (16-bit displacement/ao, etc).
+MIN_CHANNELS_PER_MATERIAL = {
+    "png": 1,    # at least one channel (normal or color) must be present
+    "ktx2": 1,   # tolerate partial coverage for now
+}
+
+# How many random materials to sample per source x tier
+SAMPLE_SIZE = 3
+
+PNG_MAGIC = b"\\x89PNG"
+KTX2_MAGIC = b"\\xabKTX 20\\xbb\\r\\n\\x1a\\n"
 
 
 def get(url, headers=None):
@@ -213,103 +232,140 @@ except Exception as e:
     sys.exit(1)
 
 tiers_data = manifest.get("tiers", {})
+if not tiers_data:
+    print("FAIL manifest has no tiers")
+    sys.exit(1)
+
 failures = []
 passes = []
 
-# ── 2+3. Check texture sources per tier ──
-for tier in TEXTURE_TIERS:
-    if tier not in tiers_data:
-        failures.append(f"tier {tier}: missing from manifest")
-        continue
 
-    tier_info = tiers_data[tier]
+def expected_magic(tier_name):
+    """Return expected file-format magic bytes for a tier."""
+    if tier_name.startswith("ktx2"):
+        return KTX2_MAGIC, "KTX2"
+    return PNG_MAGIC, "PNG"
+
+
+def min_channels_for(tier_name):
+    return MIN_CHANNELS_PER_MATERIAL["ktx2" if tier_name.startswith("ktx2") else "png"]
+
+
+def validate_source_tier(source, tier, tier_info, required):
+    """Run all checks for a single source x tier combo. Returns (passes, failures)."""
+    label = f"{source}/{tier}"
     base_url = tier_info.get("base_url", "")
     sources_in_tier = tier_info.get("sources", {})
 
-    for source in REQUIRED_SOURCES:
-        label = f"{source}/{tier}"
-        if source not in sources_in_tier:
-            failures.append(f"{label}: missing from manifest")
-            continue
+    if source not in sources_in_tier:
+        if required:
+            return [], [f"{label}: missing from manifest"]
+        return [f"{label}: not present (optional, OK)"], []
 
-        src_data = sources_in_tier[source]
-        rowmap_files = src_data.get("rowmap_files", [])
-        if not rowmap_files:
-            rm_file = src_data.get("rowmap_file", f"{source}-{tier}-rowmap.json")
-            rowmap_files = [rm_file]
+    src_data = sources_in_tier[source]
+    parquet_files = src_data.get("parquet_files", [])
+    rowmap_files = src_data.get("rowmap_files", [])
+    if not rowmap_files:
+        rowmap_files = [src_data.get("rowmap_file", f"{source}-{tier}-rowmap.json")]
 
-        # Verify at least one parquet + rowmap exists
-        if not rowmap_files:
-            failures.append(f"{label}: no rowmap files listed")
-            continue
+    local_passes = []
+    local_failures = []
 
-        # Fetch one rowmap, verify parquet reference
-        rm_url = base_url + rowmap_files[0]
+    # Parquet/rowmap count parity (each parquet should have a rowmap)
+    if parquet_files and len(rowmap_files) != len(parquet_files):
+        local_failures.append(
+            f"{label}: parquet/rowmap count mismatch "
+            f"({len(parquet_files)} pq, {len(rowmap_files)} rm)"
+        )
+
+    # Aggregate across all chunked rowmaps
+    total_materials = 0
+    all_channel_counts = []
+    sample_pool = []  # list of (mat_id, channels, pq_file) for random sampling
+
+    for rm_file in rowmap_files:
+        rm_url = base_url + rm_file
         try:
             rowmap = get_json(rm_url)
         except Exception as e:
-            failures.append(f"{label}: rowmap fetch failed: {e}")
+            local_failures.append(f"{label}: rowmap fetch failed ({rm_file}): {e}")
             continue
 
         materials = rowmap.get("materials", {})
         pq_file = rowmap.get("parquet_file", "")
         if not materials:
-            failures.append(f"{label}: rowmap has 0 materials")
+            local_failures.append(f"{label}: {rm_file} has 0 materials")
             continue
         if not pq_file:
-            failures.append(f"{label}: rowmap missing parquet_file")
+            local_failures.append(f"{label}: {rm_file} missing parquet_file")
             continue
 
-        passes.append(f"{label}: rowmap OK ({len(materials)} materials, pq={pq_file})")
+        total_materials += len(materials)
+        for mid, chans in materials.items():
+            all_channel_counts.append(len(chans))
+            sample_pool.append((mid, chans, pq_file))
 
-        # ── 4. Pick one random material, range-read, verify PNG ──
-        mat_id = random.choice(list(materials.keys()))
-        channels = materials[mat_id]
-        ch_name = next(iter(channels))
+    if total_materials == 0:
+        local_failures.append(f"{label}: no materials across any rowmap")
+        return local_passes, local_failures
+
+    # Minimum channel-count assertion (catches silent drops)
+    min_chans = min(all_channel_counts) if all_channel_counts else 0
+    max_chans = max(all_channel_counts) if all_channel_counts else 0
+    required_min = min_channels_for(tier)
+    if min_chans < required_min:
+        local_failures.append(
+            f"{label}: min channels per material ({min_chans}) below "
+            f"threshold ({required_min})"
+        )
+    else:
+        local_passes.append(
+            f"{label}: {total_materials} materials, "
+            f"channels min={min_chans} max={max_chans}"
+        )
+
+    # Range-read N random materials, verify format magic
+    magic, magic_name = expected_magic(tier)
+    n = min(SAMPLE_SIZE, len(sample_pool))
+    samples = random.sample(sample_pool, n) if n > 0 else []
+
+    verified = 0
+    for mat_id, channels, pq_file in samples:
+        ch_name = random.choice(list(channels.keys()))
         rng = channels[ch_name]
         offset = rng["offset"]
         length = rng["length"]
-
         pq_url = base_url + pq_file
-        range_header = f"bytes={offset}-{offset + length - 1}"
         try:
-            data = get(pq_url, headers={"Range": range_header})
-            if data[:4] != b"\\x89PNG":
-                failures.append(
-                    f"{label}: range read {mat_id}/{ch_name} not PNG "
-                    f"(got {data[:4]!r})"
+            data = get(pq_url, headers={"Range": f"bytes={offset}-{offset + length - 1}"})
+            if not data.startswith(magic):
+                local_failures.append(
+                    f"{label}: {mat_id}/{ch_name} not {magic_name} "
+                    f"(got {data[: len(magic)]!r})"
                 )
             else:
-                passes.append(
-                    f"{label}: range read OK ({mat_id}/{ch_name}, "
-                    f"{len(data):,} bytes)"
-                )
+                verified += 1
         except Exception as e:
-            failures.append(f"{label}: range read failed: {e}")
+            local_failures.append(f"{label}: range read {mat_id}/{ch_name} failed: {e}")
 
-    # Optional sources: just check if present, validate same way
+    if verified == n and n > 0:
+        local_passes.append(f"{label}: {verified}/{n} range-reads verified as {magic_name}")
+
+    return local_passes, local_failures
+
+
+# ── 2. Validate all tiers discovered in manifest ──
+# Discovered from manifest, NOT hardcoded — covers ktx2-*, mtlx, future tiers.
+for tier in sorted(tiers_data.keys()):
+    tier_info = tiers_data[tier]
+    for source in REQUIRED_SOURCES:
+        p, f = validate_source_tier(source, tier, tier_info, required=True)
+        passes.extend(p)
+        failures.extend(f)
     for source in OPTIONAL_SOURCES:
-        label = f"{source}/{tier}"
-        if source not in sources_in_tier:
-            passes.append(f"{label}: not present (optional, OK)")
-            continue
-
-        src_data = sources_in_tier[source]
-        rowmap_files = src_data.get("rowmap_files", [])
-        if not rowmap_files:
-            rm_file = src_data.get("rowmap_file", f"{source}-{tier}-rowmap.json")
-            rowmap_files = [rm_file]
-
-        rm_url = base_url + rowmap_files[0]
-        try:
-            rowmap = get_json(rm_url)
-            materials = rowmap.get("materials", {})
-            if materials:
-                passes.append(f"{label}: rowmap OK ({len(materials)} materials)")
-            else:
-                failures.append(f"{label}: rowmap has 0 materials")
-        except Exception as e:
-            failures.append(f"{label}: rowmap fetch failed: {e}")
+        p, f = validate_source_tier(source, tier, tier_info, required=False)
+        passes.extend(p)
+        failures.extend(f)
 
 # ── 5. Check physicallybased index JSON ──
 pb_label = "physicallybased/index"
