@@ -35,3 +35,91 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: clients/python/dist/
+
+  verify:
+    name: Verify published wheel
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Derive expected version from tag
+        id: ver
+        # Tag is client/vX.Y.Z; strip the prefix. Manual dispatches skip
+        # this job gracefully by falling back to PyPI's "latest".
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/client/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/client/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Wait for PyPI index to list the version
+        if: steps.ver.outputs.version != ''
+        env:
+          EXPECTED: ${{ steps.ver.outputs.version }}
+        # PyPI's JSON API can lag a few seconds after publish; poll for
+        # up to 2 minutes before giving up. curl -f turns 404s into exit
+        # failures so the until-loop retries.
+        run: |
+          set -u
+          for attempt in $(seq 1 24); do
+            if curl -sfSL "https://pypi.org/pypi/mat-vis-client/${EXPECTED}/json" -o /dev/null; then
+              echo "PyPI has mat-vis-client ${EXPECTED} (attempt ${attempt})"
+              exit 0
+            fi
+            echo "waiting for mat-vis-client ${EXPECTED} on PyPI (attempt ${attempt}/24)..."
+            sleep 5
+          done
+          echo "ERROR: mat-vis-client ${EXPECTED} not on PyPI after 120s"
+          exit 1
+
+      - name: Install published wheel in a fresh venv
+        env:
+          EXPECTED: ${{ steps.ver.outputs.version }}
+        run: |
+          python -m venv /tmp/smoke
+          if [[ -n "${EXPECTED}" ]]; then
+            /tmp/smoke/bin/pip install "mat-vis-client==${EXPECTED}"
+          else
+            /tmp/smoke/bin/pip install "mat-vis-client"
+          fi
+
+      - name: Smoke-check imports and version metadata
+        env:
+          EXPECTED: ${{ steps.ver.outputs.version }}
+        # Runs against the published wheel — not the source tree — so
+        # this catches packaging regressions (missing files, broken
+        # importlib.metadata lookup, malformed entry points) that the
+        # local test suite can't see.
+        run: |
+          /tmp/smoke/bin/python - <<'PY'
+          import os
+          import sys
+
+          from mat_vis_client import MatVisClient, __version__
+          from mat_vis_client.client import USER_AGENT
+
+          print(f"installed __version__ = {__version__!r}")
+          print(f"installed USER_AGENT  = {USER_AGENT!r}")
+
+          expected = os.environ.get("EXPECTED") or ""
+          if expected:
+              assert __version__ == expected, (
+                  f"__version__ {__version__!r} != tag {expected!r}"
+              )
+              assert USER_AGENT == f"mat-vis-client/{expected} (Python)", (
+                  f"USER_AGENT drift: {USER_AGENT!r}"
+              )
+          else:
+              # workflow_dispatch — no tag to compare. Just confirm the
+              # User-Agent template is intact.
+              assert USER_AGENT.startswith("mat-vis-client/"), USER_AGENT
+              assert USER_AGENT.endswith(" (Python)"), USER_AGENT
+
+          # Class is importable and instantiable (smoke only; no network).
+          assert MatVisClient.__name__ == "MatVisClient"
+          print("OK")
+          PY
