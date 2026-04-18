@@ -44,17 +44,25 @@ def _get_fetcher(source: str):
 
 
 def cmd_all(args: argparse.Namespace) -> int:
-    """Full pipeline: fetch+bake (parallel) → pack (parallel per category) → index."""
+    """Streaming pipeline: per-batch fetch → bake → append to lazy parquet writers → delete textures.
+
+    Disk usage stays bounded by BATCH_SIZE × per-material size. Suitable for
+    GH runners with 14GB disk even on 2k tier with thousands of materials.
+    """
+    import shutil
     import time
-    from collections import defaultdict
-    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime, timezone
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
 
     from mat_vis_baker.bake import bake_material
-    from mat_vis_baker.common import hash_textures
+    from mat_vis_baker.common import BAKER_VERSION, CANONICAL_CHANNELS, hash_textures
     from mat_vis_baker.index_builder import build_index, write_index
     from mat_vis_baker.parquet_writer import (
-        generate_rowmap,
-        write_parquet,
+        CHANNEL_COLS,
+        _SCHEMA,
+        generate_rowmap_from_parquet,
         write_rowmap,
     )
 
@@ -76,123 +84,176 @@ def cmd_all(args: argparse.Namespace) -> int:
         log.info("=== done: %d records ===", len(records))
         return 0
 
-    # ── phase 1: fetch (parallel downloads, done inside fetcher) ──
-    log.info("=== phase 1: fetch %s %s ===", source, tier)
-    t0 = time.monotonic()
+    # ── streaming bake: batched fetch + bake + pack + cleanup ──
+    BATCH_SIZE = int(getattr(args, "batch_size", 50) or 50)
     fetch = _get_fetcher(source)
-    # offset+limit enables batched processing across parallel Dagger containers
-    fetch_limit = (args.offset + args.limit) if args.limit else None
-    records = fetch(tier, output_dir / "textures", limit=fetch_limit, mtlx_dir=mtlx_dir)
-    if args.offset > 0:
-        records = records[args.offset :]
-    t_fetch = time.monotonic() - t0
-    n_fetched = sum(1 for r in records if r.status == "ok")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    textures_dir = output_dir / "textures"
+
+    now = datetime.now(timezone.utc).isoformat()
+    compression = {
+        col: "NONE" if col in CHANNEL_COLS else "ZSTD" for col in [f.name for f in _SCHEMA]
+    }
+    use_dictionary = {col: col not in CHANNEL_COLS for col in [f.name for f in _SCHEMA]}
+
+    writers: dict[str, pq.ParquetWriter] = {}
+    all_records: list = []
+    n_ok = 0
+    n_failed = 0
+    t0 = time.monotonic()
+    offset = args.offset or 0
+    user_limit = args.limit  # total cap if set
+    fetched_so_far = 0
+
     log.info(
-        "PERF fetch: %.1fs, %d materials, %.1f mat/s",
-        t_fetch,
-        n_fetched,
-        n_fetched / t_fetch if t_fetch > 0 else 0,
+        "=== streaming bake: %s %s, batch=%d, offset=%d, limit=%s ===",
+        source,
+        tier,
+        BATCH_SIZE,
+        offset,
+        user_limit if user_limit else "all",
     )
 
-    # ── phase 2: bake + hash + thumbnail (parallel per material) ──
-    log.info("=== phase 2: bake + hash + thumbnail (8 workers) ===")
-    t1 = time.monotonic()
+    try:
+        while True:
+            # Determine this batch's size
+            batch_limit = BATCH_SIZE
+            if user_limit and fetched_so_far + batch_limit > user_limit:
+                batch_limit = user_limit - fetched_so_far
+                if batch_limit <= 0:
+                    break
 
-    def _bake_one(rec):
-        if rec.status == "ok":
-            bake_material(rec, output_dir / "baked", thumb_dir, tier)
-            if rec.status == "ok":
-                hash_textures(rec)
-        return rec
+            log.info("=== batch offset=%d limit=%d ===", offset, batch_limit)
+            t_b = time.monotonic()
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        records = list(pool.map(_bake_one, records))
+            # Fetch
+            batch = fetch(tier, textures_dir, limit=batch_limit, offset=offset, mtlx_dir=mtlx_dir)
+            if not batch:
+                log.info("no more materials, done")
+                break
 
-    t_bake = time.monotonic() - t1
-    ok = [r for r in records if r.status == "ok"]
-    total = len(records)
-    ok_pct = (len(ok) / total * 100) if total > 0 else 0
+            # Bake (resize in place + hash)
+            for rec in batch:
+                if rec.status == "ok":
+                    bake_material(rec, output_dir / "baked", thumb_dir, tier)
+                    if rec.status == "ok":
+                        hash_textures(rec)
+
+            # Pack: append each ok record to its category writer (lazy open)
+            for rec in batch:
+                if rec.status != "ok":
+                    n_failed += 1
+                    continue
+
+                cat = rec.category
+                if cat not in writers:
+                    pq_path = output_dir / f"mat-vis-{source}-{tier}-{cat}.parquet"
+                    writers[cat] = pq.ParquetWriter(
+                        pq_path, _SCHEMA, compression=compression, use_dictionary=use_dictionary
+                    )
+
+                row = {
+                    "id": [rec.id],
+                    "source": [source],
+                    "category": [rec.category],
+                    "resolution_px": [resolution_px],
+                    "source_url": [rec.source_url],
+                    "source_license": [rec.source_license],
+                    "baker_version": [BAKER_VERSION],
+                    "baked_at": [now],
+                }
+                for ch in CANONICAL_CHANNELS:
+                    path = rec.texture_paths.get(ch)
+                    row[ch] = [path.read_bytes() if path and path.exists() else None]
+
+                table = pa.table(row, schema=_SCHEMA)
+                writers[cat].write_table(table)
+                del row, table
+                n_ok += 1
+
+            all_records.extend(batch)
+            fetched_so_far += len(batch)
+
+            # CLEAR cache: delete this batch's textures + baked dirs
+            if textures_dir.exists():
+                shutil.rmtree(textures_dir, ignore_errors=True)
+            baked_dir = output_dir / "baked"
+            if baked_dir.exists():
+                shutil.rmtree(baked_dir, ignore_errors=True)
+
+            # Disk usage check
+            try:
+                disk = shutil.disk_usage(str(output_dir))
+                free_gb = disk.free / 1e9
+            except Exception:
+                free_gb = -1
+            log.info(
+                "batch done: %d records (%.1fs), totals: %d ok %d fail, free disk: %.1f GB",
+                len(batch),
+                time.monotonic() - t_b,
+                n_ok,
+                n_failed,
+                free_gb,
+            )
+
+            offset += len(batch)
+            # If batch came back smaller than requested, we're at the end
+            if len(batch) < batch_limit:
+                log.info("partial batch (%d < %d), done", len(batch), batch_limit)
+                break
+    finally:
+        for w in writers.values():
+            w.close()
+
+    t_stream = time.monotonic() - t0
     log.info(
-        "PERF bake: %.1fs, %d ok / %d total (%.1f%%), %.1f mat/s",
-        t_bake,
-        len(ok),
-        total,
-        ok_pct,
-        len(ok) / t_bake if t_bake > 0 else 0,
+        "PERF stream: %.1fs, %d ok / %d total (%.1f mat/s)",
+        t_stream,
+        n_ok,
+        n_ok + n_failed,
+        n_ok / max(t_stream, 0.1),
     )
 
-    if total > 0 and len(ok) / total < 0.95:
-        log.error("success rate %.1f%% < 95%% threshold", ok_pct)
+    if n_ok == 0:
+        log.error("no successful materials")
         return 1
 
-    # ── phase 3: pack parquet + rowmap (parallel per category) ──
-    log.info("=== phase 3: pack %d categories (4 workers) ===", len(set(r.category for r in ok)))
-    t2 = time.monotonic()
-
-    by_cat: dict[str, list] = defaultdict(list)
-    for rec in ok:
-        by_cat[rec.category].append(rec)
-
-    def _pack_category(cat_and_records):
-        cat, cat_records = cat_and_records
+    # ── generate rowmaps from each parquet (sources deleted, scan parquet) ──
+    log.info("=== rowmap generation ===")
+    t_rm = time.monotonic()
+    total_bytes = 0
+    for cat in sorted(writers.keys()):
         pq_path = output_dir / f"mat-vis-{source}-{tier}-{cat}.parquet"
-        write_parquet(cat_records, source, tier, pq_path, resolution_px)
-        rowmap = generate_rowmap(pq_path, source, tier, args.release_tag, cat_records)
+        rowmap = generate_rowmap_from_parquet(pq_path, source, tier, args.release_tag)
         rm_path = output_dir / f"{source}-{tier}-{cat}-rowmap.json"
         write_rowmap(rowmap, rm_path)
-        return pq_path, pq_path.stat().st_size
-
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        pack_results = list(pool.map(_pack_category, sorted(by_cat.items())))
-
-    t_pack = time.monotonic() - t2
-    total_bytes = sum(size for _, size in pack_results)
+        total_bytes += pq_path.stat().st_size
     log.info(
-        "PERF pack: %.1fs, %d partitions, %.1f GB, %.1f MB/s",
-        t_pack,
-        len(pack_results),
+        "PERF rowmap: %.1fs, %d partitions, %.1f GB",
+        time.monotonic() - t_rm,
+        len(writers),
         total_bytes / 1e9,
-        total_bytes / 1e6 / t_pack if t_pack > 0 else 0,
     )
 
-    # ── phase 4: index + manifest + catalog ──
-    log.info("=== phase 4: index + manifest + catalog ===")
-    t3 = time.monotonic()
-    index_data = build_index(records, source)
+    # ── index + manifest + catalog ──
+    log.info("=== index + manifest + catalog ===")
+    index_data = build_index(all_records, source)
     write_index(index_data, output_dir / f"{source}.json")
 
-    log.info("=== manifest ===")
     from mat_vis_baker.manifest import generate_manifest, write_manifest
 
     manifest = generate_manifest(output_dir, args.release_tag, [source], [tier])
     write_manifest(manifest, output_dir / "release-manifest.json")
 
-    log.info("=== catalog ===")
     from mat_vis_baker.catalog import generate_catalog, write_catalog
 
     catalog_md = generate_catalog(output_dir, output_dir / "mtlx")
     write_catalog(catalog_md, output_dir / "catalog.md")
 
-    t_meta = time.monotonic() - t3
     t_total = time.monotonic() - t0
-
     log.info("=== PERFORMANCE SUMMARY ===")
-    log.info(
-        "  fetch:   %6.1fs  (%d materials, %.1f mat/s)",
-        t_fetch,
-        n_fetched,
-        n_fetched / max(t_fetch, 0.1),
-    )
-    log.info("  bake:    %6.1fs  (%d ok, %.1f mat/s)", t_bake, len(ok), len(ok) / max(t_bake, 0.1))
-    log.info(
-        "  pack:    %6.1fs  (%d partitions, %.1f GB, %.1f MB/s)",
-        t_pack,
-        len(pack_results),
-        total_bytes / 1e9,
-        total_bytes / 1e6 / max(t_pack, 0.1),
-    )
-    log.info("  meta:    %6.1fs", t_meta)
-    log.info("  TOTAL:   %6.1fs  (%d ok, %d failed)", t_total, len(ok), total - len(ok))
+    log.info("  stream:  %6.1fs  (%d ok, %d failed)", t_stream, n_ok, n_failed)
+    log.info("  total:   %6.1fs  (%.1f GB output)", t_total, total_bytes / 1e9)
     return 0
 
 

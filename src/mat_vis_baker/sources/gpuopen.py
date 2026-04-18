@@ -200,6 +200,7 @@ def fetch(
     output_dir: Path,
     *,
     limit: int | None = None,
+    offset: int = 0,
     session: requests.Session | None = None,
     mtlx_dir: Path | None = None,
 ) -> list[MaterialRecord]:
@@ -208,6 +209,8 @@ def fetch(
 
     s = session or requests.Session()
     packages = discover(session=s)
+    if offset:
+        packages = packages[offset:]
     if limit:
         packages = packages[:limit]
 
