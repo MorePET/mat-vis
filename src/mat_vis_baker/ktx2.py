@@ -42,8 +42,7 @@ from mat_vis_baker.parquet_writer import (
     CHANNEL_COLS,
     _SCHEMA,
     RowmapCollector,
-    build_rowmap_from_sidecar,
-    write_rowmap,
+    emit_rowmaps_for_bake,
 )
 
 log = logging.getLogger("mat-vis-baker.ktx2")
@@ -343,23 +342,40 @@ def derive_ktx2_from_release(
             t_derive,
         )
 
-        # Collect parquet paths
+        # ── generate rowmaps (sidecar — KTX2-safe) ──
+        # The sidecar collector recorded exact byte lengths for every KTX2
+        # payload written. build_rowmap_from_sidecar locates the payload
+        # start inside each column chunk by matching on the KTX2 magic and
+        # confirming the known length fits — no IEND scanning required.
+        #
+        # Iterate writers.keys() — every category for which a writer was
+        # actually opened. Previously iterated records_by_cat.keys() (only
+        # categories with at least one successful material); when ALL
+        # materials in a category failed transcode, the writer had been
+        # opened and closed with a header-only parquet but no rowmap was
+        # ever written for it, leaving a dangling file (#82 root cause).
+        # Going through emit_rowmaps_for_bake now routes every writer's
+        # parquet through the same consolidated path as __main__.py and
+        # derive_from_release.py.
         parquet_paths = [
             output_dir / f"mat-vis-{source}-{target_tier}-{cat}.parquet"
             for cat in sorted(writers.keys())
         ]
         all_parquet_paths.extend(parquet_paths)
 
-        # ── generate rowmaps (sidecar — KTX2-safe) ──
-        # The sidecar collector recorded exact byte lengths for every KTX2
-        # payload written. build_rowmap_from_sidecar locates the payload
-        # start inside each column chunk by matching on the KTX2 magic and
-        # confirming the known length fits — no IEND scanning required.
-        for category in sorted(records_by_cat.keys()):
-            pq_path = output_dir / f"mat-vis-{source}-{target_tier}-{category}.parquet"
-            collector = collectors.get(category, RowmapCollector())
-            rowmap = build_rowmap_from_sidecar(pq_path, collector, source, target_tier, tag)
-            rm_path = output_dir / f"{source}-{target_tier}-{category}-rowmap.json"
-            write_rowmap(rowmap, rm_path)
+        collectors_by_path = {
+            output_dir / f"mat-vis-{source}-{target_tier}-{cat}.parquet": collectors.get(
+                cat, RowmapCollector()
+            )
+            for cat in writers.keys()
+        }
+        emit_rowmaps_for_bake(
+            parquet_paths,
+            collectors_by_path,
+            source=source,
+            tier=target_tier,
+            release_tag=tag,
+            output_dir=output_dir,
+        )
 
     return all_parquet_paths

@@ -550,3 +550,74 @@ def write_rowmap(rowmap: dict, output_path: Path) -> Path:
     output_path.write_text(json.dumps(rowmap, indent=2) + "\n")
     log.info("wrote %s", output_path)
     return output_path
+
+
+def emit_rowmaps_for_bake(
+    parquet_paths: list[Path],
+    collectors_by_path: dict[Path, "RowmapCollector"],
+    *,
+    source: str,
+    tier: str,
+    release_tag: str,
+    output_dir: Path,
+) -> list[Path]:
+    """Emit a rowmap JSON for every parquet path produced by a bake.
+
+    The **authoritative** rowmap-emission path. Replaces three near-
+    duplicate loops that previously lived in ``__main__.py``, ``ktx2.py``,
+    and ``derive_from_release.py``. Two of those three iterated over a
+    per-material state dict (``records_by_cat.keys()``) instead of the
+    actual set of parquets written to disk — which meant an
+    "all-materials-failed-transcode" category produced a parquet shell
+    (headers only) with **no rowmap at all**. The legacy
+    ``regenerate-rowmaps`` path then found the empty parquet, emitted
+    ``{"materials": {}}``, and the release looked internally consistent
+    while actually being broken (#82).
+
+    The fix is shaped into the interface: this helper takes the list of
+    parquet paths as the source of truth. Call sites that used to key
+    collectors by category now build a path-keyed dict from their
+    ``writers`` / ``collectors`` state, iterating **``writers.keys()``**
+    — the set of categories for which a writer was actually opened —
+    rather than the per-successful-material dict.
+
+    A missing entry in ``collectors_by_path`` is tolerated: we fall back
+    to an empty ``RowmapCollector`` so ``build_rowmap_from_sidecar``
+    emits a legitimate ``{"materials": {}}`` rowmap for an empty parquet.
+    That is the correct shape for that genuinely-empty case — distinct
+    from the pre-fix silent-skip behavior.
+
+    Args:
+        parquet_paths: every parquet file produced by the bake. Skipped
+            if no longer on disk (already uploaded + unlinked by the
+            streaming path).
+        collectors_by_path: sidecar collectors keyed by parquet path.
+            Each collector records exact (material_id, channel) byte
+            lengths observed at write time.
+        source: source name (e.g. "ambientcg").
+        tier: tier name (e.g. "1k", "ktx2-1k").
+        release_tag: tag to stamp into the rowmap's ``release_tag``
+            field.
+        output_dir: directory where rowmap JSON files are written.
+
+    Returns:
+        The list of rowmap paths written (in the same order as
+        ``parquet_paths``, excluding any whose parquet was already
+        uploaded + deleted).
+    """
+    rowmap_paths: list[Path] = []
+    for pq_path in parquet_paths:
+        if not pq_path.exists():
+            # Parquet was uploaded + deleted by the streaming path.
+            # The rowmap was emitted at close time; nothing to do here.
+            continue
+        collector = collectors_by_path.get(pq_path, RowmapCollector())
+        rowmap = build_rowmap_from_sidecar(pq_path, collector, source, tier, release_tag)
+        # Rowmap filename mirrors the parquet filename:
+        #   mat-vis-<source>-<tier>-<cat>[-N].parquet
+        #   → <source>-<tier>-<cat>[-N]-rowmap.json
+        stem = pq_path.stem.replace(f"mat-vis-{source}-{tier}-", f"{source}-{tier}-")
+        rm_path = output_dir / f"{stem}-rowmap.json"
+        write_rowmap(rowmap, rm_path)
+        rowmap_paths.append(rm_path)
+    return rowmap_paths
