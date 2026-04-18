@@ -529,6 +529,53 @@ class TestClientPrefetch:
             assert data[:4] == b"\x89PNG", f"{ch} is not PNG"
 
 
+class TestReadmeExamplesRun:
+    """Item F regression: the README's advertised client.search call must
+    run as written. Previously shipped ``client.search("marble")`` — the
+    positional arg was accepted but ``marble`` isn't a canonical category,
+    so the example silently returned 0 results.
+    """
+
+    @patch("mat_vis_client.client._get_json")
+    def test_search_by_category_and_roughness_range(self, mock_get, mock_search_client):
+        # The new README example form — kwargs, canonical category, and
+        # a scalar range. Must run and return results.
+        mock_get.return_value = MOCK_INDEX_AMBIENTCG
+        results = mock_search_client.search(category="stone", roughness_range=(0.4, 0.9))
+        assert isinstance(results, list)
+        ids = {r["id"] for r in results}
+        assert "Rock064" in ids, f"stone search should find Rock064; got {ids}"
+
+
+class TestFetchTextureSafety:
+    """Guard range-read cap against malicious/corrupt rowmaps."""
+
+    @patch("mat_vis_client.client._get", side_effect=_mock_get)
+    def test_rejects_oversize_length(self, mock_http, mock_client):
+        from mat_vis_client import MatVisError
+        from mat_vis_client.client import DEFAULT_MAX_FETCH_BYTES
+
+        evil = {
+            "parquet_file": "x.parquet",
+            "materials": {"EVIL": {"color": {"offset": 0, "length": DEFAULT_MAX_FETCH_BYTES + 1}}},
+        }
+        with patch("mat_vis_client.client._get_json", return_value=evil):
+            with pytest.raises(MatVisError, match="safety cap"):
+                mock_client.fetch_texture("ambientcg", "EVIL", "color", "1k")
+
+    @patch("mat_vis_client.client._get", side_effect=_mock_get)
+    def test_rejects_invalid_length(self, mock_http, mock_client):
+        from mat_vis_client import MatVisError
+
+        bad = {
+            "parquet_file": "x.parquet",
+            "materials": {"BAD": {"color": {"offset": 0, "length": -1}}},
+        }
+        with patch("mat_vis_client.client._get_json", return_value=bad):
+            with pytest.raises(MatVisError, match="invalid rowmap"):
+                mock_client.fetch_texture("ambientcg", "BAD", "color", "1k")
+
+
 # ── Adapter helper tests ───────────────────────────────────────
 
 

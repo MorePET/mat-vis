@@ -41,7 +41,11 @@ GITHUB_RAW = f"https://raw.githubusercontent.com/{REPO}"
 LATEST_MANIFEST_URL = f"{GITHUB_RELEASES}/latest/download/release-manifest.json"
 PYPI_API = "https://pypi.org/pypi/mat-vis-client/json"
 DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" / "mat-vis"))
-USER_AGENT = "mat-vis-client/0.2 (Python)"
+# Version is kept in sync with clients/python/pyproject.toml by
+# scripts/sync-standalone-version.py (run via pre-commit). Do not
+# hand-edit — a drift test in tests/ fails CI if it disagrees.
+__version__ = "0.3.1"
+USER_AGENT = f"mat-vis-client-standalone/{__version__} (Python)"
 
 # Module-local logger. Library consumers configure their own handlers;
 # notices emitted via ``log.info(...)`` are silent by default (root
@@ -95,6 +99,13 @@ def _fmt_size(n: int) -> str:
 
 # Default soft cap: 5 GB (configurable via MAT_VIS_CACHE_MAX_SIZE).
 DEFAULT_CACHE_MAX_BYTES = _parse_size(os.environ.get("MAT_VIS_CACHE_MAX_SIZE", "5GB"))
+
+# Hard cap per range-read: the rowmap tells us how many bytes to pull for
+# one texture, but a compromised/corrupt rowmap could claim (e.g.) 10 GB
+# for a single PNG and drive the client OOM. Textures are capped in the
+# baker well below this — 500 MB is ~10× the largest legitimate 8k PNG.
+# Override with MAT_VIS_MAX_FETCH_SIZE if you really need more.
+DEFAULT_MAX_FETCH_BYTES = _parse_size(os.environ.get("MAT_VIS_MAX_FETCH_SIZE", "500MB"))
 
 # Previously a hardcoded frozenset of 10 names. The client doesn't need a
 # static enum — categories are discoverable at runtime from rowmap filenames
@@ -887,6 +898,20 @@ class MatVisClient:
         rng = mat[channel]
         offset = rng["offset"]
         length = rng["length"]
+
+        # Defend against malicious/corrupt rowmaps claiming huge reads.
+        # A bad rowmap could otherwise allocate gigabytes for one PNG
+        # and OOM the client; see 0.3.1 security review.
+        if not isinstance(length, int) or length <= 0:
+            raise MatVisError(
+                f"invalid rowmap entry for {source}/{material_id}/{channel}: length={length!r}"
+            )
+        if length > DEFAULT_MAX_FETCH_BYTES:
+            raise MatVisError(
+                f"rowmap claims {_fmt_size(length)} for {source}/{material_id}/{channel}, "
+                f"over the {_fmt_size(DEFAULT_MAX_FETCH_BYTES)} safety cap. "
+                "Raise MAT_VIS_MAX_FETCH_SIZE to override."
+            )
 
         # Find parquet URL (per-partition from merged rowmap)
         tier_data = self.manifest["tiers"][tier]

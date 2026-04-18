@@ -22,6 +22,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## mat-vis-client 0.3.1
+
+Hotfix release following the 0.3.0 post-release security + SSoT review.
+
+### Added
+
+- **`mat_vis_client.__version__`** — top-level version export, derived from installed package metadata (`importlib.metadata.version`). Same string drives the HTTP User-Agent and any user-side version comparisons.
+- **Range-read safety cap** (`DEFAULT_MAX_FETCH_BYTES`, 500 MB default) — `fetch_texture` now rejects rowmap entries claiming lengths above the cap or with non-positive lengths, defending against malicious/corrupt rowmaps driving the client OOM. Override with `MAT_VIS_MAX_FETCH_SIZE`.
+- **`tests/test_version_sync.py`** — CI fails if the standalone `__version__` literal drifts from `clients/python/pyproject.toml`.
+- **`tests/test_standalone_drift.py`** — AST-based inventory comparison between packaged `client.py` and `mat_vis_client_standalone.py`; missing classes or public methods fail CI.
+- **`scripts/sync-standalone-version.py`** — pre-commit hook rewrites the standalone's version literal from `pyproject.toml`.
+
+### Changed
+
+- **`USER_AGENT` is now derived from pyproject.toml** via `importlib.metadata` — no more manually-bumped string literal. Previously shipped wheels stamped `mat-vis-client/0.2 (Python)` in every HTTP request regardless of the actual installed version.
+- **`BAKER_VERSION`** now reads from installed package metadata (baker pyproject bumped from `0.0.0` to `0.1.0`). Previously the baker stamped `0.1.0` into parquet metadata while claiming `0.0.0` in pip metadata.
+
+### Security
+
+- **jq-injection fix in `verify_upload_size`** — asset name used to be f-stringed into a `gh release view --jq` filter. Now fetches the asset list as JSON and filters in Python. Asset names are currently repo-controlled but filenames have crossed shell contexts before (see #61), so we treat them as untrusted on principle.
+- **Resume marker path containment** — `progress_path()` resolves both sides and rejects paths that would escape the output directory. Defense in depth; filename is a constant today.
+
+### Fixed (other clients)
+
+- **Rust client**: `User-Agent` now derived from `Cargo.toml` via `concat!(..., env!("CARGO_PKG_VERSION"), ...)` — was a hardcoded `0.1` string regardless of crate version.
+- **README search example** — `client.search("marble")` replaced with `client.search(category="stone", roughness_range=...)` (kwargs required; "marble" is a keyword, not a canonical category).
+
 ## mat-vis-client 0.3.0
 
 ### Added

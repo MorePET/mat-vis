@@ -97,8 +97,8 @@ with open("rock064_color.png", "wb") as f:
 for mat_id in client.materials("ambientcg", "1k"):
     print(mat_id)
 
-# search across all sources
-results = client.search("marble")
+# search across all sources (kwargs — category + optional scalar ranges)
+results = client.search(category="stone", roughness_range=(0.4, 0.9))
 
 # MaterialX export — dotted API
 # Synthesized (always works: UsdPreviewSurface wrapper over our PNGs)

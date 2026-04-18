@@ -161,17 +161,12 @@ def verify_upload_size(
 
     Returns True on match, False otherwise. Logs a warning on mismatch.
     """
+    # Fetch full asset list as JSON — filter in Python to avoid any chance
+    # of jq-expression injection via asset_name. Asset names here are
+    # repo-controlled today, but filenames have leaked into shell contexts
+    # before (see #61) so we treat them as untrusted on principle.
     result = _run(
-        [
-            "gh",
-            "release",
-            "view",
-            release_tag,
-            "--json",
-            "assets",
-            "--jq",
-            f'.assets[] | select(.name == "{asset_name}") | .size',
-        ],
+        ["gh", "release", "view", release_tag, "--json", "assets"],
         capture_output=True,
         text=True,
         check=False,
@@ -184,15 +179,25 @@ def verify_upload_size(
         )
         return False
 
-    sizes = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if not sizes:
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as e:
+        log.warning("verify_upload_size: bad JSON from gh for %s: %s", asset_name, e)
+        return False
+
+    assets = payload.get("assets") or []
+    matching = [a for a in assets if a.get("name") == asset_name]
+    if not matching:
         log.warning("verify_upload_size: asset %s not found on release", asset_name)
         return False
 
-    try:
-        remote_size = int(sizes[0])
-    except ValueError:
-        log.warning("verify_upload_size: unparsable size %r for %s", sizes[0], asset_name)
+    remote_size = matching[0].get("size")
+    if not isinstance(remote_size, int):
+        log.warning(
+            "verify_upload_size: unexpected size value for %s: %r",
+            asset_name,
+            remote_size,
+        )
         return False
 
     if remote_size != expected_size:
@@ -244,7 +249,20 @@ PROGRESS_FILENAME = ".bake-progress.json"
 
 
 def progress_path(output_dir: Path) -> Path:
-    return output_dir / PROGRESS_FILENAME
+    """Return the resolved path to the progress marker inside ``output_dir``.
+
+    Defense in depth: resolve both sides and verify the candidate stays
+    under the root. The filename is a fixed constant today, but a
+    symlink-tampered ``output_dir`` could still redirect writes outside
+    the intended workspace — this catches that.
+    """
+    root = Path(output_dir).resolve()
+    candidate = (root / PROGRESS_FILENAME).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as e:
+        raise UploadError(f"progress_path: refusing {candidate} — escapes {root}") from e
+    return candidate
 
 
 def save_progress(

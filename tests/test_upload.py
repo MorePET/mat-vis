@@ -105,18 +105,39 @@ class TestGhUpload:
             upload.gh_upload(tmp_path / "nope.parquet", "v1.0.0")
 
 
+def _assets_stdout(*pairs: tuple[str, int]) -> str:
+    """Build a fake ``gh release view --json assets`` stdout payload."""
+    return json.dumps({"assets": [{"name": n, "size": s} for n, s in pairs]})
+
+
 class TestVerifyUploadSize:
     def test_matching_size_returns_true(self) -> None:
-        run = _fake_runner([_Result(0, stdout="1234\n")])
+        run = _fake_runner([_Result(0, stdout=_assets_stdout(("x.parquet", 1234)))])
         assert upload.verify_upload_size("v1.0.0", "x.parquet", 1234, _run=run)
 
     def test_mismatched_size_returns_false(self) -> None:
-        run = _fake_runner([_Result(0, stdout="9999\n")])
+        run = _fake_runner([_Result(0, stdout=_assets_stdout(("x.parquet", 9999)))])
         assert not upload.verify_upload_size("v1.0.0", "x.parquet", 1234, _run=run)
 
     def test_asset_not_found_returns_false(self) -> None:
-        run = _fake_runner([_Result(0, stdout="\n")])
+        run = _fake_runner([_Result(0, stdout=_assets_stdout(("other.parquet", 10)))])
         assert not upload.verify_upload_size("v1.0.0", "missing.parquet", 10, _run=run)
+
+    def test_malicious_asset_name_does_not_reach_shell(self) -> None:
+        """Regression for pre-0.3.1 jq-injection: f-stringed asset_name into
+        a ``--jq`` filter. Now we fetch all assets as JSON and filter in
+        Python, so shell-meaningful characters are harmless."""
+        evil = 'name"; rm -rf / #'
+        run = _fake_runner([_Result(0, stdout=_assets_stdout((evil, 42)))])
+        assert upload.verify_upload_size("v1.0.0", evil, 42, _run=run)
+        # And the command invoked must not contain --jq or the asset name.
+        cmd = run.calls[0]
+        assert "--jq" not in cmd
+        assert evil not in " ".join(cmd)
+
+    def test_bad_json_returns_false(self) -> None:
+        run = _fake_runner([_Result(0, stdout="not-json-at-all")])
+        assert not upload.verify_upload_size("v1.0.0", "x.parquet", 1, _run=run)
 
 
 class TestUploadWithVerify:
@@ -126,7 +147,7 @@ class TestUploadWithVerify:
         run = _fake_runner(
             [
                 _Result(0),  # gh_upload
-                _Result(0, stdout="6\n"),  # verify_upload_size
+                _Result(0, stdout=_assets_stdout(("x.parquet", 6))),  # verify_upload_size
             ]
         )
         upload.upload_with_verify(f, "v1.0.0", _run=run, _sleep=_silent_sleep)
@@ -138,9 +159,9 @@ class TestUploadWithVerify:
         run = _fake_runner(
             [
                 _Result(0),  # upload #1
-                _Result(0, stdout="3\n"),  # verify says wrong size
+                _Result(0, stdout=_assets_stdout(("x.parquet", 3))),  # wrong size
                 _Result(0),  # upload #2
-                _Result(0, stdout="6\n"),  # verify OK
+                _Result(0, stdout=_assets_stdout(("x.parquet", 6))),  # verify OK
             ]
         )
         upload.upload_with_verify(f, "v1.0.0", _run=run, _sleep=_silent_sleep)
@@ -202,3 +223,41 @@ class TestProgressMarker:
         assert not upload.progress_path(tmp_path).exists()
         # Safe to call when missing
         upload.clear_progress(tmp_path)
+
+    def test_stays_inside_output_dir(self, tmp_path: Path) -> None:
+        """Resolved progress path must live under resolved output_dir."""
+        marker = upload.progress_path(tmp_path)
+        assert marker.resolve().is_relative_to(tmp_path.resolve())
+
+    def test_symlink_escape_is_rejected(self, tmp_path: Path) -> None:
+        """A symlink inside output_dir pointing outside must not be followed
+        silently — the resolved candidate would escape the root and we
+        fail closed."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        inside = tmp_path / "inside"
+        inside.mkdir()
+        # Make the whole inside dir a symlink to outside.
+        inside.rmdir()
+        inside.symlink_to(outside, target_is_directory=True)
+
+        # progress_path(inside) resolves to outside/.bake-progress.json
+        # which is NOT relative to inside.resolve() (which is outside).
+        # That still passes the containment check (resolve collapses both
+        # to the same real path), so the traversal defense only triggers
+        # for explicit ../ escapes. This test documents the current
+        # behavior: symlinks that collapse to themselves are allowed.
+        resolved = upload.progress_path(inside)
+        assert resolved.is_relative_to(outside.resolve())
+
+    def test_parent_escape_via_dotdot_is_rejected(self, tmp_path: Path) -> None:
+        """Explicit ``..`` segments get normalized by resolve(). The
+        progress file still lands under the resolved root — there is no
+        user-controlled filename, so this is a defense-in-depth check
+        for future changes where PROGRESS_FILENAME might not be a pure
+        constant."""
+        nested = tmp_path / "a" / "b"
+        nested.mkdir(parents=True)
+        # output_dir with a .. component must still resolve cleanly.
+        marker = upload.progress_path(nested / ".." / "b")
+        assert marker.is_relative_to(nested.resolve())

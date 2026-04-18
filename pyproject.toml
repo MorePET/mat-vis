@@ -1,6 +1,6 @@
 [project]
 name = "mat-vis"
-version = "0.0.0"
+version = "0.1.0"
 description = "PBR texture mirror — baker + data pipeline"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -33,6 +33,7 @@ from mat_vis_client.client import (
     MatVisError,
     MtlxSource,
     RateLimitError,
+    __version__,
     _in_range,
 )
 
@@ -41,6 +42,7 @@ __all__ = [
     "MatVisError",
     "MtlxSource",
     "RateLimitError",
+    "__version__",
     "_in_range",
     "search",
     "prefetch",
