@@ -37,7 +37,8 @@ TINY_PNG = (
 
 
 MOCK_MANIFEST = {
-    "version": 1,
+    "schema_version": 1,
+    "version": 1,  # retained for tests asserting on the legacy field
     "release_tag": "v2026.04.0",
     "tiers": {
         "1k": {
@@ -176,7 +177,7 @@ class TestInRange:
 class TestClientManifest:
     def test_manifest_loads_from_cache(self, mock_client):
         m = mock_client.manifest
-        assert m["version"] == 1
+        assert m["schema_version"] == 1
         assert "tiers" in m
 
     def test_tiers(self, mock_client):

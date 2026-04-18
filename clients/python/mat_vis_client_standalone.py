@@ -27,6 +27,7 @@ Usage as CLI:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -42,13 +43,24 @@ PYPI_API = "https://pypi.org/pypi/mat-vis-client/json"
 DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" / "mat-vis"))
 USER_AGENT = "mat-vis-client/0.2 (Python)"
 
-# Update check: cache TTL (24h) + opt-out env var
+# Module-local logger. Library consumers configure their own handlers;
+# notices emitted via ``log.info(...)`` are silent by default (root
+# logger at WARNING), which is the behavior we want for a library.
+log = logging.getLogger("mat-vis-client")
+
+
+def _env_flag(name: str) -> bool:
+    """Return True if the named env var is set to a truthy value."""
+    return os.environ.get(name, "").lower() in ("1", "true", "yes")
+
+
+# Update check: cache TTL (24h) + opt-out / force env vars.
+# Precedence: MAT_VIS_NO_UPDATE_CHECK (opt-out) wins over
+# MAT_VIS_UPDATE_CHECK (force-on). Default behavior is "only warn in
+# interactive terminals (TTY stderr)" — see ``_should_check_updates``.
 UPDATE_CHECK_TTL_SECONDS = 24 * 3600
-UPDATE_CHECK_DISABLED = os.environ.get("MAT_VIS_NO_UPDATE_CHECK", "").lower() in (
-    "1",
-    "true",
-    "yes",
-)
+UPDATE_CHECK_DISABLED = _env_flag("MAT_VIS_NO_UPDATE_CHECK")
+UPDATE_CHECK_FORCED = _env_flag("MAT_VIS_UPDATE_CHECK")
 
 
 def _parse_size(s: str | int) -> int:
@@ -370,15 +382,47 @@ class MatVisClient:
             "newer_available": bool(latest and current and latest != current),
         }
 
-    def _maybe_warn_updates(self) -> None:
-        """Print a one-line notice to stderr if newer data or client exists.
+    @staticmethod
+    def _should_check_updates() -> bool:
+        """Decide whether to emit an update-available notice.
 
-        Runs once per process. Opt out with MAT_VIS_NO_UPDATE_CHECK=1.
-        Network failures are silent — never block usage.
+        Precedence (first match wins):
+
+        * ``MAT_VIS_NO_UPDATE_CHECK=1`` → never check (back-compat opt-out).
+        * ``MAT_VIS_UPDATE_CHECK=1`` → always check (force-on for CI debug).
+        * Default → check only when stderr is a TTY. This is the
+          pip / uv pattern: interactive terminals get notices, scripted
+          pipelines and CI don't get noisy output bleeding into their
+          stderr stream.
         """
-        if UPDATE_CHECK_DISABLED or getattr(self, "_update_warned", False):
+        if UPDATE_CHECK_DISABLED:
+            return False
+        if UPDATE_CHECK_FORCED:
+            return True
+        try:
+            return bool(sys.stderr.isatty())
+        except (AttributeError, ValueError):
+            # Unusual stderr (closed, wrapped by a non-file-like object).
+            # Be conservative: skip the check.
+            return False
+
+    def _maybe_warn_updates(self) -> None:
+        """Emit a one-line INFO log record if newer data or client exists.
+
+        Runs once per process. Uses ``logging.getLogger("mat-vis-client")``
+        so library consumers who want notices configure their logger, and
+        those who don't aren't spammed — matches numpy/requests/polars
+        etiquette (no stderr writes on import).
+
+        Default gating: only emit when stderr is a TTY. Override with
+        ``MAT_VIS_UPDATE_CHECK=1`` (force-on) or disable entirely with
+        ``MAT_VIS_NO_UPDATE_CHECK=1``. Network failures are silent.
+        """
+        if getattr(self, "_update_warned", False):
             return
         self._update_warned = True
+        if not self._should_check_updates():
+            return
         try:
             result = self.check_updates()
         except Exception:
@@ -387,28 +431,40 @@ class MatVisClient:
         data = result["data"]
         client = result["client"]
         if data["newer_available"]:
-            print(
-                f"mat-vis: newer data release available "
-                f"({data['current']} → {data['latest']}). "
-                f"Use MatVisClient() for latest or set tag={data['latest']!r}.",
-                file=sys.stderr,
+            log.info(
+                "mat-vis: newer data release available (%s -> %s). "
+                "Use MatVisClient() for latest or set tag=%r.",
+                data["current"],
+                data["latest"],
+                data["latest"],
             )
         if client["newer_available"]:
-            print(
-                f"mat-vis-client: newer version available "
-                f"({client['current']} → {client['latest']}). "
-                f"Upgrade: pip install -U mat-vis-client",
-                file=sys.stderr,
+            log.info(
+                "mat-vis-client: newer version available (%s -> %s). "
+                "Upgrade: pip install -U mat-vis-client",
+                client["current"],
+                client["latest"],
             )
 
     @staticmethod
     def _check_schema_version(manifest: dict) -> None:
-        """Refuse to operate on manifests with incompatible schema.
+        """Refuse to operate on manifests with missing or incompatible schema.
 
-        Accepts legacy 'version' field (older manifests used 'version: 1')
-        and the canonical 'schema_version' field (v2+).
+        Requires the canonical ``schema_version`` field. A missing field
+        almost always means a stale cached manifest from before the
+        schema-version contract existed — surface a clear recovery path
+        (``mat-vis-client cache clear``) rather than silently guessing.
         """
-        schema = manifest.get("schema_version", manifest.get("version", 1))
+        if "schema_version" not in manifest:
+            raise RuntimeError(
+                "Manifest is missing 'schema_version'. This usually means a "
+                "stale cached manifest from an older release. Clear the "
+                "cache and retry: `mat-vis-client cache clear` (or delete "
+                "~/.cache/mat-vis/.manifest.json). If the problem persists, "
+                "upgrade the data release or the client: "
+                "`pip install -U mat-vis-client`."
+            )
+        schema = manifest["schema_version"]
         if schema not in COMPATIBLE_SCHEMA_VERSIONS:
             raise RuntimeError(
                 f"mat-vis-client does not support manifest schema_version={schema}. "

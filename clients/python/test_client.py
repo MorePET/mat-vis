@@ -50,7 +50,8 @@ def _mock_get(*args, **kwargs):
 
 
 MOCK_MANIFEST = {
-    "version": 1,
+    "schema_version": 1,
+    "version": 1,  # retained for tests asserting on the legacy field
     "release_tag": "v2026.04.0",
     "tiers": {
         "1k": {
@@ -189,7 +190,7 @@ class TestInRange:
 class TestClientManifest:
     def test_manifest_loads_from_cache(self, mock_client):
         m = mock_client.manifest
-        assert m["version"] == 1
+        assert m["schema_version"] == 1
         assert "tiers" in m
 
     def test_tiers(self, mock_client):
@@ -199,6 +200,187 @@ class TestClientManifest:
         sources = mock_client.sources("1k")
         assert "ambientcg" in sources
         assert "polyhaven" in sources
+
+
+# ── #64 update-check DX: logging + TTY gating ──────────────────
+
+
+def _fresh_client(cache_dir: Path) -> MatVisClient:
+    """Client with MOCK_MANIFEST pre-cached but the update-check flag
+    NOT suppressed — lets tests exercise the TTY / env-var gating path.
+    """
+    client = MatVisClient(tag="v2026.04.0", cache_dir=cache_dir)
+    (cache_dir / ".manifest.json").write_text(json.dumps(MOCK_MANIFEST))
+    return client
+
+
+class TestUpdateCheckLogging:
+    """#64 — library-friendly update notices via logging, not stderr."""
+
+    def test_no_stderr_on_non_tty(self, capsys):
+        """Library import (non-TTY stderr) must not write to stderr."""
+        with tempfile.TemporaryDirectory() as tmp:
+            client = _fresh_client(Path(tmp))
+            with (
+                patch("sys.stderr.isatty", return_value=False),
+                patch.dict(os.environ, {}, clear=False),
+            ):
+                # Make sure neither env var is forcing behavior.
+                os.environ.pop("MAT_VIS_NO_UPDATE_CHECK", None)
+                os.environ.pop("MAT_VIS_UPDATE_CHECK", None)
+                # Re-read module constants since they're captured at import.
+                import mat_vis_client.client as mc
+
+                with (
+                    patch.object(mc, "UPDATE_CHECK_DISABLED", False),
+                    patch.object(mc, "UPDATE_CHECK_FORCED", False),
+                    patch.object(
+                        client,
+                        "check_updates",
+                        return_value={
+                            "data": {
+                                "current": "v2026.04.0",
+                                "latest": "v2026.05.0",
+                                "newer_available": True,
+                            },
+                            "client": {
+                                "current": "0.2.0",
+                                "latest": "0.2.1",
+                                "newer_available": True,
+                            },
+                        },
+                    ),
+                ):
+                    _ = client.manifest  # triggers _maybe_warn_updates
+
+            captured = capsys.readouterr()
+            assert captured.err == "", f"Expected no stderr output, got: {captured.err!r}"
+
+    def test_log_info_on_tty(self, caplog):
+        """TTY stderr + newer available → one INFO record per kind, via the
+        ``mat-vis-client`` logger. No stderr bleeding.
+        """
+        import mat_vis_client.client as mc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = _fresh_client(Path(tmp))
+            with (
+                patch("sys.stderr.isatty", return_value=True),
+                patch.object(mc, "UPDATE_CHECK_DISABLED", False),
+                patch.object(mc, "UPDATE_CHECK_FORCED", False),
+                patch.object(
+                    client,
+                    "check_updates",
+                    return_value={
+                        "data": {
+                            "current": "v2026.04.0",
+                            "latest": "v2026.05.0",
+                            "newer_available": True,
+                        },
+                        "client": {
+                            "current": "0.2.0",
+                            "latest": "0.2.1",
+                            "newer_available": True,
+                        },
+                    },
+                ),
+                caplog.at_level("INFO", logger="mat-vis-client"),
+            ):
+                _ = client.manifest
+
+            messages = [r.getMessage() for r in caplog.records if r.name == "mat-vis-client"]
+            assert any("newer data release" in m for m in messages), messages
+            assert any("newer version" in m for m in messages), messages
+
+    def test_force_check_env_var_overrides_non_tty(self, caplog):
+        """``MAT_VIS_UPDATE_CHECK=1`` forces the check even without a TTY."""
+        import mat_vis_client.client as mc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = _fresh_client(Path(tmp))
+            with (
+                patch("sys.stderr.isatty", return_value=False),
+                patch.object(mc, "UPDATE_CHECK_DISABLED", False),
+                patch.object(mc, "UPDATE_CHECK_FORCED", True),
+                patch.object(
+                    client,
+                    "check_updates",
+                    return_value={
+                        "data": {
+                            "current": "v2026.04.0",
+                            "latest": "v2026.05.0",
+                            "newer_available": True,
+                        },
+                        "client": {
+                            "current": None,
+                            "latest": None,
+                            "newer_available": False,
+                        },
+                    },
+                ),
+                caplog.at_level("INFO", logger="mat-vis-client"),
+            ):
+                _ = client.manifest
+
+            messages = [r.getMessage() for r in caplog.records if r.name == "mat-vis-client"]
+            assert any("newer data release" in m for m in messages), messages
+
+    def test_opt_out_env_var_wins_over_force(self, caplog, capsys):
+        """``MAT_VIS_NO_UPDATE_CHECK=1`` takes precedence over everything."""
+        import mat_vis_client.client as mc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = _fresh_client(Path(tmp))
+            with (
+                patch("sys.stderr.isatty", return_value=True),
+                patch.object(mc, "UPDATE_CHECK_DISABLED", True),
+                patch.object(mc, "UPDATE_CHECK_FORCED", True),
+                patch.object(client, "check_updates") as mock_chk,
+                caplog.at_level("INFO", logger="mat-vis-client"),
+            ):
+                _ = client.manifest
+                # We never even call check_updates when disabled.
+                assert mock_chk.call_count == 0
+
+            assert [r for r in caplog.records if r.name == "mat-vis-client"] == []
+            assert capsys.readouterr().err == ""
+
+
+# ── #69 schema_version strictness ──────────────────────────────
+
+
+class TestSchemaVersionStrict:
+    """#69 — client requires ``schema_version``; no legacy fallback."""
+
+    def test_rejects_manifest_without_schema_version(self):
+        """A manifest with only ``version: 1`` raises RuntimeError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+            legacy = {k: v for k, v in MOCK_MANIFEST.items() if k != "schema_version"}
+            assert "schema_version" not in legacy
+            (Path(tmp) / ".manifest.json").write_text(json.dumps(legacy))
+            with pytest.raises(RuntimeError, match="schema_version"):
+                _ = client.manifest
+
+    def test_error_message_mentions_cache_clear(self):
+        """Recovery path is surfaced in the error message."""
+        with tempfile.TemporaryDirectory() as tmp:
+            client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+            (Path(tmp) / ".manifest.json").write_text(json.dumps({"version": 1}))
+            with pytest.raises(RuntimeError) as excinfo:
+                _ = client.manifest
+            msg = str(excinfo.value)
+            assert "cache clear" in msg
+            assert ".manifest.json" in msg
+
+    def test_rejects_incompatible_schema_version(self):
+        """A manifest with a future ``schema_version`` still raises."""
+        with tempfile.TemporaryDirectory() as tmp:
+            client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+            future = {**MOCK_MANIFEST, "schema_version": 99}
+            (Path(tmp) / ".manifest.json").write_text(json.dumps(future))
+            with pytest.raises(RuntimeError, match="does not support"):
+                _ = client.manifest
 
 
 class TestClientRowmap:
