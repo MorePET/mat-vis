@@ -408,6 +408,10 @@ class MatVisClient:
         self._manifest: dict | None = None
         self._rowmaps: dict[str, dict] = {}
         self._indexes: dict[str, list[dict]] = {}
+        # Cached alternate clients keyed by tag (populated by .at()).
+        # Each shares this instance's cache_dir + cache flag so all tag
+        # scopes resolve under one root.
+        self._alt_clients: dict[str, MatVisClient] = {}
         # In-memory cache of resolved redirect URLs (github.com -> signed CDN).
         # GitHub's signed URLs expire ~5 min; we cache for 4 min to be safe.
         # Avoids hitting the rate-limited github.com redirect on every
@@ -433,6 +437,26 @@ class MatVisClient:
         (or, more typically, handled by the update-check TTL).
         """
         return self._cache_dir / (self._tag or "latest")
+
+    def at(self, tag: str) -> "MatVisClient":
+        """Return a client pinned to ``tag``, sharing this one's cache.
+
+        Cheap lazy alternate: reuses the parent's ``cache_dir`` and
+        ``cache`` flag so every tag lives under a common root and the
+        tag-scoped cache paths stay coherent. Subclients are memoized,
+        so ``client.at("v1")`` twice returns the same instance.
+
+        Used internally to implement per-operation ``tag=`` kwargs:
+        ``client.fetch_texture(..., tag="v1")`` delegates to
+        ``client.at("v1").fetch_texture(...)``.
+        """
+        if tag == self._tag:
+            return self
+        if tag not in self._alt_clients:
+            self._alt_clients[tag] = MatVisClient(
+                cache_dir=self._cache_dir, tag=tag, cache=self._cache
+            )
+        return self._alt_clients[tag]
 
     # ── cache-aware I/O helpers (single source of gating) ──────────
 
@@ -776,6 +800,7 @@ class MatVisClient:
         metalness_range: tuple[float, float] | None = None,
         source: str | None = None,
         tier: str = "1k",
+        tag: str | None = None,
     ) -> list[dict]:
         """Search materials by category and scalar ranges.
 
@@ -789,7 +814,16 @@ class MatVisClient:
             source: Limit search to one source. If None, searches all
                     sources available for the given tier.
             tier: Only return materials that have this tier available.
+            tag: Optional release tag override (see .at()).
         """
+        if tag is not None and tag != self._tag:
+            return self.at(tag).search(
+                category,
+                roughness_range=roughness_range,
+                metalness_range=metalness_range,
+                source=source,
+                tier=tier,
+            )
         if category:
             valid = self.categories()  # discovered from manifest
             if valid and category not in valid:
@@ -826,11 +860,15 @@ class MatVisClient:
         source: str,
         material_id: str,
         tier: str = "1k",
+        *,
+        tag: str | None = None,
     ) -> dict[str, bytes]:
         """Fetch all texture channels for a material.
 
         Returns a dict mapping channel name to PNG bytes.
         """
+        if tag is not None and tag != self._tag:
+            return self.at(tag).fetch_all_textures(source, material_id, tier)
         chs = self.channels(source, material_id, tier)
         return {ch: self.fetch_texture(source, material_id, ch, tier) for ch in chs}
 
@@ -840,6 +878,7 @@ class MatVisClient:
         tier: str = "1k",
         *,
         on_progress: callable | None = None,
+        tag: str | None = None,
     ) -> int:
         """Bulk download all materials for a source + tier to cache.
 
@@ -847,9 +886,12 @@ class MatVisClient:
             source: Source name (e.g. "ambientcg").
             tier: Resolution tier (default "1k").
             on_progress: Optional callback(material_id, index, total).
+            tag: Optional release tag override (see .at()).
 
         Returns the number of materials fetched.
         """
+        if tag is not None and tag != self._tag:
+            return self.at(tag).prefetch(source, tier, on_progress=on_progress)
         mat_ids = self.materials(source, tier)
         total = len(mat_ids)
 
@@ -886,7 +928,14 @@ class MatVisClient:
 
     # ── MaterialX API (dotted) ─────────────────────────────────
 
-    def mtlx(self, source: str, material_id: str, tier: str = "1k") -> MtlxSource:
+    def mtlx(
+        self,
+        source: str,
+        material_id: str,
+        tier: str = "1k",
+        *,
+        tag: str | None = None,
+    ) -> MtlxSource:
         """Get a lazy :class:`MtlxSource` for a material.
 
         Use ``.xml`` for the document string, ``.export(path)`` to write
@@ -894,8 +943,11 @@ class MatVisClient:
         if not available for this source).
 
         Creation is free — no network IO happens until ``.xml`` or
-        ``.export(...)`` is called.
+        ``.export(...)`` is called. Pass ``tag=`` to scope the source to
+        a specific release (see .at()).
         """
+        if tag is not None and tag != self._tag:
+            return self.at(tag).mtlx(source, material_id, tier)
         return MtlxSource(self, source, material_id, tier, is_original=False)
 
     def _scalars_for(self, source: str, material_id: str) -> dict:
@@ -1049,13 +1101,20 @@ class MatVisClient:
         material_id: str,
         channel: str,
         tier: str = "1k",
+        *,
+        tag: str | None = None,
     ) -> bytes:
         """Fetch a single texture PNG via HTTP range read.
 
         Returns raw PNG bytes. Caches locally under the active tag scope
         (so releases don't collide). Pass ``cache=False`` at client
         construction to opt out entirely.
+
+        Pass ``tag="v..."`` to fetch from a specific release without
+        reinstantiating the client (hf-hub ``revision=`` pattern).
         """
+        if tag is not None and tag != self._tag:
+            return self.at(tag).fetch_texture(source, material_id, channel, tier)
         # Check cache first (tag-scoped)
         cache_path = self._cache_scope / source / tier / material_id / f"{channel}.png"
         cached = self._cache_read_bytes(cache_path)
