@@ -59,7 +59,7 @@ def cmd_all(args: argparse.Namespace) -> int:
     from mat_vis_baker.bake import bake_material
     from mat_vis_baker.common import BAKER_VERSION, CANONICAL_CHANNELS, hash_textures
     from mat_vis_baker.index_builder import build_index, write_index
-    from mat_vis_baker.parquet_writer import (
+    from mat_vis_baker.parquet_writer import (  # noqa: F401
         CHANNEL_COLS,
         _SCHEMA,
         generate_rowmap_from_parquet,
@@ -96,7 +96,10 @@ def cmd_all(args: argparse.Namespace) -> int:
     }
     use_dictionary = {col: col not in CHANNEL_COLS for col in [f.name for f in _SCHEMA]}
 
+    # Per-category state: writer + chunk number + bytes in current chunk
     writers: dict[str, pq.ParquetWriter] = {}
+    chunk_nums: dict[str, int] = {}
+    finalized_paths: list[Path] = []  # closed parquet files (for rowmap pass)
     all_records: list = []
     n_ok = 0
     n_failed = 0
@@ -105,13 +108,70 @@ def cmd_all(args: argparse.Namespace) -> int:
     user_limit = args.limit  # total cap if set
     fetched_so_far = 0
 
+    # Max bytes per parquet partition before splitting (GitHub asset limit is 2 GB).
+    MAX_PARTITION_BYTES = 1_800_000_000
+
+    # Optional upload callback — when a chunk closes, upload it + delete locally.
+    upload_release_tag = args.release_tag if getattr(args, "upload_chunks", False) else None
+
+    def _partition_path(cat: str, chunk: int) -> Path:
+        # First chunk is unnumbered for backward compat; subsequent chunks get -N
+        if chunk == 1:
+            return output_dir / f"mat-vis-{source}-{tier}-{cat}.parquet"
+        return output_dir / f"mat-vis-{source}-{tier}-{cat}-{chunk}.parquet"
+
+    def _open_writer(cat: str, chunk: int) -> pq.ParquetWriter:
+        pq_path = _partition_path(cat, chunk)
+        return pq.ParquetWriter(
+            pq_path, _SCHEMA, compression=compression, use_dictionary=use_dictionary
+        )
+
+    def _close_and_maybe_upload(cat: str) -> None:
+        """Close current writer for cat, optionally upload+delete the parquet."""
+        if cat not in writers:
+            return
+        writers[cat].close()
+        del writers[cat]
+        chunk = chunk_nums.get(cat, 1)
+        pq_path = _partition_path(cat, chunk)
+        finalized_paths.append(pq_path)
+        log.info(
+            "closed partition %s (%.1f MB)",
+            pq_path.name,
+            pq_path.stat().st_size / 1e6,
+        )
+        if upload_release_tag:
+            # Upload the parquet to release immediately, then delete to free disk
+            import subprocess
+
+            subprocess.run(
+                ["gh", "release", "upload", upload_release_tag, str(pq_path), "--clobber"],
+                check=False,
+            )
+            # Generate rowmap before deleting
+            from mat_vis_baker.parquet_writer import generate_rowmap_from_parquet
+
+            rowmap = generate_rowmap_from_parquet(pq_path, source, tier, upload_release_tag)
+            rm_path = (
+                output_dir
+                / f"{pq_path.stem.replace(f'mat-vis-{source}-{tier}-', f'{source}-{tier}-')}-rowmap.json"
+            )
+            write_rowmap(rowmap, rm_path)
+            subprocess.run(
+                ["gh", "release", "upload", upload_release_tag, str(rm_path), "--clobber"],
+                check=False,
+            )
+            pq_path.unlink(missing_ok=True)
+            log.info("uploaded + deleted local %s, freed disk", pq_path.name)
+
     log.info(
-        "=== streaming bake: %s %s, batch=%d, offset=%d, limit=%s ===",
+        "=== streaming bake: %s %s, batch=%d, offset=%d, limit=%s, max_partition=%.1f GB ===",
         source,
         tier,
         BATCH_SIZE,
         offset,
         user_limit if user_limit else "all",
+        MAX_PARTITION_BYTES / 1e9,
     )
 
     try:
@@ -139,18 +199,18 @@ def cmd_all(args: argparse.Namespace) -> int:
                     if rec.status == "ok":
                         hash_textures(rec)
 
-            # Pack: append each ok record to its category writer (lazy open)
+            # Pack: append each ok record to its category writer (lazy open + chunk-split)
             for rec in batch:
                 if rec.status != "ok":
                     n_failed += 1
                     continue
 
                 cat = rec.category
+
+                # Open writer if needed (first material in this category)
                 if cat not in writers:
-                    pq_path = output_dir / f"mat-vis-{source}-{tier}-{cat}.parquet"
-                    writers[cat] = pq.ParquetWriter(
-                        pq_path, _SCHEMA, compression=compression, use_dictionary=use_dictionary
-                    )
+                    chunk_nums.setdefault(cat, 1)
+                    writers[cat] = _open_writer(cat, chunk_nums[cat])
 
                 row = {
                     "id": [rec.id],
@@ -170,6 +230,18 @@ def cmd_all(args: argparse.Namespace) -> int:
                 writers[cat].write_table(table)
                 del row, table
                 n_ok += 1
+
+                # Check partition size — split if over limit
+                pq_path = _partition_path(cat, chunk_nums[cat])
+                if pq_path.exists() and pq_path.stat().st_size >= MAX_PARTITION_BYTES:
+                    log.info(
+                        "partition %s reached %.1f GB, rotating",
+                        pq_path.name,
+                        pq_path.stat().st_size / 1e9,
+                    )
+                    _close_and_maybe_upload(cat)
+                    chunk_nums[cat] += 1
+                    writers[cat] = _open_writer(cat, chunk_nums[cat])
 
             all_records.extend(batch)
             fetched_so_far += len(batch)
@@ -202,8 +274,9 @@ def cmd_all(args: argparse.Namespace) -> int:
                 log.info("partial batch (%d < %d), done", len(batch), batch_limit)
                 break
     finally:
-        for w in writers.values():
-            w.close()
+        # Close any still-open writers (also uploads if upload_chunks enabled)
+        for cat in list(writers.keys()):
+            _close_and_maybe_upload(cat)
 
     t_stream = time.monotonic() - t0
     log.info(
@@ -218,20 +291,23 @@ def cmd_all(args: argparse.Namespace) -> int:
         log.error("no successful materials")
         return 1
 
-    # ── generate rowmaps from each parquet (sources deleted, scan parquet) ──
+    # ── generate rowmaps for any partitions still on disk (when not uploading) ──
     log.info("=== rowmap generation ===")
     t_rm = time.monotonic()
     total_bytes = 0
-    for cat in sorted(writers.keys()):
-        pq_path = output_dir / f"mat-vis-{source}-{tier}-{cat}.parquet"
+    for pq_path in finalized_paths:
+        if not pq_path.exists():
+            continue  # uploaded + deleted already
         rowmap = generate_rowmap_from_parquet(pq_path, source, tier, args.release_tag)
-        rm_path = output_dir / f"{source}-{tier}-{cat}-rowmap.json"
+        # Derive rowmap filename: mat-vis-X-Y-Z[-N].parquet -> X-Y-Z[-N]-rowmap.json
+        stem = pq_path.stem.replace(f"mat-vis-{source}-{tier}-", f"{source}-{tier}-")
+        rm_path = output_dir / f"{stem}-rowmap.json"
         write_rowmap(rowmap, rm_path)
         total_bytes += pq_path.stat().st_size
     log.info(
         "PERF rowmap: %.1fs, %d partitions, %.1f GB",
         time.monotonic() - t_rm,
-        len(writers),
+        len(finalized_paths),
         total_bytes / 1e9,
     )
 
@@ -474,6 +550,14 @@ def main() -> int:
     p_all.add_argument("--offset", type=int, default=0, help="Skip first N materials")
     p_all.add_argument("--limit", type=int, default=None)
     p_all.add_argument("--release-tag", default="v0000.00.0")
+    p_all.add_argument(
+        "--batch-size", type=int, default=50, help="Materials per streaming batch (default: 50)"
+    )
+    p_all.add_argument(
+        "--upload-chunks",
+        action="store_true",
+        help="Upload + delete each parquet partition as it closes (frees disk during run)",
+    )
 
     p_derive = sub.add_parser("derive", help="Derive smaller tier from existing bake output")
     p_derive.add_argument("source", choices=SOURCES)

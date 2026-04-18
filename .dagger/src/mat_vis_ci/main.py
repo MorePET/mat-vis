@@ -623,15 +623,23 @@ class MatVisCi:
         tier: Annotated[str, Doc("Resolution tier")] = "1k",
         release_tag: Annotated[str, Doc("Release tag")] = "v0000.00.0",
         limit: Annotated[int, Doc("Max materials (0 = all)")] = 0,
+        offset: Annotated[int, Doc("Skip first N materials")] = 0,
+        batch_size: Annotated[int, Doc("Materials per streaming batch")] = 50,
+        upload_chunks: Annotated[bool, Doc("Upload each parquet partition as it closes")] = True,
         registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
     ) -> str:
-        """Bake all materials → upload to release → rebuild manifest.
+        """Bake materials → upload to release → rebuild manifest.
 
-        Single container. Streaming parquet writer — constant memory.
-        No OOM regardless of source size.
+        Single container. Streaming pipeline — bounded disk usage.
+        With upload_chunks=True, each parquet partition is uploaded
+        and deleted as it closes, freeing runner disk for the next.
         """
         context = src or dag.host().directory(".")
         baker = self._baker_container(context)
+
+        # Need GH_TOKEN early because --upload-chunks calls gh during the run
+        if registry_pass is not None:
+            baker = baker.with_secret_variable("GH_TOKEN", registry_pass)
 
         bake_cmd = [
             "mat-vis-baker",
@@ -641,15 +649,20 @@ class MatVisCi:
             "/tmp/out",
             "--release-tag",
             release_tag,
+            "--batch-size",
+            str(batch_size),
         ]
         if limit > 0:
             bake_cmd.extend(["--limit", str(limit)])
+        if offset > 0:
+            bake_cmd.extend(["--offset", str(offset)])
+        if upload_chunks and release_tag != "v0000.00.0":
+            bake_cmd.append("--upload-chunks")
 
         baker = baker.with_exec(bake_cmd)
 
-        # Upload to release
+        # Upload remaining (non-chunk) assets to release
         if release_tag != "v0000.00.0" and registry_pass is not None:
-            baker = baker.with_secret_variable("GH_TOKEN", registry_pass)
             baker = baker.with_exec(
                 [
                     "sh",

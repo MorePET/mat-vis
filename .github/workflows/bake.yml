@@ -32,6 +32,21 @@ on:  # yamllint disable-line rule:truthy
         required: false
         default: '0'
         type: string
+      offset:
+        description: 'Skip first N materials (for chunked execution)'
+        required: false
+        default: '0'
+        type: string
+      batch-size:
+        description: 'Materials per streaming batch'
+        required: false
+        default: '50'
+        type: string
+      upload-chunks:
+        description: 'Upload + delete each parquet partition as it closes (frees runner disk)'
+        required: false
+        default: true
+        type: boolean
       release-tag:
         description: 'Calver data release tag (e.g. v2026.04.0)'
         required: false
@@ -59,6 +74,9 @@ jobs:
             --source=${{ inputs.source }}
             --tier=${{ inputs.tier }}
             --limit=${{ inputs.limit }}
+            --offset=${{ inputs.offset }}
+            --batch-size=${{ inputs.batch-size }}
+            --upload-chunks=${{ inputs.upload-chunks }}
             --release-tag=${{ inputs.release-tag }}
             --registry-pass=env:GITHUB_TOKEN
         env:
