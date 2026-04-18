@@ -725,6 +725,13 @@ class MatVisCi:
         offset: Annotated[int, Doc("Skip first N materials")] = 0,
         batch_size: Annotated[int, Doc("Materials per streaming batch")] = 50,
         upload_chunks: Annotated[bool, Doc("Upload each parquet partition as it closes")] = True,
+        category: Annotated[
+            str, Doc("Filter to one normalized category (metal/wood/.../other). Empty = all.")
+        ] = "",
+        dry_run: Annotated[
+            bool,
+            Doc("Fetch + bake but skip release uploads. For verifying filters before a real bake."),
+        ] = False,
         registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
     ) -> str:
         """Bake materials → upload to release → rebuild manifest.
@@ -755,15 +762,20 @@ class MatVisCi:
             bake_cmd.extend(["--limit", str(limit)])
         if offset > 0:
             bake_cmd.extend(["--offset", str(offset)])
-        if upload_chunks and release_tag != "v0000.00.0":
+        if upload_chunks and release_tag != "v0000.00.0" and not dry_run:
             bake_cmd.append("--upload-chunks")
+        if category:
+            bake_cmd.extend(["--category", category])
+        if dry_run:
+            bake_cmd.append("--dry-run")
 
         baker = baker.with_exec(bake_cmd)
 
         # Upload remaining (non-chunk) assets to release. The user-supplied
         # release_tag and source values are passed via env vars, NEVER
         # interpolated into the shell string (see #61).
-        if release_tag != "v0000.00.0" and registry_pass is not None:
+        # Skipped entirely in dry-run mode.
+        if release_tag != "v0000.00.0" and registry_pass is not None and not dry_run:
             baker = baker.with_env_variable("RELEASE_TAG", release_tag).with_env_variable(
                 "SOURCE", source
             )
