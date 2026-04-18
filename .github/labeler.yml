@@ -1,0 +1,53 @@
+# Auto-apply area labels to PRs based on touched paths.
+# Used by actions/labeler. Mirrors .github/CODEOWNERS.
+
+"area:client":
+  - changed-files:
+      - any-glob-to-any-file:
+          - clients/**
+          - scripts/sync-standalone-version.py
+          - scripts/sync-js-version.py
+
+"area:baker":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/mat_vis_baker/**
+          - .dagger/**
+          - .github/workflows/bake.yml
+          - .github/workflows/rebuild-manifest.yml
+          - .github/workflows/regenerate-rowmaps.yml
+          - .github/workflows/derive-ktx2.yml
+
+"area:data":
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/workflows/promote-data-release.yml
+
+"area:ci":
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/workflows/ci.yml
+          - .github/workflows/pypi.yml
+          - .github/workflows/release-validate.yml
+
+"area:docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.md"
+          - docs/**
+
+"area:testing":
+  - changed-files:
+      - any-glob-to-any-file:
+          - tests/**
+          - clients/python/test_client.py
+          - clients/**/test_*.mjs
+          - clients/**/test_*.py
+
+"area:workspace":
+  - changed-files:
+      - any-glob-to-any-file:
+          - justfile
+          - justfile.project
+          - .pre-commit-config.yaml
+          - scripts/**

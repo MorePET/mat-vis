@@ -1,0 +1,48 @@
+# Ownership topology for mat-vis.
+#
+# Single maintainer today (@gerchowl), so every line routes to the same
+# person — but the file's real job is to make the "this is a *client*
+# change vs a *baker* change" split explicit, and to give future
+# contributors a machine-readable map of where things live. Labels in
+# .github/labeler.yml mirror this taxonomy; keep them in sync.
+
+# ── Clients (installable artifacts) ─────────────────────────────
+# Independent release cadences (client/v*), PyPI + npm + crates.io targets.
+/clients/python/         @gerchowl
+/clients/js/             @gerchowl
+/clients/rust/           @gerchowl
+
+# Standalone Python mirror — same owner, but keep the line explicit so
+# drift reviews show up on the client side of the split.
+/clients/python/mat_vis_client_standalone.py  @gerchowl
+
+# ── Baker + data pipeline (calver v* releases) ──────────────────
+# Everything that produces the GitHub Release artifacts. Separate release
+# cadence and much heavier dependency footprint.
+/src/mat_vis_baker/                                   @gerchowl
+/.dagger/                                             @gerchowl
+/.github/workflows/bake.yml                           @gerchowl
+/.github/workflows/promote-data-release.yml           @gerchowl
+/.github/workflows/rebuild-manifest.yml               @gerchowl
+/.github/workflows/regenerate-rowmaps.yml             @gerchowl
+/.github/workflows/derive-ktx2.yml                    @gerchowl
+
+# ── Cross-cutting: spec, release infra ──────────────────────────
+# Schema changes here touch both baker (bake-time validation) and client
+# (runtime discovery). Expect coordinated PRs.
+/docs/specs/                                          @gerchowl
+/src/mat_vis_baker/_spec/                             @gerchowl
+/scripts/sync-spec.py                                 @gerchowl
+
+# Client-version sync (pyproject → standalone / package.json → .mjs)
+/scripts/sync-standalone-version.py                   @gerchowl
+/scripts/sync-js-version.py                           @gerchowl
+
+# Release + CI infra (affects both sides — the "shared gate")
+/.github/workflows/ci.yml                             @gerchowl
+/.github/workflows/pypi.yml                           @gerchowl
+
+# Tooling
+/justfile                                             @gerchowl
+/justfile.project                                     @gerchowl
+/.pre-commit-config.yaml                              @gerchowl

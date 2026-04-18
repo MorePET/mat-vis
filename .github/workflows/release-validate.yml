@@ -1,0 +1,105 @@
+---
+# Daily health check of the latest published data release.
+#
+# The bake and promote workflows catch issues at their own time horizons
+# (bake: upload_with_verify; promote: validate-release gate). Neither
+# catches *post-promotion* drift — an asset gets deleted, a signed URL
+# stops working, a permissions change makes parts of the release
+# inaccessible, or a release was promoted with a weak gate (see #79).
+#
+# This workflow runs validate-release against the current "latest" data
+# release every day. On failure it opens (or updates) a tracking issue
+# so the drift is visible and actionable without a code push.
+
+name: Validate released data
+
+on:  # yamllint disable-line rule:truthy
+  schedule:
+    - cron: "0 6 * * *"   # daily at 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: "Release tag to validate (default: latest)"
+        required: false
+        type: string
+  push:
+    tags: ["v*"]          # run on every new data release tag
+
+permissions:
+  contents: read
+  issues: write           # needed to open a drift-detected issue
+
+jobs:
+  validate:
+    name: Validate ${{ inputs.release-tag || 'latest' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve target tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Manual-dispatch input wins; tag push uses the pushed tag;
+        # scheduled runs pick whatever GitHub marks "Latest".
+        run: |
+          if [[ -n "${{ inputs.release-tag }}" ]]; then
+            echo "tag=${{ inputs.release-tag }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            latest=$(gh release view --repo "${{ github.repository }}" --json tagName --jq .tagName)
+            echo "tag=${latest}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate release assets
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          verb: call
+          module: .dagger
+          args: >-
+            validate-release --src=.
+            --tag=${{ steps.tag.outputs.tag }}
+
+      - name: Open drift-detected issue on failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        # Dedupe on title — if an open "[drift] …" issue for this tag
+        # already exists, add a comment to it instead of spamming a new
+        # one each day. The tag appears verbatim in the title so a simple
+        # `--search` is enough.
+        run: |
+          set -euo pipefail
+          title="[drift] ${TAG}: validate-release failed"
+          body="Daily validate-release failed for **${TAG}**.
+
+          - Run: ${RUN_URL}
+
+          Likely causes: missing or deleted parquets, signed-URL
+          issues, manifest/rowmap drift, a rowmap pointing at a parquet
+          that was never uploaded (see #79 for a prior instance).
+
+          This issue was opened automatically by
+          \`.github/workflows/release-validate.yml\` after a scheduled
+          run failed. It will not re-open if already present; comments
+          are added on recurrence."
+
+          existing=$(gh issue list \
+            --repo "${{ github.repository }}" \
+            --search "in:title \"[drift] ${TAG}\" is:open" \
+            --json number --jq '.[0].number // empty')
+
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" \
+              --repo "${{ github.repository }}" \
+              --body "Drift check failed again at $(date -u +%Y-%m-%dT%H:%MZ). Run: ${RUN_URL}"
+          else
+            gh issue create \
+              --repo "${{ github.repository }}" \
+              --title "${title}" \
+              --body "${body}" \
+              --label "bug,area:data,priority:high"
+          fi
