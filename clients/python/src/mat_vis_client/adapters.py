@@ -17,50 +17,14 @@ import base64
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-# ── Field name mapping tables ───────────────────────────────────
-#
-# mat-vis channel name -> renderer property name
-# Canonical source: docs/specs/field-name-mapping.md
+from mat_vis_client.schema import (
+    GLTF_MAP as _GLTF_TEX_MAP,
+    THREEJS_MAP as _THREEJS_TEX_MAP,
+    USD_PREVIEW_MAP as _USD_PREVIEW_TEX_MAP,
+)
 
-_THREEJS_TEX_MAP: dict[str, str] = {
-    "color": "map",
-    "normal": "normalMap",
-    "roughness": "roughnessMap",
-    "metalness": "metalnessMap",
-    "ao": "aoMap",
-    "displacement": "displacementMap",
-    "emission": "emissiveMap",
-}
-
-_GLTF_TEX_MAP: dict[str, str] = {
-    "color": "baseColorTexture",
-    "normal": "normalTexture",
-    "ao": "occlusionTexture",
-    "emission": "emissiveTexture",
-    # roughness + metalness are packed into metallicRoughnessTexture
-    # handled separately in to_gltf()
-}
-
-_MTLX_TEX_MAP: dict[str, str] = {
-    "color": "base_color",
-    "normal": "normal",
-    "roughness": "specular_roughness",
-    "metalness": "metalness",
-    "ao": "occlusion",
-    "displacement": "displacement",
-    "emission": "emission_color",
-}
-
-# UsdPreviewSurface input names (different from standard_surface)
-_USD_PREVIEW_TEX_MAP: dict[str, tuple[str, str]] = {
-    "color": ("diffuseColor", "color3"),
-    "normal": ("normal", "vector3"),
-    "roughness": ("roughness", "float"),
-    "metalness": ("metallic", "float"),
-    "ao": ("occlusion", "float"),
-    "displacement": ("displacement", "float"),
-    "emission": ("emissiveColor", "color3"),
-}
+# Renderer-prop maps come from schema.CHANNELS — do not hand-maintain
+# parallel dicts here. Adding a channel is one edit in schema.py.
 
 
 # ── Helpers ─────────────────────────────────────────────────────
