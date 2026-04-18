@@ -50,6 +50,26 @@ def test_standalone_version_matches_pyproject():
     )
 
 
+def test_standalone_user_agent_matches_packaged():
+    """Regression for issue #70: the standalone's User-Agent literal used
+    to carry a ``-standalone`` suffix, giving servers two distinct UA
+    populations for what is one client. Unified in 0.4.1; pin it here
+    so the prefix can't silently diverge again — neither the AST drift
+    test nor the runtime version check catches string-literal drift."""
+    text = STANDALONE.read_text()
+    m = re.search(r'^USER_AGENT = f"([^"]+)"$', text, re.MULTILINE)
+    assert m, "standalone missing USER_AGENT fstring literal"
+    # The literal contains {__version__}; what we check is the prefix.
+    assert m.group(1).startswith("mat-vis-client/"), (
+        f"standalone USER_AGENT={m.group(1)!r} must start with 'mat-vis-client/' "
+        "to match the packaged client (see issue #70)."
+    )
+    assert "standalone" not in m.group(1), (
+        f"standalone USER_AGENT={m.group(1)!r} contains 'standalone' — "
+        "server-side observability should see a single UA population."
+    )
+
+
 def test_js_client_version_matches_package_json():
     want = json.loads(JS_PACKAGE_JSON.read_text())["version"]
     m = re.search(r"^export const VERSION = '([^']+)';$", JS_CLIENT_MJS.read_text(), re.MULTILINE)

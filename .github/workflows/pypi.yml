@@ -14,8 +14,34 @@ permissions:
   contents: read
 
 jobs:
+  # Explicit pre-publish gate (issue #73). ci.yml runs on main/dev pushes
+  # and `v*` tags but NOT `client/v*` tags; without this job, a broken
+  # sync script, drift test, or regression could land on PyPI if someone
+  # pushed a tag without CI on main first. Runs the full pytest suite
+  # against the code that's about to be built.
+  test:
+    name: Run pytest before publishing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Run full pytest suite (skip live network tests)
+        env:
+          MAT_VIS_SKIP_LIVE_TESTS: "1"
+        run: |
+          source $HOME/.local/bin/env
+          uv run --with pytest pytest tests/ clients/python/test_client.py
+
   publish:
     name: Publish mat-vis-client to PyPI
+    needs: test
     runs-on: ubuntu-latest
     environment: pypi
     steps:
@@ -24,6 +50,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # Assert tag matches pyproject.version before doing anything
+      # irreversible (issue #74). A tag/pyproject mismatch would silently
+      # publish the pyproject version while verify polls for the tag
+      # version — and by then the wrong wheel is live.
+      - name: Assert tag matches pyproject.version
+        if: startsWith(github.ref, 'refs/tags/client/v')
+        run: |
+          tag_ver="${GITHUB_REF#refs/tags/client/v}"
+          pyproject_ver=$(python3 -c "import tomllib; print(tomllib.load(open('clients/python/pyproject.toml','rb'))['project']['version'])")
+          if [[ "$tag_ver" != "$pyproject_ver" ]]; then
+            echo "ERROR: tag client/v${tag_ver} does not match pyproject version ${pyproject_ver}"
+            exit 1
+          fi
+          echo "tag matches pyproject: ${tag_ver}"
 
       - name: Install build tools
         run: pip install build
