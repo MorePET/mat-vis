@@ -401,8 +401,10 @@ class MatVisClient:
         manifest_url: str | None = None,
         cache_dir: Path | None = None,
         tag: str | None = None,
+        cache: bool = True,
     ):
         self._cache_dir = cache_dir or DEFAULT_CACHE_DIR
+        self._cache = cache
         self._manifest: dict | None = None
         self._rowmaps: dict[str, dict] = {}
         self._indexes: dict[str, list[dict]] = {}
@@ -421,16 +423,52 @@ class MatVisClient:
             self._manifest_url = LATEST_MANIFEST_URL
 
     @property
+    def _cache_scope(self) -> Path:
+        """Tag-scoped cache subdirectory.
+
+        Keeps data for different release tags in separate subtrees so a
+        ``tag=v1`` cache never serves bytes for a ``tag=v2`` request.
+        When no explicit tag is pinned, the ``"latest"`` sentinel is used
+        — invalidation of that bucket is the caller's responsibility
+        (or, more typically, handled by the update-check TTL).
+        """
+        return self._cache_dir / (self._tag or "latest")
+
+    # ── cache-aware I/O helpers (single source of gating) ──────────
+
+    def _cache_read_bytes(self, path: Path) -> bytes | None:
+        if not self._cache or not path.exists():
+            return None
+        return path.read_bytes()
+
+    def _cache_write_bytes(self, path: Path, data: bytes) -> None:
+        if not self._cache:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    def _cache_read_text(self, path: Path) -> str | None:
+        if not self._cache or not path.exists():
+            return None
+        return path.read_text()
+
+    def _cache_write_text(self, path: Path, text: str) -> None:
+        if not self._cache:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    @property
     def manifest(self) -> dict:
         """Fetch and cache the release manifest. Validates schema_version."""
         if self._manifest is None:
-            cache_path = self._cache_dir / ".manifest.json"
-            if cache_path.exists():
-                self._manifest = json.loads(cache_path.read_text())
+            cache_path = self._cache_scope / ".manifest.json"
+            cached = self._cache_read_text(cache_path)
+            if cached is not None:
+                self._manifest = json.loads(cached)
             else:
                 self._manifest = _get_json(self._manifest_url)
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cache_path.write_text(json.dumps(self._manifest, indent=2))
+                self._cache_write_text(cache_path, json.dumps(self._manifest, indent=2))
             self._check_schema_version(self._manifest)
             self._maybe_warn_updates()
         return self._manifest
@@ -656,14 +694,14 @@ class MatVisClient:
             # Fetch all partition rowmaps and merge materials
             merged: dict = {"materials": {}}
             for rmf in rowmap_files:
-                cache_path = self._cache_dir / ".rowmaps" / rmf
-                if cache_path.exists():
-                    rm = json.loads(cache_path.read_text())
+                cache_path = self._cache_scope / ".rowmaps" / rmf
+                cached = self._cache_read_text(cache_path)
+                if cached is not None:
+                    rm = json.loads(cached)
                 else:
                     url = base_url + rmf
                     rm = _get_json(url)
-                    cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    cache_path.write_text(json.dumps(rm, indent=2))
+                    self._cache_write_text(cache_path, json.dumps(rm, indent=2))
 
                 # Each partitioned rowmap has its own parquet_file
                 pq_file = rm.get("parquet_file", "")
@@ -708,9 +746,10 @@ class MatVisClient:
         Returns a list of material entries per index-schema.json.
         """
         if source not in self._indexes:
-            cache_path = self._cache_dir / ".indexes" / f"{source}.json"
-            if cache_path.exists():
-                self._indexes[source] = json.loads(cache_path.read_text())
+            cache_path = self._cache_scope / ".indexes" / f"{source}.json"
+            cached = self._cache_read_text(cache_path)
+            if cached is not None:
+                self._indexes[source] = json.loads(cached)
             else:
                 # Try git first, then fall back to release asset
                 data = None
@@ -726,8 +765,7 @@ class MatVisClient:
                 if data is None:
                     raise FileNotFoundError(f"Index for {source!r} not found in git or release")
                 self._indexes[source] = data
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cache_path.write_text(json.dumps(self._indexes[source], indent=2))
+                self._cache_write_text(cache_path, json.dumps(self._indexes[source], indent=2))
         return self._indexes[source]
 
     def search(
@@ -1014,12 +1052,15 @@ class MatVisClient:
     ) -> bytes:
         """Fetch a single texture PNG via HTTP range read.
 
-        Returns raw PNG bytes. Caches locally.
+        Returns raw PNG bytes. Caches locally under the active tag scope
+        (so releases don't collide). Pass ``cache=False`` at client
+        construction to opt out entirely.
         """
-        # Check cache first
-        cache_path = self._cache_dir / source / tier / material_id / f"{channel}.png"
-        if cache_path.exists():
-            return cache_path.read_bytes()
+        # Check cache first (tag-scoped)
+        cache_path = self._cache_scope / source / tier / material_id / f"{channel}.png"
+        cached = self._cache_read_bytes(cache_path)
+        if cached is not None:
+            return cached
 
         # Find in rowmap
         rm = self.rowmap(source, tier)
@@ -1086,9 +1127,8 @@ class MatVisClient:
         if data[:4] != b"\x89PNG":
             raise ValueError(f"Expected PNG, got {data[:4]!r}")
 
-        # Cache
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(data)
+        # Cache (tag-scoped; no-op if cache=False)
+        self._cache_write_bytes(cache_path, data)
 
         # Soft-cap warning (once per process)
         self._maybe_warn_cache_cap()
