@@ -905,6 +905,36 @@ print('Manifest rebuilt and uploaded')
 """
         return await baker.with_exec(["python3", "-c", script]).stdout()
 
+    @function
+    async def rebuild_manifest(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        release_tag: Annotated[str, Doc("Release tag")] = "v2026.04.0",
+        registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
+    ) -> str:
+        """Rebuild manifest only (no rowmap regeneration). Fast — just re-reads
+        release assets and regenerates release-manifest.json."""
+        context = src or dag.host().directory(".")
+        baker = self._baker_container(context)
+        if registry_pass is not None:
+            baker = baker.with_secret_variable("GH_TOKEN", registry_pass)
+
+        return await baker.with_exec(
+            [
+                "sh",
+                "-c",
+                f"""
+python3 -c "
+from pathlib import Path
+from mat_vis_baker.manifest import rebuild_manifest_from_release, write_manifest
+mf = rebuild_manifest_from_release('{release_tag}')
+write_manifest(mf, Path('/tmp/release-manifest.json'))
+print(f'manifest has ' + str(len(mf['tiers'])) + ' tiers')
+" && gh release upload {release_tag} /tmp/release-manifest.json --clobber
+""",
+            ]
+        ).stdout()
+
     # ── source probes ─────────────────────────────────────────────
 
     @function
