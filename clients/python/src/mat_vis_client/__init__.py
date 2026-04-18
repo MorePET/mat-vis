@@ -29,19 +29,33 @@ from typing import Any
 
 from mat_vis_client.adapters import export_mtlx, to_gltf, to_threejs
 from mat_vis_client.client import (
+    ChannelNotFoundError,
+    HTTPFetchError,
     MatVisClient,
     MatVisError,
+    MaterialNotFoundError,
     MtlxSource,
+    NetworkError,
+    NotFoundError,
     RateLimitError,
+    SourceNotFoundError,
+    TierNotFoundError,
     __version__,
     _in_range,
 )
 
 __all__ = [
+    "ChannelNotFoundError",
+    "HTTPFetchError",
     "MatVisClient",
     "MatVisError",
+    "MaterialNotFoundError",
     "MtlxSource",
+    "NetworkError",
+    "NotFoundError",
     "RateLimitError",
+    "SourceNotFoundError",
+    "TierNotFoundError",
     "__version__",
     "_in_range",
     "search",

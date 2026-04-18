@@ -201,8 +201,12 @@ def test_fetch_texture_404_raises_material_not_found_or_http_fetch_error():
         },
     }
 
-    client = MatVisClient(cache_dir="/tmp/mat-vis-test-errors", update_check=False)
-    # Inject manifest + rowmap
+    import tempfile
+    from pathlib import Path
+
+    tmp = Path(tempfile.mkdtemp(prefix="mat-vis-test-errors-"))
+    client = MatVisClient(cache_dir=tmp)
+    # Inject manifest + rowmap so no network call happens for those
     client._manifest = MOCK_MANIFEST
     client._rowmap_cache = {("ambientcg", "1k"): MOCK_ROWMAP}
 
