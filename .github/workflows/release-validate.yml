@@ -61,51 +61,15 @@ jobs:
             validate-release --src=.
             --tag=${{ steps.tag.outputs.tag }}
 
-      - name: Open drift-detected issue on failure
+      - name: Notify on failure
         if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          EVENT: ${{ github.event_name }}
-        # Fires on every event type (schedule, workflow_dispatch, push).
-        # Previously scoped to `schedule` only — meaning a tag-push or
-        # manual-dispatch failure went silent in the Actions UI. Now
-        # every red run produces an actionable issue.
-        #
-        # Dedupe on title — if an open "[drift] <tag>" issue already
-        # exists, add a comment instead of spamming new ones. Tag appears
-        # verbatim in the title so a simple --search is enough.
-        run: |
-          set -euo pipefail
-          title="[drift] ${TAG}: validate-release failed"
-          body="validate-release failed for **${TAG}** (event: \`${EVENT}\`).
-
-          - Run: ${RUN_URL}
-
-          Likely causes: missing or deleted parquets, signed-URL
-          issues, manifest/rowmap drift, a rowmap pointing at a parquet
-          that was never uploaded (see #79 for a prior instance), or
-          an empty-materials rowmap with a non-empty parquet (see #82).
-
-          This issue was opened automatically by
-          \`.github/workflows/release-validate.yml\` after a run failed.
-          It will not re-open if already present; comments are added on
-          recurrence."
-
-          existing=$(gh issue list \
-            --repo "${{ github.repository }}" \
-            --search "in:title \"[drift] ${TAG}\" is:open" \
-            --json number --jq '.[0].number // empty')
-
-          if [[ -n "${existing}" ]]; then
-            gh issue comment "${existing}" \
-              --repo "${{ github.repository }}" \
-              --body "Drift check failed again at $(date -u +%Y-%m-%dT%H:%MZ) (event: \`${EVENT}\`). Run: ${RUN_URL}"
-          else
-            gh issue create \
-              --repo "${{ github.repository }}" \
-              --title "${title}" \
-              --body "${body}" \
-              --label "bug,area:data,priority:high"
-          fi
+        uses: ./.github/actions/notify-on-failure
+        with:
+          label-prefix: "[drift]"
+          workflow-name: "release-validate"
+          target: ${{ steps.tag.outputs.tag }}
+          context: >-
+            Likely causes: missing or deleted parquets, signed-URL
+            issues, manifest/rowmap drift, a rowmap pointing at a parquet
+            that was never uploaded (see #79), or an empty-materials
+            rowmap with a non-empty parquet (see #82).

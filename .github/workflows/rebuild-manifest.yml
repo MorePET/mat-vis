@@ -12,6 +12,7 @@ on:  # yamllint disable-line rule:truthy
 
 permissions:
   contents: write
+  issues: write          # needed by notify-on-failure composite action
 
 jobs:
   rebuild:
@@ -30,3 +31,16 @@ jobs:
             --registry-pass=env:GITHUB_TOKEN
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify on failure
+        if: failure()
+        uses: ./.github/actions/notify-on-failure
+        with:
+          label-prefix: "[rebuild-manifest-failed]"
+          workflow-name: "rebuild-manifest"
+          target: ${{ inputs.release-tag }}
+          context: >-
+            Likely causes: release not found, gh API rate-limit, upload
+            of new manifest failed. The manifest on the release may now
+            be stale relative to actual assets — run validate-release
+            next to see whether the state is actually drifted.

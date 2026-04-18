@@ -1,0 +1,100 @@
+---
+# Reusable "open an issue on workflow failure" step.
+#
+# Data-integrity workflows fail silently in the Actions UI by default
+# (a red run is the only signal) — which is how v2026.04.0 shipped
+# with 4 missing parquets and sat broken for a day. This action turns
+# every failure into an actionable, dedupable issue.
+#
+# Usage (in a workflow's final step):
+#
+#   - name: Notify on failure
+#     if: failure()
+#     uses: ./.github/actions/notify-on-failure
+#     with:
+#       label-prefix: "[drift]"
+#       workflow-name: "release-validate"
+#       target: ${{ inputs.release-tag }}
+#       context: >-
+#         Likely causes: missing/deleted parquets, signed-URL issues,
+#         manifest/rowmap drift (#79), empty-materials rowmaps (#82).
+
+name: Notify on failure
+description: Open or update an issue when a workflow step failed. Dedupes by title.
+
+inputs:
+  label-prefix:
+    description: >-
+      Short title prefix used both for human scanning and for the
+      dedupe search, e.g. "[drift]" or "[bake-failed]". Same prefix +
+      same target reuses an existing issue (comments instead of
+      creating a duplicate).
+    required: true
+  workflow-name:
+    description: >-
+      Human-readable workflow label for the issue body, e.g.
+      "release-validate" or "bake-and-release". Distinct from the
+      GitHub workflow filename.
+    required: true
+  target:
+    description: >-
+      What was being operated on (a release tag, a source/tier combo).
+      Goes into the title so multiple targets get separate issues.
+    required: true
+  context:
+    description: >-
+      Short free-text describing likely causes and what a responder
+      should check. Rendered as markdown in the issue body.
+    required: false
+    default: ""
+  labels:
+    description: Comma-separated issue labels. Keep it tight.
+    required: false
+    default: "bug,area:data,priority:high"
+
+runs:
+  using: composite
+  steps:
+    - name: Open or update failure issue
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        LABEL_PREFIX: ${{ inputs.label-prefix }}
+        WORKFLOW_NAME: ${{ inputs.workflow-name }}
+        TARGET: ${{ inputs.target }}
+        CONTEXT: ${{ inputs.context }}
+        LABELS: ${{ inputs.labels }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        EVENT: ${{ github.event_name }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        title="${LABEL_PREFIX} ${TARGET}: ${WORKFLOW_NAME} failed"
+        body=$(cat <<MSG
+        \`${WORKFLOW_NAME}\` failed for **${TARGET}** (event: \`${EVENT}\`).
+
+        - Run: ${RUN_URL}
+
+        ${CONTEXT}
+
+        Opened automatically by \`.github/actions/notify-on-failure\`.
+        It will not re-open if already present; comments are added on recurrence.
+        MSG
+        )
+
+        existing=$(gh issue list \
+          --repo "${REPO}" \
+          --search "in:title \"${LABEL_PREFIX} ${TARGET}\" is:open" \
+          --json number --jq '.[0].number // empty')
+
+        if [[ -n "${existing}" ]]; then
+          gh issue comment "${existing}" \
+            --repo "${REPO}" \
+            --body "Recurrence at $(date -u +%Y-%m-%dT%H:%MZ) (event: \`${EVENT}\`). Run: ${RUN_URL}"
+        else
+          gh issue create \
+            --repo "${REPO}" \
+            --title "${title}" \
+            --body "${body}" \
+            --label "${LABELS}"
+        fi

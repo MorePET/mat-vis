@@ -77,6 +77,7 @@ on:  # yamllint disable-line rule:truthy
 
 permissions:
   contents: write
+  issues: write          # needed by notify-on-failure composite action
 
 jobs:
   bake:
@@ -105,3 +106,18 @@ jobs:
             --registry-pass=env:GITHUB_TOKEN
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify on failure
+        if: failure()
+        uses: ./.github/actions/notify-on-failure
+        with:
+          label-prefix: "[bake-failed]"
+          workflow-name: "bake"
+          target: "${{ inputs.source }}/${{ inputs.tier }}${{ inputs.category != '' && format('/{0}', inputs.category) || '' }} @ ${{ inputs.release-tag }}"
+          context: >-
+            Likely causes: upstream API transient (rate-limit or 5xx),
+            runner disk filled, toktx/ktx2 encode failure (#82 territory),
+            or gh release upload failed silently. Check run logs for the
+            specific step that errored. If upload-chunks was true, some
+            parquets may be partially uploaded — validate-release will
+            surface any dangling rowmaps on next run.

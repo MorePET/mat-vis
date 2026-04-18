@@ -12,6 +12,7 @@ on:  # yamllint disable-line rule:truthy
 
 permissions:
   contents: write
+  issues: write          # needed by notify-on-failure composite action
 
 jobs:
   regenerate:
@@ -30,3 +31,16 @@ jobs:
             --registry-pass=env:GITHUB_TOKEN
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify on failure
+        if: failure()
+        uses: ./.github/actions/notify-on-failure
+        with:
+          label-prefix: "[rowmap-regen-failed]"
+          workflow-name: "regenerate-rowmaps"
+          target: ${{ inputs.release-tag }}
+          context: >-
+            Likely causes: legacy rowmap scanner hit an unreadable
+            parquet, gh upload failed, or the #82-class empty-parquet
+            case silently emitted an empty map. Check run logs for the
+            specific rowmap that failed.
