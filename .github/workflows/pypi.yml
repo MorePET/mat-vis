@@ -30,14 +30,14 @@ jobs:
           python-version: "3.12"
 
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
 
       - name: Run full pytest suite (skip live network tests)
         env:
           MAT_VIS_SKIP_LIVE_TESTS: "1"
-        run: |
-          source $HOME/.local/bin/env
-          uv run --with pytest pytest tests/ clients/python/test_client.py
+        run: uv run --with pytest pytest tests/ clients/python/test_client.py
 
   publish:
     name: Publish mat-vis-client to PyPI
