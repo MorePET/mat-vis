@@ -349,19 +349,24 @@ def generate_rowmap_from_parquet(
             if col_meta.is_stats_set and col_meta.statistics.null_count == col_meta.num_values:
                 continue
 
-            page_offset = col_meta.data_page_offset
-            fh.seek(page_offset)
-            window = fh.read(_MAX_PAGE_HEADER_SIZE)
+            # Column chunk starts at dictionary_page_offset if dict exists,
+            # else at data_page_offset. PyArrow with use_dictionary=False on
+            # binary columns still emits a "dictionary" page that holds the
+            # actual data (with PLAIN encoding inside it).
+            page_offset = col_meta.dictionary_page_offset or col_meta.data_page_offset
+            chunk_size = col_meta.total_compressed_size
 
-            # Try PNG magic first, then KTX2
+            fh.seek(page_offset)
+            window = fh.read(min(_MAX_PAGE_HEADER_SIZE, chunk_size))
+
             png_idx = window.find(PNG_MAGIC)
             ktx2_idx = window.find(KTX2_MAGIC) if png_idx < 0 else -1
 
             if png_idx >= 0:
                 data_start = page_offset + png_idx
-                data_size = col_meta.total_compressed_size
+                # Read the rest of the column chunk to find IEND
                 fh.seek(data_start)
-                data = fh.read(data_size)
+                data = fh.read(chunk_size - png_idx)
 
                 iend_pos = data.find(b"IEND")
                 if iend_pos < 0:
@@ -371,9 +376,7 @@ def generate_rowmap_from_parquet(
 
             elif ktx2_idx >= 0:
                 data_start = page_offset + ktx2_idx
-                # KTX2 has no end marker like IEND. Use total_compressed_size
-                # minus the page header as the data length.
-                data_length = col_meta.total_compressed_size - ktx2_idx
+                data_length = chunk_size - ktx2_idx
             else:
                 continue
 
