@@ -89,11 +89,16 @@ def png_to_ktx2(png_bytes: bytes, channel: str) -> bytes:
         input_path.write_bytes(png_bytes)
 
         # Build toktx command
-        cmd: list[str] = ["toktx", "--bcmp"]
+        # --assign_primaries bt709 — silence "No color primaries" warning
+        # which becomes a fatal error in newer toktx versions
+        cmd: list[str] = ["toktx", "--bcmp", "--assign_primaries", "bt709"]
 
         if channel in _NORMAL_CHANNELS:
-            cmd.append("--normal_mode")
-        elif channel not in _SRGB_CHANNELS:
+            # --normal_mode requires linear input; assign + convert
+            cmd.extend(["--normal_mode", "--assign_oetf", "linear"])
+        elif channel in _SRGB_CHANNELS:
+            cmd.extend(["--assign_oetf", "srgb"])
+        else:
             # Linear channels: roughness, metalness, ao, displacement
             cmd.extend(["--assign_oetf", "linear"])
 
