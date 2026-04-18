@@ -39,6 +39,40 @@ LATEST_MANIFEST_URL = f"{GITHUB_RELEASES}/latest/download/release-manifest.json"
 DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" / "mat-vis"))
 USER_AGENT = "mat-vis-client/0.2 (Python)"
 
+
+def _parse_size(s: str | int) -> int:
+    """Parse '5GB', '500MB', '0' etc. to bytes. 0 disables size checks."""
+    if isinstance(s, int):
+        return s
+    s = str(s).strip().upper()
+    if s in ("0", ""):
+        return 0
+    units = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+    for unit in ("TB", "GB", "MB", "KB", "B"):
+        if s.endswith(unit):
+            num = s[: -len(unit)].strip()
+            try:
+                return int(float(num) * units[unit])
+            except ValueError:
+                break
+    try:
+        return int(s)
+    except ValueError as e:
+        raise ValueError(f"Cannot parse size: {s!r} (use e.g. '5GB', '500MB')") from e
+
+
+def _fmt_size(n: int) -> str:
+    """Format bytes to human-readable."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+
+# Default soft cap: 5 GB (configurable via MAT_VIS_CACHE_MAX_SIZE).
+DEFAULT_CACHE_MAX_BYTES = _parse_size(os.environ.get("MAT_VIS_CACHE_MAX_SIZE", "5GB"))
+
 # Valid categories per index-schema.json
 CATEGORIES = frozenset(
     [
@@ -78,8 +112,35 @@ def _in_range(value: float | None, lo: float, hi: float) -> bool:
     return lo <= value <= hi
 
 
+# Schema versions this client understands. Manifest declares its own
+# schema_version field; if the manifest version is outside this set,
+# the client refuses to operate rather than silently misreading data.
+COMPATIBLE_SCHEMA_VERSIONS = frozenset([1])
+
+
 class MatVisClient:
-    """Lightweight client for mat-vis texture data."""
+    """Lightweight client for mat-vis texture data.
+
+    The client is decoupled from the data: client version is semver
+    (API stability), data releases are calver (upstream snapshot).
+    Compatibility is negotiated via ``schema_version`` in the manifest.
+
+    Data source selection (in precedence order):
+
+    1. ``manifest_url=...`` — explicit URL (custom mirror, air-gapped setup)
+    2. ``tag="v2026.04.0"`` — specific release tag on MorePET/mat-vis
+    3. default — latest release (resolves ``releases/latest/download/...``)
+
+    Plus ``cache_dir=Path(...)`` to override ``$MAT_VIS_CACHE`` /
+    ``~/.cache/mat-vis``.
+
+    Examples::
+
+        client = MatVisClient()                               # latest release
+        client = MatVisClient(tag="v2026.04.0")               # pinned
+        client = MatVisClient(manifest_url="https://mirror/manifest.json")
+        client = MatVisClient(cache_dir=Path("/scratch/mat-vis"))
+    """
 
     def __init__(
         self,
@@ -103,7 +164,7 @@ class MatVisClient:
 
     @property
     def manifest(self) -> dict:
-        """Fetch and cache the release manifest."""
+        """Fetch and cache the release manifest. Validates schema_version."""
         if self._manifest is None:
             cache_path = self._cache_dir / ".manifest.json"
             if cache_path.exists():
@@ -112,7 +173,23 @@ class MatVisClient:
                 self._manifest = _get_json(self._manifest_url)
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache_path.write_text(json.dumps(self._manifest, indent=2))
+            self._check_schema_version(self._manifest)
         return self._manifest
+
+    @staticmethod
+    def _check_schema_version(manifest: dict) -> None:
+        """Refuse to operate on manifests with incompatible schema.
+
+        Accepts legacy 'version' field (older manifests used 'version: 1')
+        and the canonical 'schema_version' field (v2+).
+        """
+        schema = manifest.get("schema_version", manifest.get("version", 1))
+        if schema not in COMPATIBLE_SCHEMA_VERSIONS:
+            raise RuntimeError(
+                f"mat-vis-client does not support manifest schema_version={schema}. "
+                f"This client supports: {sorted(COMPATIBLE_SCHEMA_VERSIONS)}. "
+                f"Upgrade with: pip install -U mat-vis-client"
+            )
 
     def sources(self, tier: str = "1k") -> list[str]:
         """List available sources for a tier."""
@@ -189,6 +266,8 @@ class MatVisClient:
     def index(self, source: str) -> list[dict]:
         """Fetch and cache the material index for a source.
 
+        Tries git (raw.githubusercontent.com) first, falls back to
+        release asset (some sources only ship the index on the release).
         Returns a list of material entries per index-schema.json.
         """
         if source not in self._indexes:
@@ -196,8 +275,20 @@ class MatVisClient:
             if cache_path.exists():
                 self._indexes[source] = json.loads(cache_path.read_text())
             else:
-                url = self._index_url(source)
-                self._indexes[source] = _get_json(url)
+                # Try git first, then fall back to release asset
+                data = None
+                try:
+                    data = _get_json(self._index_url(source))
+                except Exception:
+                    tag = self.manifest.get("release_tag", self._tag or "")
+                    if tag:
+                        try:
+                            data = _get_json(f"{GITHUB_RELEASES}/download/{tag}/{source}.json")
+                        except Exception:
+                            pass
+                if data is None:
+                    raise FileNotFoundError(f"Index for {source!r} not found in git or release")
+                self._indexes[source] = data
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache_path.write_text(json.dumps(self._indexes[source], indent=2))
         return self._indexes[source]
@@ -287,6 +378,171 @@ class MatVisClient:
 
         return total
 
+    def materialize(
+        self,
+        source: str,
+        material_id: str,
+        tier: str = "1k",
+        output_dir: str | Path = ".",
+    ) -> Path:
+        """Write all texture PNGs for a material to disk.
+
+        Returns the directory containing the PNG files, named by channel
+        (e.g. color.png, normal.png, roughness.png).
+        """
+        out = Path(output_dir) / material_id
+        out.mkdir(parents=True, exist_ok=True)
+
+        chs = self.channels(source, material_id, tier)
+        for ch in chs:
+            png_path = out / f"{ch}.png"
+            if not png_path.exists():
+                png_bytes = self.fetch_texture(source, material_id, ch, tier)
+                png_path.write_bytes(png_bytes)
+
+        return out
+
+    def to_mtlx(
+        self,
+        source: str,
+        material_id: str,
+        tier: str = "1k",
+        output_dir: str | Path = ".",
+    ) -> Path:
+        """Materialize textures and generate a MaterialX document.
+
+        Writes PNGs to output_dir/{material_id}/ and creates a .mtlx
+        file referencing them with local paths. The result is loadable
+        by any standard MaterialX renderer.
+
+        Returns path to the .mtlx file.
+        """
+        from mat_vis_client.adapters import export_mtlx
+
+        tex_dir = self.materialize(source, material_id, tier, output_dir)
+        chs = self.channels(source, material_id, tier)
+
+        # Get scalars from index if available
+        scalars: dict = {}
+        try:
+            for entry in self.index(source):
+                if entry["id"] == material_id:
+                    for k in ("roughness", "metalness", "ior", "color_hex"):
+                        if k in entry and entry[k] is not None:
+                            scalars[k] = entry[k]
+                    break
+        except Exception:
+            pass
+
+        return export_mtlx(
+            scalars=scalars,
+            output_dir=str(tex_dir),
+            material_name=material_id,
+            texture_dir=str(tex_dir),
+            channels=chs,
+        )
+
+    # ── Original MaterialX (gpuopen) ───────────────────────────
+
+    def fetch_mtlx_original(self, source: str, material_id: str) -> str | None:
+        """Fetch original upstream MaterialX XML for a material.
+
+        Downloads and caches the {source}-mtlx.json map from the release,
+        then returns the XML string for the given material_id.
+        Returns None if the source has no original mtlx or material not found.
+        """
+        if not hasattr(self, "_mtlx_originals"):
+            self._mtlx_originals: dict[str, dict[str, str]] = {}
+
+        if source not in self._mtlx_originals:
+            tag = self.manifest.get("release_tag", self._tag or "")
+            url = f"{GITHUB_RELEASES}/download/{tag}/{source}-mtlx.json"
+            try:
+                data = _get_json(url)
+                self._mtlx_originals[source] = data
+            except Exception:
+                self._mtlx_originals[source] = {}
+
+        return self._mtlx_originals[source].get(material_id)
+
+    def materialize_mtlx(
+        self,
+        source: str,
+        material_id: str,
+        tier: str = "1k",
+        output_dir: str | Path = ".",
+    ) -> Path | None:
+        """Fetch original MaterialX, rewrite texture paths, write to disk.
+
+        For materials with original upstream mtlx (gpuopen), fetches the
+        XML, materializes the PNG textures, then rewrites texture file
+        references to point at the local PNGs.
+
+        Falls back to generated UsdPreviewSurface if no original exists.
+
+        Returns path to the .mtlx file, or None on failure.
+        """
+        import re
+
+        xml_str = self.fetch_mtlx_original(source, material_id)
+        if xml_str is None:
+            # Fall back to generated
+            return self.to_mtlx(source, material_id, tier, output_dir)
+
+        # Materialize textures
+        tex_dir = self.materialize(source, material_id, tier, output_dir)
+        chs = self.channels(source, material_id, tier)
+
+        # Build a map of possible original filenames → our channel filenames
+        # GPUOpen uses names like BaseColor.png, Normal.png, Roughness.png
+        _FILENAME_TO_CHANNEL = {
+            "basecolor": "color",
+            "base_color": "color",
+            "diffuse": "color",
+            "normal": "normal",
+            "roughness": "roughness",
+            "specular_roughness": "roughness",
+            "metallic": "metalness",
+            "metalness": "metalness",
+            "occlusion": "ao",
+            "ao": "ao",
+            "ambientocclusion": "ao",
+            "displacement": "displacement",
+            "height": "displacement",
+            "emission": "emission",
+            "emissive": "emission",
+        }
+
+        def _rewrite_path(match: re.Match) -> str:
+            """Replace texture filename with local path."""
+            orig = match.group(1)
+            stem = Path(orig).stem.lower().replace(" ", "").replace("-", "").replace("_", "")
+            # Try direct match
+            for pattern, channel in _FILENAME_TO_CHANNEL.items():
+                clean_pattern = pattern.replace("_", "")
+                if clean_pattern in stem and channel in chs:
+                    return f'value="{tex_dir / (channel + ".png")}"'
+            # Try substring
+            for pattern, channel in _FILENAME_TO_CHANNEL.items():
+                clean_pattern = pattern.replace("_", "")
+                if clean_pattern in stem:
+                    local = tex_dir / f"{channel}.png"
+                    if local.exists():
+                        return f'value="{local}"'
+            return match.group(0)
+
+        # Rewrite all filename values in the XML
+        rewritten = re.sub(
+            r'value="([^"]*\.(?:png|jpg|jpeg|tif|tiff|exr))"',
+            _rewrite_path,
+            xml_str,
+            flags=re.IGNORECASE,
+        )
+
+        mtlx_path = tex_dir / f"{material_id}.mtlx"
+        mtlx_path.write_text(rewritten, encoding="utf-8")
+        return mtlx_path
+
     def rowmap_entry(
         self,
         source: str,
@@ -299,9 +555,13 @@ class MatVisClient:
         """
         rm = self.rowmap(source, tier)
         mat = rm["materials"][material_id]
-        parquet_file = rm["parquet_file"]
+        fallback_pq = rm.get("parquet_file", "")
         return {
-            ch: {"offset": info["offset"], "length": info["length"], "parquet_file": parquet_file}
+            ch: {
+                "offset": info["offset"],
+                "length": info["length"],
+                "parquet_file": info.get("parquet_file", fallback_pq),
+            }
             for ch, info in mat.items()
         }
 
@@ -346,7 +606,170 @@ class MatVisClient:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_bytes(data)
 
+        # Soft-cap warning (once per process)
+        self._maybe_warn_cache_cap()
+
         return data
+
+    # ── Cache management ────────────────────────────────────────
+
+    def cache_size(self) -> int:
+        """Total bytes currently in the cache directory (recursive)."""
+        if not self._cache_dir.exists():
+            return 0
+        total = 0
+        for p in self._cache_dir.rglob("*"):
+            if p.is_file():
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    pass
+        return total
+
+    def cache_status(self) -> dict[str, dict[str, int]]:
+        """Breakdown of cache usage by (source, tier) and metadata categories.
+
+        Returns a dict like:
+          {
+            "ambientcg/1k": {"bytes": 1234, "files": 56},
+            "_meta": {"bytes": 100, "files": 2},        # rowmaps + indexes + manifest + mtlx
+            "_total": {"bytes": 1334, "files": 58},
+          }
+        """
+        result: dict[str, dict[str, int]] = {}
+        total_bytes = 0
+        total_files = 0
+        if not self._cache_dir.exists():
+            result["_total"] = {"bytes": 0, "files": 0}
+            return result
+
+        meta_bytes = 0
+        meta_files = 0
+        for p in self._cache_dir.rglob("*"):
+            if not p.is_file():
+                continue
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            total_bytes += size
+            total_files += 1
+
+            rel = p.relative_to(self._cache_dir)
+            parts = rel.parts
+            if parts[0].startswith("."):
+                # .manifest.json, .rowmaps/, .indexes/, .mtlx-original/
+                meta_bytes += size
+                meta_files += 1
+                continue
+            # textures: source/tier/material/channel.png
+            if len(parts) >= 2:
+                key = f"{parts[0]}/{parts[1]}"
+                bucket = result.setdefault(key, {"bytes": 0, "files": 0})
+                bucket["bytes"] += size
+                bucket["files"] += 1
+
+        result["_meta"] = {"bytes": meta_bytes, "files": meta_files}
+        result["_total"] = {"bytes": total_bytes, "files": total_files}
+        return result
+
+    def cache_clear(self) -> int:
+        """Delete all cached data. Returns bytes freed."""
+        import shutil
+
+        if not self._cache_dir.exists():
+            return 0
+        size = self.cache_size()
+        shutil.rmtree(self._cache_dir, ignore_errors=True)
+        return size
+
+    def cache_prune(
+        self,
+        *,
+        keep_tags: list[str] | None = None,
+        tag: str | None = None,
+        source: str | None = None,
+        tier: str | None = None,
+    ) -> int:
+        """Delete subsets of the cache. Returns bytes freed.
+
+        Args:
+            keep_tags: Keep only these tags' rowmaps/indexes; delete others.
+            tag: Delete only this specific tag's rowmap/index files.
+            source: Delete only textures for this source.
+            tier: Delete only textures for this tier (combined with source if given).
+        """
+        import shutil
+
+        if not self._cache_dir.exists():
+            return 0
+        before = self.cache_size()
+
+        # Source/tier-scoped texture pruning
+        if source or tier:
+            for src_dir in self._cache_dir.iterdir():
+                if not src_dir.is_dir() or src_dir.name.startswith("."):
+                    continue
+                if source and src_dir.name != source:
+                    continue
+                if tier:
+                    tier_dir = src_dir / tier
+                    if tier_dir.exists():
+                        shutil.rmtree(tier_dir, ignore_errors=True)
+                else:
+                    shutil.rmtree(src_dir, ignore_errors=True)
+
+        # Tag-scoped pruning of rowmaps/indexes (only meta files have tag prefixes
+        # like "<source>-<tier>-<cat>-rowmap.json" — we can't infer tag from these
+        # without inspecting JSON content. Match by content's "release_tag" field.)
+        if keep_tags or tag:
+            keep_set = set(keep_tags) if keep_tags else None
+            rowmaps_dir = self._cache_dir / ".rowmaps"
+            indexes_dir = self._cache_dir / ".indexes"
+            for d in (rowmaps_dir, indexes_dir):
+                if not d.exists():
+                    continue
+                for f in d.iterdir():
+                    if not f.is_file() or f.suffix != ".json":
+                        continue
+                    try:
+                        content = json.loads(f.read_text())
+                        file_tag = content.get("release_tag")
+                    except Exception:
+                        continue
+                    if tag and file_tag == tag:
+                        f.unlink(missing_ok=True)
+                    elif keep_set and file_tag and file_tag not in keep_set:
+                        f.unlink(missing_ok=True)
+
+            # Manifest is current-tag only — drop if not in keep_tags
+            mf = self._cache_dir / ".manifest.json"
+            if mf.exists() and (keep_set or tag):
+                try:
+                    mtag = json.loads(mf.read_text()).get("release_tag")
+                except Exception:
+                    mtag = None
+                if (tag and mtag == tag) or (keep_set and mtag and mtag not in keep_set):
+                    mf.unlink(missing_ok=True)
+
+        return before - self.cache_size()
+
+    def _maybe_warn_cache_cap(self) -> None:
+        """Warn once per process if cache exceeds the soft cap."""
+        if DEFAULT_CACHE_MAX_BYTES <= 0:
+            return
+        if getattr(self, "_cap_warned", False):
+            return
+        size = self.cache_size()
+        if size > DEFAULT_CACHE_MAX_BYTES:
+            print(
+                f"mat-vis: cache is {_fmt_size(size)} (soft cap "
+                f"{_fmt_size(DEFAULT_CACHE_MAX_BYTES)}).\n"
+                f"         Run `mat-vis-client cache prune` to clean up.\n"
+                f"         Raise the cap with MAT_VIS_CACHE_MAX_SIZE=20GB.",
+                file=sys.stderr,
+            )
+            self._cap_warned = True
 
 
 # ── CLI ─────────────────────────────────────────────────────────
@@ -390,6 +813,19 @@ def main():
     p_prefetch = sub.add_parser("prefetch", help="Bulk download all materials for source x tier")
     p_prefetch.add_argument("source")
     p_prefetch.add_argument("tier", nargs="?", default="1k")
+
+    p_cache = sub.add_parser("cache", help="Manage the local cache")
+    p_cache_sub = p_cache.add_subparsers(dest="cache_cmd", required=True)
+    p_cache_sub.add_parser("status", help="Show cache size breakdown")
+    p_cache_sub.add_parser("clear", help="Delete all cached data")
+    p_prune = p_cache_sub.add_parser("prune", help="Delete subsets of the cache")
+    p_prune.add_argument("--source", help="Limit to one source")
+    p_prune.add_argument("--tier", help="Limit to one tier")
+    p_prune.add_argument("--tag", help="Drop a specific release tag's metadata")
+    p_prune.add_argument(
+        "--keep-tags",
+        help="Comma-separated tags to keep (drops everything else's metadata)",
+    )
 
     args = parser.parse_args()
     client = MatVisClient(tag=args.tag)
@@ -438,6 +874,44 @@ def main():
 
         n = client.prefetch(args.source, args.tier, on_progress=_progress)
         print(f"Prefetched {n} materials", file=sys.stderr)
+
+    elif args.cmd == "cache":
+        if args.cache_cmd == "status":
+            status = client.cache_status()
+            cap = DEFAULT_CACHE_MAX_BYTES
+            total = status.get("_total", {}).get("bytes", 0)
+            print(f"Cache directory: {client._cache_dir}")
+            print(
+                f"Total: {_fmt_size(total)} "
+                f"({status.get('_total', {}).get('files', 0)} files), "
+                f"soft cap: {_fmt_size(cap) if cap > 0 else 'disabled'}"
+            )
+            print()
+            print(f"  {'KEY':30s}  {'SIZE':>10s}  {'FILES':>8s}")
+            for key in sorted(status.keys()):
+                if key.startswith("_"):
+                    continue
+                s = status[key]
+                print(f"  {key:30s}  {_fmt_size(s['bytes']):>10s}  {s['files']:>8d}")
+            meta = status.get("_meta", {"bytes": 0, "files": 0})
+            print(f"  {'(metadata)':30s}  {_fmt_size(meta['bytes']):>10s}  {meta['files']:>8d}")
+            if cap > 0 and total > cap:
+                print(
+                    f"\nWARNING: cache exceeds soft cap by {_fmt_size(total - cap)}.",
+                    file=sys.stderr,
+                )
+        elif args.cache_cmd == "clear":
+            freed = client.cache_clear()
+            print(f"Cleared {_fmt_size(freed)}", file=sys.stderr)
+        elif args.cache_cmd == "prune":
+            keep_tags = args.keep_tags.split(",") if args.keep_tags else None
+            freed = client.cache_prune(
+                keep_tags=keep_tags,
+                tag=args.tag,
+                source=args.source,
+                tier=args.tier,
+            )
+            print(f"Pruned {_fmt_size(freed)}", file=sys.stderr)
 
 
 if __name__ == "__main__":
