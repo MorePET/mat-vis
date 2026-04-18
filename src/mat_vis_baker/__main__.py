@@ -16,7 +16,7 @@ import logging
 import sys
 from pathlib import Path
 
-from mat_vis_baker.common import TIER_TO_PX, VALID_TIERS
+from mat_vis_baker.common import CANONICAL_CATEGORIES, TIER_TO_PX, VALID_TIERS
 
 log = logging.getLogger("mat-vis-baker")
 
@@ -123,7 +123,17 @@ def cmd_all(args: argparse.Namespace) -> int:
     MAX_PARTITION_BYTES = 1_800_000_000
 
     # Optional upload callback — when a chunk closes, upload it + delete locally.
-    upload_release_tag = args.release_tag if getattr(args, "upload_chunks", False) else None
+    # --dry-run forces this off even if --upload-chunks was passed, so a dry
+    # run always lands its output in <output_dir>/ for inspection.
+    dry_run = bool(getattr(args, "dry_run", False))
+    upload_release_tag = (
+        args.release_tag if getattr(args, "upload_chunks", False) and not dry_run else None
+    )
+    category_filter = getattr(args, "category", None)
+    if dry_run:
+        log.info("=== DRY RUN — no release uploads; output stays in %s ===", output_dir)
+    if category_filter:
+        log.info("=== category filter: %s (other categories skipped) ===", category_filter)
 
     # ── resume marker ──
     cli_offset = args.offset or 0
@@ -243,6 +253,26 @@ def cmd_all(args: argparse.Namespace) -> int:
             if not batch:
                 log.info("no more materials, done")
                 break
+
+            # --category filter: drop records whose normalized category doesn't
+            # match. Applied after fetch so the texture downloads are already
+            # done — a true "listing-level" filter would need per-source
+            # changes (#68 delta-overlay territory). For surgical gap-fills
+            # this cost is the tradeoff against not having to bake everything.
+            if category_filter:
+                kept = [rec for rec in batch if rec.category == category_filter]
+                if len(kept) < len(batch):
+                    log.info(
+                        "category filter kept %d / %d materials in this batch",
+                        len(kept),
+                        len(batch),
+                    )
+                batch = kept
+                if not batch:
+                    # Fetched nothing relevant in this window; advance and keep going.
+                    offset += batch_limit
+                    fetched_so_far += batch_limit
+                    continue
 
             # Bake (resize in place + hash)
             for rec in batch:
@@ -662,6 +692,25 @@ def main() -> int:
         "--upload-chunks",
         action="store_true",
         help="Upload + delete each parquet partition as it closes (frees disk during run)",
+    )
+    p_all.add_argument(
+        "--category",
+        choices=sorted(CANONICAL_CATEGORIES),
+        default=None,
+        help=(
+            "Restrict bake to materials whose normalized category matches. "
+            "Produces exactly one parquet + rowmap. Used for surgical gap-fills "
+            "on an existing release without touching other categories' offsets."
+        ),
+    )
+    p_all.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Run fetch + bake to local disk as usual, but skip any release uploads. "
+            "Output stays in <output_dir>/ so you can inspect it before committing. "
+            "Composes with --category and --limit for quick smoke runs."
+        ),
     )
 
     p_derive = sub.add_parser("derive", help="Derive smaller tier from existing bake output")
