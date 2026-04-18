@@ -1345,23 +1345,8 @@ def _render_synthesized_mtlx_xml(
 # GPUOpen upstream names → our mat-vis channel names.
 # Used by the original-mtlx path-rewriter so a <input file value="BaseColor.png"/>
 # is redirected to our local "color.png" after materialization.
-_FILENAME_TO_CHANNEL: dict[str, str] = {
-    "basecolor": "color",
-    "base_color": "color",
-    "diffuse": "color",
-    "normal": "normal",
-    "roughness": "roughness",
-    "specular_roughness": "roughness",
-    "metallic": "metalness",
-    "metalness": "metalness",
-    "occlusion": "ao",
-    "ao": "ao",
-    "ambientocclusion": "ao",
-    "displacement": "displacement",
-    "height": "displacement",
-    "emission": "emission",
-    "emissive": "emission",
-}
+# Single source of truth: mat_vis_client.schema.CHANNELS (filename_aliases).
+from mat_vis_client.schema import FILENAME_TO_CHANNEL as _FILENAME_TO_CHANNEL  # noqa: E402
 
 
 def _rewrite_mtlx_texture_paths(xml_str: str, tex_dir: Path, channels: list[str]) -> str:
