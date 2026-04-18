@@ -3,7 +3,7 @@
 
 # Material Catalog
 
-> **2813** materials across **4** sources, **5** resolution tiers.
+> **2813** materials across **4** sources, **9** resolution tiers.
 >
 > Browse by source → category. Click a material name to view it on the upstream site.
 > Thumbnails are 128px previews — full textures available via
@@ -24,7 +24,7 @@
 
 ## 🪨 ambientcg
 
-> 1965 materials | Tiers: 128, 1k, 256, 512 | License: CC0-1.0
+> 1965 materials | Tiers: 128, 1k, 256, 2k, 512, ktx2-128, ktx2-1k, ktx2-256, ktx2-512 | License: CC0-1.0
 > [https://ambientcg.com](https://ambientcg.com)
 
 
@@ -2058,7 +2058,7 @@
 
 ## 🏔️ polyhaven
 
-> 753 materials | Tiers: 128, 1k, 256, 2k, 512 | License: CC0-1.0
+> 753 materials | Tiers: 128, 1k, 256, 2k, 512, ktx2-128, ktx2-1k, ktx2-256, ktx2-512 | License: CC0-1.0
 > [https://polyhaven.com](https://polyhaven.com)
 
 
@@ -2873,7 +2873,7 @@
 
 ## 💎 gpuopen
 
-> 9 materials | Tiers: 128, 1k, 256, 512 | License: TBV (per material)
+> 9 materials | Tiers: 128, 1k, 256, 2k, 512, ktx2-128, ktx2-1k, ktx2-256, ktx2-512 | License: TBV (per material)
 > [https://matlib.gpuopen.com](https://matlib.gpuopen.com)
 
 
@@ -3022,4 +3022,4 @@
 
 
 ---
-*Generated from release `v2026.04.0` on 2026-04-18 01:30 UTC*
+*Generated from release `v2026.04.0` on 2026-04-18 11:53 UTC*
