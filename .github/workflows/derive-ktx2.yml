@@ -42,6 +42,7 @@ on:  # yamllint disable-line rule:truthy
 
 permissions:
   contents: write
+  issues: write          # needed by notify-on-failure composite action
 
 jobs:
   derive-ktx2:
@@ -65,3 +66,17 @@ jobs:
             --registry-pass=env:GITHUB_TOKEN
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify on failure
+        if: failure()
+        uses: ./.github/actions/notify-on-failure
+        with:
+          label-prefix: "[ktx2-derive-failed]"
+          workflow-name: "derive-ktx2"
+          target: "${{ inputs.source }}/${{ inputs.target-tier }} <- ${{ inputs.source-tier }} @ ${{ inputs.release-tag }}"
+          context: >-
+            Likely causes: toktx encode failure on specific channel
+            types (16-bit displacement/ao is known-bad), source-tier
+            parquet missing on the release, or the #82-class empty-rowmap
+            bug where all materials in a category fail transcode and
+            the rowmap iteration skips the empty category.

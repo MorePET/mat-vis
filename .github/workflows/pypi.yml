@@ -12,6 +12,7 @@ on:  # yamllint disable-line rule:truthy
 permissions:
   id-token: write
   contents: read
+  issues: write          # needed by notify-on-failure composite action
 
 jobs:
   # Explicit pre-publish gate (issue #73). ci.yml runs on main/dev pushes
@@ -173,3 +174,19 @@ jobs:
           assert MatVisClient.__name__ == "MatVisClient"
           print("OK")
           PY
+
+      - name: Notify on failure
+        if: failure()
+        uses: ./.github/actions/notify-on-failure
+        with:
+          label-prefix: "[pypi-verify-failed]"
+          workflow-name: "pypi (test/publish/verify)"
+          target: ${{ steps.ver.outputs.version != '' && format('client/v{0}', steps.ver.outputs.version) || 'workflow_dispatch' }}
+          labels: "bug,area:client,priority:high"
+          context: >-
+            Fires for any of: pre-publish pytest failure, tag/pyproject
+            mismatch (#74), publish failure, or post-publish smoke check
+            failure. If the publish step itself succeeded but verify
+            failed, a broken wheel may now be live on PyPI — yank it and
+            re-cut with the fix rather than publishing the same version
+            over a different filename.
