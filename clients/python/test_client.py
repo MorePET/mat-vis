@@ -1055,7 +1055,7 @@ def live_client():
 class TestLiveManifest:
     def test_fetch_manifest(self, live_client):
         m = live_client.manifest
-        assert m["version"] == 1
+        assert m["schema_version"] == 1
         assert "tiers" in m
 
     def test_tiers(self, live_client):
