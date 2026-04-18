@@ -321,3 +321,105 @@ def hash_textures(record: MaterialRecord) -> MaterialRecord:
         if path.exists():
             record.texture_hashes[channel] = hash_png(path)
     return record
+
+
+# ── safe ZIP extraction (zip-slip + decompression bomb defense) ─
+
+
+class UnsafeZipError(ValueError):
+    """Raised when a ZIP trips one of the safety checks."""
+
+
+def check_zip_safety(
+    zf,
+    *,
+    output_dir: Path | None = None,
+    max_total_mb: int = 500,
+    max_per_file_mb: int = 200,
+    max_compression_ratio: float = 100.0,
+) -> None:
+    """Validate a zipfile.ZipFile against zip-slip + decompression-bomb attacks.
+
+    Does NOT extract — callers choose extraction strategy (extractall or
+    selective via zf.read()). Use before any read.
+
+    Checks:
+      - Zip-slip (CWE-22): if output_dir is given, every member's
+        normalized path must stay inside it.
+      - Decompression bomb (CWE-409): total uncompressed, per-file,
+        and compression ratio limits.
+
+    Raises UnsafeZipError with a clear message on violation.
+
+    Args:
+        zf: an open zipfile.ZipFile
+        output_dir: destination dir (only needed for zip-slip check)
+        max_total_mb: reject if total uncompressed size exceeds
+        max_per_file_mb: reject if any single file exceeds
+        max_compression_ratio: reject if uncompressed / compressed >
+    """
+    max_total_bytes = max_total_mb * 1024 * 1024
+    max_per_file_bytes = max_per_file_mb * 1024 * 1024
+    resolved_out = Path(output_dir).resolve() if output_dir else None
+
+    total_uncompressed = 0
+    total_compressed = 0
+
+    for member in zf.infolist():
+        if resolved_out is not None:
+            target = (resolved_out / member.filename).resolve()
+            try:
+                target.relative_to(resolved_out)
+            except ValueError as e:
+                raise UnsafeZipError(
+                    f"zip-slip: {member.filename!r} would escape {resolved_out}"
+                ) from e
+
+        if member.file_size > max_per_file_bytes:
+            raise UnsafeZipError(
+                f"decompression bomb: {member.filename!r} "
+                f"uncompressed size {member.file_size} > limit {max_per_file_bytes}"
+            )
+
+        total_uncompressed += member.file_size
+        total_compressed += member.compress_size
+
+        if total_uncompressed > max_total_bytes:
+            raise UnsafeZipError(
+                f"decompression bomb: archive total uncompressed size "
+                f"{total_uncompressed} > limit {max_total_bytes}"
+            )
+
+    if total_compressed > 0:
+        ratio = total_uncompressed / total_compressed
+        if ratio > max_compression_ratio:
+            raise UnsafeZipError(
+                f"decompression bomb: compression ratio {ratio:.1f}x "
+                f"exceeds {max_compression_ratio}x limit"
+            )
+
+
+def safe_zip_extract(
+    zf,
+    output_dir: Path,
+    *,
+    max_total_mb: int = 500,
+    max_per_file_mb: int = 200,
+    max_compression_ratio: float = 100.0,
+) -> None:
+    """Extract a zipfile.ZipFile to output_dir with zip-slip + bomb defenses.
+
+    Convenience wrapper: calls check_zip_safety then zf.extractall.
+    For selective extraction, call check_zip_safety directly then use
+    zf.read() per-member.
+    """
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    check_zip_safety(
+        zf,
+        output_dir=output_dir,
+        max_total_mb=max_total_mb,
+        max_per_file_mb=max_per_file_mb,
+        max_compression_ratio=max_compression_ratio,
+    )
+    zf.extractall(output_dir)

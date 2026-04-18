@@ -17,6 +17,7 @@ import requests
 
 from mat_vis_baker.common import (
     MaterialRecord,
+    check_zip_safety,
     normalize_category,
     normalize_channel,
     retry_request,
@@ -92,6 +93,11 @@ def _extract_from_zip(
     source_url = f"https://matlib.gpuopen.com/main/materials/all?material={material_id}"
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        # Validate before any read — rejects decompression bombs. Output
+        # paths are derived from normalized channel names (not member
+        # names), so zip-slip is already avoided; this check covers the
+        # bomb case where a malicious member has huge uncompressed size.
+        check_zip_safety(zf)
         for name in zf.namelist():
             if name.endswith("/"):
                 continue

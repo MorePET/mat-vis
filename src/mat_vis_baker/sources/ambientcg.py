@@ -17,6 +17,7 @@ import requests
 
 from mat_vis_baker.common import (
     MaterialRecord,
+    check_zip_safety,
     normalize_category,
     normalize_channel,
     retry_request,
@@ -125,6 +126,11 @@ def _extract_maps_from_zip(
     source_url = f"https://ambientcg.com/a/{material_id}"
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        # Validate before any read — rejects decompression bombs & zip-slip.
+        # Output dir isn't needed for slip check here (we derive paths from
+        # normalized channel names, not member names) but we still reject
+        # bombs that would OOM the runner.
+        check_zip_safety(zf)
         for name in zf.namelist():
             if name.endswith("/"):
                 continue
