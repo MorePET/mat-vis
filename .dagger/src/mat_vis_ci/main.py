@@ -593,7 +593,6 @@ class MatVisCi:
 
     # ── bake pipeline ─────────────────────────────────────────────
 
-    @function
     def _baker_container(
         self, context: dagger.Directory, with_ktx2: bool = False
     ) -> dagger.Container:
