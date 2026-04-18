@@ -39,6 +39,40 @@ LATEST_MANIFEST_URL = f"{GITHUB_RELEASES}/latest/download/release-manifest.json"
 DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" / "mat-vis"))
 USER_AGENT = "mat-vis-client/0.2 (Python)"
 
+
+def _parse_size(s: str | int) -> int:
+    """Parse '5GB', '500MB', '0' etc. to bytes. 0 disables size checks."""
+    if isinstance(s, int):
+        return s
+    s = str(s).strip().upper()
+    if s in ("0", ""):
+        return 0
+    units = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+    for unit in ("TB", "GB", "MB", "KB", "B"):
+        if s.endswith(unit):
+            num = s[: -len(unit)].strip()
+            try:
+                return int(float(num) * units[unit])
+            except ValueError:
+                break
+    try:
+        return int(s)
+    except ValueError as e:
+        raise ValueError(f"Cannot parse size: {s!r} (use e.g. '5GB', '500MB')") from e
+
+
+def _fmt_size(n: int) -> str:
+    """Format bytes to human-readable."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+
+# Default soft cap: 5 GB (configurable via MAT_VIS_CACHE_MAX_SIZE).
+DEFAULT_CACHE_MAX_BYTES = _parse_size(os.environ.get("MAT_VIS_CACHE_MAX_SIZE", "5GB"))
+
 # Valid categories per index-schema.json
 CATEGORIES = frozenset(
     [
@@ -515,7 +549,170 @@ class MatVisClient:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_bytes(data)
 
+        # Soft-cap warning (once per process)
+        self._maybe_warn_cache_cap()
+
         return data
+
+    # ── Cache management ────────────────────────────────────────
+
+    def cache_size(self) -> int:
+        """Total bytes currently in the cache directory (recursive)."""
+        if not self._cache_dir.exists():
+            return 0
+        total = 0
+        for p in self._cache_dir.rglob("*"):
+            if p.is_file():
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    pass
+        return total
+
+    def cache_status(self) -> dict[str, dict[str, int]]:
+        """Breakdown of cache usage by (source, tier) and metadata categories.
+
+        Returns a dict like:
+          {
+            "ambientcg/1k": {"bytes": 1234, "files": 56},
+            "_meta": {"bytes": 100, "files": 2},        # rowmaps + indexes + manifest + mtlx
+            "_total": {"bytes": 1334, "files": 58},
+          }
+        """
+        result: dict[str, dict[str, int]] = {}
+        total_bytes = 0
+        total_files = 0
+        if not self._cache_dir.exists():
+            result["_total"] = {"bytes": 0, "files": 0}
+            return result
+
+        meta_bytes = 0
+        meta_files = 0
+        for p in self._cache_dir.rglob("*"):
+            if not p.is_file():
+                continue
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            total_bytes += size
+            total_files += 1
+
+            rel = p.relative_to(self._cache_dir)
+            parts = rel.parts
+            if parts[0].startswith("."):
+                # .manifest.json, .rowmaps/, .indexes/, .mtlx-original/
+                meta_bytes += size
+                meta_files += 1
+                continue
+            # textures: source/tier/material/channel.png
+            if len(parts) >= 2:
+                key = f"{parts[0]}/{parts[1]}"
+                bucket = result.setdefault(key, {"bytes": 0, "files": 0})
+                bucket["bytes"] += size
+                bucket["files"] += 1
+
+        result["_meta"] = {"bytes": meta_bytes, "files": meta_files}
+        result["_total"] = {"bytes": total_bytes, "files": total_files}
+        return result
+
+    def cache_clear(self) -> int:
+        """Delete all cached data. Returns bytes freed."""
+        import shutil
+
+        if not self._cache_dir.exists():
+            return 0
+        size = self.cache_size()
+        shutil.rmtree(self._cache_dir, ignore_errors=True)
+        return size
+
+    def cache_prune(
+        self,
+        *,
+        keep_tags: list[str] | None = None,
+        tag: str | None = None,
+        source: str | None = None,
+        tier: str | None = None,
+    ) -> int:
+        """Delete subsets of the cache. Returns bytes freed.
+
+        Args:
+            keep_tags: Keep only these tags' rowmaps/indexes; delete others.
+            tag: Delete only this specific tag's rowmap/index files.
+            source: Delete only textures for this source.
+            tier: Delete only textures for this tier (combined with source if given).
+        """
+        import shutil
+
+        if not self._cache_dir.exists():
+            return 0
+        before = self.cache_size()
+
+        # Source/tier-scoped texture pruning
+        if source or tier:
+            for src_dir in self._cache_dir.iterdir():
+                if not src_dir.is_dir() or src_dir.name.startswith("."):
+                    continue
+                if source and src_dir.name != source:
+                    continue
+                if tier:
+                    tier_dir = src_dir / tier
+                    if tier_dir.exists():
+                        shutil.rmtree(tier_dir, ignore_errors=True)
+                else:
+                    shutil.rmtree(src_dir, ignore_errors=True)
+
+        # Tag-scoped pruning of rowmaps/indexes (only meta files have tag prefixes
+        # like "<source>-<tier>-<cat>-rowmap.json" — we can't infer tag from these
+        # without inspecting JSON content. Match by content's "release_tag" field.)
+        if keep_tags or tag:
+            keep_set = set(keep_tags) if keep_tags else None
+            rowmaps_dir = self._cache_dir / ".rowmaps"
+            indexes_dir = self._cache_dir / ".indexes"
+            for d in (rowmaps_dir, indexes_dir):
+                if not d.exists():
+                    continue
+                for f in d.iterdir():
+                    if not f.is_file() or f.suffix != ".json":
+                        continue
+                    try:
+                        content = json.loads(f.read_text())
+                        file_tag = content.get("release_tag")
+                    except Exception:
+                        continue
+                    if tag and file_tag == tag:
+                        f.unlink(missing_ok=True)
+                    elif keep_set and file_tag and file_tag not in keep_set:
+                        f.unlink(missing_ok=True)
+
+            # Manifest is current-tag only — drop if not in keep_tags
+            mf = self._cache_dir / ".manifest.json"
+            if mf.exists() and (keep_set or tag):
+                try:
+                    mtag = json.loads(mf.read_text()).get("release_tag")
+                except Exception:
+                    mtag = None
+                if (tag and mtag == tag) or (keep_set and mtag and mtag not in keep_set):
+                    mf.unlink(missing_ok=True)
+
+        return before - self.cache_size()
+
+    def _maybe_warn_cache_cap(self) -> None:
+        """Warn once per process if cache exceeds the soft cap."""
+        if DEFAULT_CACHE_MAX_BYTES <= 0:
+            return
+        if getattr(self, "_cap_warned", False):
+            return
+        size = self.cache_size()
+        if size > DEFAULT_CACHE_MAX_BYTES:
+            print(
+                f"mat-vis: cache is {_fmt_size(size)} (soft cap "
+                f"{_fmt_size(DEFAULT_CACHE_MAX_BYTES)}).\n"
+                f"         Run `mat-vis-client cache prune` to clean up.\n"
+                f"         Raise the cap with MAT_VIS_CACHE_MAX_SIZE=20GB.",
+                file=sys.stderr,
+            )
+            self._cap_warned = True
 
 
 # ── CLI ─────────────────────────────────────────────────────────
@@ -559,6 +756,19 @@ def main():
     p_prefetch = sub.add_parser("prefetch", help="Bulk download all materials for source x tier")
     p_prefetch.add_argument("source")
     p_prefetch.add_argument("tier", nargs="?", default="1k")
+
+    p_cache = sub.add_parser("cache", help="Manage the local cache")
+    p_cache_sub = p_cache.add_subparsers(dest="cache_cmd", required=True)
+    p_cache_sub.add_parser("status", help="Show cache size breakdown")
+    p_cache_sub.add_parser("clear", help="Delete all cached data")
+    p_prune = p_cache_sub.add_parser("prune", help="Delete subsets of the cache")
+    p_prune.add_argument("--source", help="Limit to one source")
+    p_prune.add_argument("--tier", help="Limit to one tier")
+    p_prune.add_argument("--tag", help="Drop a specific release tag's metadata")
+    p_prune.add_argument(
+        "--keep-tags",
+        help="Comma-separated tags to keep (drops everything else's metadata)",
+    )
 
     args = parser.parse_args()
     client = MatVisClient(tag=args.tag)
@@ -607,6 +817,44 @@ def main():
 
         n = client.prefetch(args.source, args.tier, on_progress=_progress)
         print(f"Prefetched {n} materials", file=sys.stderr)
+
+    elif args.cmd == "cache":
+        if args.cache_cmd == "status":
+            status = client.cache_status()
+            cap = DEFAULT_CACHE_MAX_BYTES
+            total = status.get("_total", {}).get("bytes", 0)
+            print(f"Cache directory: {client._cache_dir}")
+            print(
+                f"Total: {_fmt_size(total)} "
+                f"({status.get('_total', {}).get('files', 0)} files), "
+                f"soft cap: {_fmt_size(cap) if cap > 0 else 'disabled'}"
+            )
+            print()
+            print(f"  {'KEY':30s}  {'SIZE':>10s}  {'FILES':>8s}")
+            for key in sorted(status.keys()):
+                if key.startswith("_"):
+                    continue
+                s = status[key]
+                print(f"  {key:30s}  {_fmt_size(s['bytes']):>10s}  {s['files']:>8d}")
+            meta = status.get("_meta", {"bytes": 0, "files": 0})
+            print(f"  {'(metadata)':30s}  {_fmt_size(meta['bytes']):>10s}  {meta['files']:>8d}")
+            if cap > 0 and total > cap:
+                print(
+                    f"\nWARNING: cache exceeds soft cap by {_fmt_size(total - cap)}.",
+                    file=sys.stderr,
+                )
+        elif args.cache_cmd == "clear":
+            freed = client.cache_clear()
+            print(f"Cleared {_fmt_size(freed)}", file=sys.stderr)
+        elif args.cache_cmd == "prune":
+            keep_tags = args.keep_tags.split(",") if args.keep_tags else None
+            freed = client.cache_prune(
+                keep_tags=keep_tags,
+                tag=args.tag,
+                source=args.source,
+                tier=args.tier,
+            )
+            print(f"Pruned {_fmt_size(freed)}", file=sys.stderr)
 
 
 if __name__ == "__main__":
