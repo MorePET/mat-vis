@@ -4,12 +4,28 @@ Binary (PNG) columns are UNCOMPRESSED so that byte-range reads return raw
 PNG payload without any decompression. Scalar columns use ZSTD.
 
 Row group size = 1 (one material per row group) for per-material offset discovery.
+
+## Rowmap emission
+
+The correct path for new parquets is the "sidecar" approach: as each row is
+written, the caller records (material_id, channel) → byte_length in a
+``RowmapCollector``. After the writer closes, ``build_rowmap_from_sidecar``
+reads the parquet's own column-chunk metadata to find the exact
+``dictionary_page_offset`` for each (row_group, column). Combined with the
+known payload length from the sidecar, this yields an authoritative rowmap
+without ever relying on magic-byte heuristics.
+
+The legacy scanner (``generate_rowmap_from_parquet_legacy``) is kept only for
+retrofitting rowmaps onto parquets that were baked before the sidecar
+mechanism existed (the ``regenerate_rowmaps`` workflow). New code paths MUST
+NOT use it — it has proven fragile (#57).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,6 +68,159 @@ def _read_png_bytes(path: Path | None) -> bytes | None:
     return path.read_bytes()
 
 
+# ── rowmap sidecar ──────────────────────────────────────────────
+
+
+@dataclass
+class RowmapCollector:
+    """Records the authoritative payload length per (material_id, channel).
+
+    Populated by the caller as rows are written. After the ParquetWriter is
+    closed, pass this to ``build_rowmap_from_sidecar`` to produce the rowmap.
+
+    ``rows`` preserves insertion order — critical because row groups in the
+    resulting parquet are laid out in the same order as ``writer.write_table``
+    calls.
+    """
+
+    # Ordered list of (material_id, {channel: length_in_bytes}) entries.
+    # One entry per row group in the final parquet.
+    rows: list[tuple[str, dict[str, int]]] = field(default_factory=list)
+
+    def record(self, material_id: str, channel_lengths: dict[str, int]) -> None:
+        """Record one row's channel → byte-length mapping.
+
+        ``channel_lengths`` must only contain channels that were actually
+        written with non-null bytes. Null columns are excluded from the
+        rowmap.
+        """
+        self.rows.append((material_id, dict(channel_lengths)))
+
+
+# Small window for finding the payload start inside a column chunk. PyArrow's
+# Thrift page headers are typically ~30–60 bytes; a 4 KiB window is far more
+# than enough and cheap to read.
+_PAYLOAD_SEARCH_WINDOW = 4096
+
+
+def _find_payload_offset(fh, chunk_start: int, chunk_size: int, expected_length: int) -> int | None:
+    """Locate the actual binary payload within a column chunk.
+
+    Uses the KNOWN expected_length (from the sidecar) as an authoritative
+    signal — we only need to find where the payload STARTS inside the column
+    chunk, skipping pyarrow's Thrift page header. This is a minimal correction
+    for the header size, not a magic-byte heuristic.
+
+    Returns the absolute file offset of the first payload byte, or None if
+    not found.
+    """
+    # Strategy: the column chunk = [page_header][payload_bytes]. The payload
+    # is exactly ``expected_length`` bytes. We scan a small window looking
+    # for any magic that matches a known binary format, preferring matches
+    # at offsets that leave exactly ``expected_length`` bytes remaining.
+    window_size = min(_PAYLOAD_SEARCH_WINDOW, chunk_size)
+    fh.seek(chunk_start)
+    window = fh.read(window_size)
+
+    # Try PNG then KTX2 magic — these are the formats we currently emit.
+    for magic in (PNG_MAGIC, KTX2_MAGIC):
+        idx = window.find(magic)
+        if idx < 0:
+            continue
+        # Sanity: the payload from idx onward must fit inside the chunk.
+        if idx + expected_length > chunk_size:
+            continue
+        return chunk_start + idx
+
+    return None
+
+
+def build_rowmap_from_sidecar(
+    parquet_path: Path,
+    collector: RowmapCollector,
+    source: str,
+    tier: str,
+    release_tag: str,
+) -> dict:
+    """Build a rowmap from parquet metadata + sidecar-recorded lengths.
+
+    This is the authoritative path for newly-written parquets. Offsets come
+    from pyarrow's own column-chunk metadata; lengths come from what the
+    caller recorded at write time.
+    """
+    pf = pq.ParquetFile(parquet_path)
+    meta = pf.metadata
+
+    if meta.num_row_groups != len(collector.rows):
+        raise ValueError(
+            f"rowmap sidecar mismatch: {len(collector.rows)} recorded rows "
+            f"vs {meta.num_row_groups} row groups in {parquet_path.name}"
+        )
+
+    materials: dict[str, dict[str, dict[str, int]]] = {}
+
+    with open(parquet_path, "rb") as fh:
+        for rg_idx in range(meta.num_row_groups):
+            rg = meta.row_group(rg_idx)
+            material_id, channel_lengths = collector.rows[rg_idx]
+            if not channel_lengths:
+                continue
+
+            channels: dict[str, dict[str, int]] = {}
+            for col_idx in range(rg.num_columns):
+                col_meta = rg.column(col_idx)
+                col_name = col_meta.path_in_schema
+                if col_name not in CHANNEL_COLS:
+                    continue
+                expected_length = channel_lengths.get(col_name)
+                if expected_length is None:
+                    continue  # caller told us this channel is null
+
+                # With use_dictionary=False on binary columns, pyarrow still
+                # emits a "dictionary" page that holds the PLAIN-encoded
+                # payload. When that's absent, fall back to data_page_offset.
+                chunk_start = col_meta.dictionary_page_offset or col_meta.data_page_offset
+                chunk_size = col_meta.total_compressed_size
+
+                payload_offset = _find_payload_offset(fh, chunk_start, chunk_size, expected_length)
+                if payload_offset is None:
+                    log.error(
+                        "%s/%s: payload not locatable in column chunk "
+                        "(chunk_start=%d, size=%d, expected_length=%d) — "
+                        "sidecar/metadata are inconsistent",
+                        material_id,
+                        col_name,
+                        chunk_start,
+                        chunk_size,
+                        expected_length,
+                    )
+                    continue
+
+                channels[col_name] = {
+                    "offset": payload_offset,
+                    "length": expected_length,
+                }
+
+            if channels:
+                materials[material_id] = channels
+
+    rowmap = {
+        "version": 1,
+        "release_tag": release_tag,
+        "source": source,
+        "tier": tier,
+        "parquet_file": parquet_path.name,
+        "materials": materials,
+    }
+
+    log.info(
+        "rowmap (sidecar): %d materials, %d total channels",
+        len(materials),
+        sum(len(v) for v in materials.values()),
+    )
+    return rowmap
+
+
 def write_parquet(
     records: list[MaterialRecord],
     source: str,
@@ -63,6 +232,26 @@ def write_parquet(
 
     Each material's PNGs are read, written as a single row group, then freed.
     Never holds more than one material's textures in memory.
+    """
+    path, _ = write_parquet_with_rowmap(
+        records, source, tier, output_path, resolution_px, release_tag=None
+    )
+    return path
+
+
+def write_parquet_with_rowmap(
+    records: list[MaterialRecord],
+    source: str,
+    tier: str,
+    output_path: Path,
+    resolution_px: int,
+    release_tag: str | None = None,
+) -> tuple[Path, dict | None]:
+    """Write a Parquet file AND build an authoritative rowmap in one pass.
+
+    Returns ``(path, rowmap)``. If ``release_tag`` is None, only the parquet
+    is written and ``rowmap`` is None. Otherwise the rowmap is built from
+    the sidecar collected during write.
     """
     ok_records = [r for r in records if r.status == "ok"]
     if not ok_records:
@@ -76,6 +265,8 @@ def write_parquet(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    collector = RowmapCollector()
+
     writer = pq.ParquetWriter(
         output_path,
         _SCHEMA,
@@ -85,7 +276,6 @@ def write_parquet(
 
     try:
         for rec in ok_records:
-            # Build one row — read PNGs, write, free
             row = {
                 "id": [rec.id],
                 "source": [source],
@@ -96,8 +286,14 @@ def write_parquet(
                 "baker_version": [BAKER_VERSION],
                 "baked_at": [now],
             }
+            channel_lengths: dict[str, int] = {}
             for ch in CANONICAL_CHANNELS:
-                row[ch] = [_read_png_bytes(rec.texture_paths.get(ch))]
+                data = _read_png_bytes(rec.texture_paths.get(ch))
+                row[ch] = [data]
+                if data is not None:
+                    channel_lengths[ch] = len(data)
+
+            collector.record(rec.id, channel_lengths)
 
             table = pa.table(row, schema=_SCHEMA)
             writer.write_table(table)
@@ -111,7 +307,12 @@ def write_parquet(
         len(ok_records),
         output_path.stat().st_size / 1e6,
     )
-    return output_path
+
+    rowmap: dict | None = None
+    if release_tag is not None:
+        rowmap = build_rowmap_from_sidecar(output_path, collector, source, tier, release_tag)
+
+    return output_path, rowmap
 
 
 MAX_PARTITION_BYTES = 1_800_000_000  # 1.8 GB — stay under GitHub's 2 GB limit
@@ -194,25 +395,6 @@ def write_partitioned_parquet(
 # ── rowmap generation ───────────────────────────────────────────
 
 
-_MAX_PAGE_HEADER_SIZE = 256  # Thrift page header can be larger for nullable columns
-
-
-def _find_png_in_page(data: bytes, page_offset: int, png_length: int) -> int | None:
-    """Find PNG magic within the first bytes after a data page offset.
-
-    Only scans a small window after the page offset to avoid false positives
-    from PNG magic bytes inside other columns' binary data.
-    """
-    search_end = min(page_offset + _MAX_PAGE_HEADER_SIZE, len(data))
-    idx = data.find(PNG_MAGIC, page_offset, search_end)
-    if idx is None or idx < 0:
-        return None
-    # Verify we have enough bytes for the full PNG
-    if idx + png_length > len(data):
-        return None
-    return idx
-
-
 def generate_rowmap(
     parquet_path: Path,
     source: str,
@@ -220,69 +402,115 @@ def generate_rowmap(
     release_tag: str,
     records: list[MaterialRecord],
 ) -> dict:
-    """Generate a rowmap JSON from a Parquet file.
+    """Generate a rowmap from a Parquet file and on-disk MaterialRecords.
 
-    For each binary column, scans a small window after the data page offset
-    for the PNG magic bytes. The window is limited to avoid false positives
-    from PNG magic appearing inside other columns' compressed data.
+    Uses the on-disk texture files to determine the authoritative payload
+    length per channel, then resolves the offset via the parquet's own
+    column-chunk metadata. This replaces the old magic-byte scanning
+    heuristic with a deterministic sidecar-style lookup.
+    """
+    ok_records = [r for r in records if r.status == "ok"]
+    collector = RowmapCollector()
+
+    for rec in ok_records:
+        channel_lengths: dict[str, int] = {}
+        for ch in CANONICAL_CHANNELS:
+            path = rec.texture_paths.get(ch)
+            if path is not None and path.exists():
+                channel_lengths[ch] = path.stat().st_size
+        collector.record(rec.id, channel_lengths)
+
+    return build_rowmap_from_sidecar(parquet_path, collector, source, tier, release_tag)
+
+
+# ── legacy scanner (retrofit only) ──────────────────────────────
+
+# Page-header scan window used by the LEGACY scanner. Kept only for
+# compatibility with parquets baked before sidecar rowmap emission (#57).
+_MAX_PAGE_HEADER_SIZE = 4096
+
+
+def generate_rowmap_from_parquet_legacy(
+    parquet_path: Path,
+    source: str,
+    tier: str,
+    release_tag: str,
+) -> dict:
+    """LEGACY scanner — magic-byte heuristic. Use only for retrofit.
+
+    This is the pre-#57 implementation, kept functional solely so the
+    ``regenerate_rowmaps`` Dagger function can rebuild rowmaps for
+    parquets that were baked without a sidecar. New code paths MUST
+    NOT call this function.
+
+    It searches for PNG or KTX2 magic bytes inside each column chunk,
+    then walks from the magic to find the payload end. The window was
+    raised to 4 KiB (up from 256 B) to cover larger Thrift page headers,
+    but the approach is still fundamentally heuristic and can silently
+    drop channels under edge cases (data page v2, unusual magic
+    alignment, etc).
     """
     pf = pq.ParquetFile(parquet_path)
     fh = open(parquet_path, "rb")  # noqa: SIM115 — kept open for seeking
     meta = pf.metadata
-
-    ok_records = [r for r in records if r.status == "ok"]
     parquet_name = parquet_path.name
 
     materials: dict[str, dict[str, dict[str, int]]] = {}
 
-    for rg_idx in range(meta.num_row_groups):
-        rg = meta.row_group(rg_idx)
-        rec = ok_records[rg_idx]
-        channels: dict[str, dict[str, int]] = {}
+    try:
+        for rg_idx in range(meta.num_row_groups):
+            rg = meta.row_group(rg_idx)
 
-        for col_idx in range(rg.num_columns):
-            col_meta = rg.column(col_idx)
-            col_name = col_meta.path_in_schema
+            table = pf.read_row_group(rg_idx, columns=["id"])
+            mid = table.column("id")[0].as_py()
 
-            if col_name not in CHANNEL_COLS:
-                continue
+            channels: dict[str, dict[str, int]] = {}
 
-            if not rec.texture_paths.get(col_name):
-                continue
+            for col_idx in range(rg.num_columns):
+                col_meta = rg.column(col_idx)
+                col_name = col_meta.path_in_schema
 
-            # Find PNG start: scan a small window after the data page header
-            page_offset = col_meta.data_page_offset
-            fh.seek(page_offset)
-            window = fh.read(_MAX_PAGE_HEADER_SIZE)
-            png_idx = window.find(PNG_MAGIC)
-            png_start = (page_offset + png_idx) if png_idx >= 0 else None
-            if png_start is None:
-                log.warning(
-                    "%s/%s: PNG magic not found within %d bytes of page offset %d",
-                    rec.id,
-                    col_name,
-                    _MAX_PAGE_HEADER_SIZE,
-                    page_offset,
-                )
-                continue
+                if col_name not in CHANNEL_COLS:
+                    continue
 
-            # Find PNG end: scan for IEND chunk within the column's data
-            data_size = col_meta.total_compressed_size
-            fh.seek(png_start)
-            png_data = fh.read(data_size)
-            iend_pos = png_data.find(b"IEND")
-            if iend_pos < 0:
-                log.warning("%s/%s: IEND not found, skipping", rec.id, col_name)
-                continue
-            png_length = iend_pos + 4 + 4  # IEND marker + CRC
+                if col_meta.is_stats_set and col_meta.statistics.null_count == col_meta.num_values:
+                    continue
 
-            channels[col_name] = {
-                "offset": png_start,
-                "length": png_length,
-            }
+                page_offset = col_meta.dictionary_page_offset or col_meta.data_page_offset
+                chunk_size = col_meta.total_compressed_size
 
-        if channels:
-            materials[rec.id] = channels
+                fh.seek(page_offset)
+                window = fh.read(min(_MAX_PAGE_HEADER_SIZE, chunk_size))
+
+                png_idx = window.find(PNG_MAGIC)
+                ktx2_idx = window.find(KTX2_MAGIC) if png_idx < 0 else -1
+
+                if png_idx >= 0:
+                    data_start = page_offset + png_idx
+                    fh.seek(data_start)
+                    data = fh.read(chunk_size - png_idx)
+
+                    iend_pos = data.find(b"IEND")
+                    if iend_pos < 0:
+                        log.warning("legacy: %s/%s: IEND not found, skipping", mid, col_name)
+                        continue
+                    data_length = iend_pos + 4 + 4  # IEND marker + CRC
+
+                elif ktx2_idx >= 0:
+                    data_start = page_offset + ktx2_idx
+                    data_length = chunk_size - ktx2_idx
+                else:
+                    continue
+
+                channels[col_name] = {
+                    "offset": data_start,
+                    "length": data_length,
+                }
+
+            if channels:
+                materials[mid] = channels
+    finally:
+        fh.close()
 
     rowmap = {
         "version": 1,
@@ -293,10 +521,8 @@ def generate_rowmap(
         "materials": materials,
     }
 
-    fh.close()
-
     log.info(
-        "rowmap: %d materials, %d total channels",
+        "rowmap (legacy scanner): %d materials, %d total channels",
         len(materials),
         sum(len(v) for v in materials.values()),
     )
@@ -309,102 +535,13 @@ def generate_rowmap_from_parquet(
     tier: str,
     release_tag: str,
 ) -> dict:
-    """Generate a rowmap by reading material IDs and PNG sizes from the parquet itself.
+    """Back-compat shim → legacy scanner.
 
-    Unlike generate_rowmap(), this does not require MaterialRecords with on-disk
-    texture_paths. It reads the parquet row groups, extracts the material ID from
-    the 'id' column, and determines PNG byte length by reading each binary column's
-    data page to find the PNG payload boundaries (PNG magic to IEND chunk).
+    Kept so external callers (and the retrofit workflow) still have a
+    working import. New code MUST pass a ``RowmapCollector`` sidecar and
+    call ``build_rowmap_from_sidecar`` instead; see #57.
     """
-    pf = pq.ParquetFile(parquet_path)
-    fh = open(parquet_path, "rb")  # noqa: SIM115 — kept open for seeking
-    meta = pf.metadata
-    parquet_name = parquet_path.name
-
-    # Map column name -> column index
-    col_name_to_idx = {}
-    schema = pf.schema_arrow
-    for i, field in enumerate(schema):
-        col_name_to_idx[field.name] = i
-
-    materials: dict[str, dict[str, dict[str, int]]] = {}
-
-    for rg_idx in range(meta.num_row_groups):
-        rg = meta.row_group(rg_idx)
-
-        # Read the material ID from this row group
-        table = pf.read_row_group(rg_idx, columns=["id"])
-        mid = table.column("id")[0].as_py()
-
-        channels: dict[str, dict[str, int]] = {}
-
-        for col_idx in range(rg.num_columns):
-            col_meta = rg.column(col_idx)
-            col_name = col_meta.path_in_schema
-
-            if col_name not in CHANNEL_COLS:
-                continue
-
-            # Check if column has data (non-null) by looking at stats
-            if col_meta.is_stats_set and col_meta.statistics.null_count == col_meta.num_values:
-                continue
-
-            # Column chunk starts at dictionary_page_offset if dict exists,
-            # else at data_page_offset. PyArrow with use_dictionary=False on
-            # binary columns still emits a "dictionary" page that holds the
-            # actual data (with PLAIN encoding inside it).
-            page_offset = col_meta.dictionary_page_offset or col_meta.data_page_offset
-            chunk_size = col_meta.total_compressed_size
-
-            fh.seek(page_offset)
-            window = fh.read(min(_MAX_PAGE_HEADER_SIZE, chunk_size))
-
-            png_idx = window.find(PNG_MAGIC)
-            ktx2_idx = window.find(KTX2_MAGIC) if png_idx < 0 else -1
-
-            if png_idx >= 0:
-                data_start = page_offset + png_idx
-                # Read the rest of the column chunk to find IEND
-                fh.seek(data_start)
-                data = fh.read(chunk_size - png_idx)
-
-                iend_pos = data.find(b"IEND")
-                if iend_pos < 0:
-                    log.warning("%s/%s: IEND not found, skipping", mid, col_name)
-                    continue
-                data_length = iend_pos + 4 + 4  # IEND marker + CRC
-
-            elif ktx2_idx >= 0:
-                data_start = page_offset + ktx2_idx
-                data_length = chunk_size - ktx2_idx
-            else:
-                continue
-
-            channels[col_name] = {
-                "offset": data_start,
-                "length": data_length,
-            }
-
-        if channels:
-            materials[mid] = channels
-
-    rowmap = {
-        "version": 1,
-        "release_tag": release_tag,
-        "source": source,
-        "tier": tier,
-        "parquet_file": parquet_name,
-        "materials": materials,
-    }
-
-    fh.close()
-
-    log.info(
-        "rowmap (from-parquet): %d materials, %d total channels",
-        len(materials),
-        sum(len(v) for v in materials.values()),
-    )
-    return rowmap
+    return generate_rowmap_from_parquet_legacy(parquet_path, source, tier, release_tag)
 
 
 def write_rowmap(rowmap: dict, output_path: Path) -> Path:

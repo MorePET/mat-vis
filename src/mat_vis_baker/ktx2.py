@@ -10,11 +10,11 @@ channels with appropriate settings per channel type:
 The resulting KTX2 files are ~5x smaller than PNG and can be uploaded to the
 GPU without a decode step.
 
-NOTE: The rowmap scanner (parquet_writer.py) currently searches for PNG magic
-bytes (b'\\x89PNG') to locate textures inside parquet pages. KTX2 tiers will
-need the scanner to also recognise KTX2 magic: b'\\xabKTX 20\\xbb\\r\\n\\x1a\\n'
-(12 bytes). That change is NOT made here — it belongs in a separate rowmap
-update.
+Rowmaps for KTX2 parquets are generated via the sidecar mechanism in
+``parquet_writer.build_rowmap_from_sidecar``: the exact byte length of each
+encoded KTX2 payload is recorded at write time, so offset discovery matches
+on the 12-byte KTX2 magic and confirms the known length fits in the column
+chunk — no IEND scanning, no format-specific heuristics.
 """
 
 from __future__ import annotations
@@ -38,7 +38,13 @@ from mat_vis_baker.common import (
     TIER_TO_PX,
     MaterialRecord,
 )
-from mat_vis_baker.parquet_writer import CHANNEL_COLS, _SCHEMA
+from mat_vis_baker.parquet_writer import (
+    CHANNEL_COLS,
+    _SCHEMA,
+    RowmapCollector,
+    build_rowmap_from_sidecar,
+    write_rowmap,
+)
 
 log = logging.getLogger("mat-vis-baker.ktx2")
 
@@ -216,6 +222,7 @@ def derive_ktx2_from_release(
         use_dictionary = {col: col not in CHANNEL_COLS for col in [f.name for f in _SCHEMA]}
 
         writers: dict[str, pq.ParquetWriter] = {}
+        collectors: dict[str, RowmapCollector] = {}
         records_by_cat: dict[str, list[MaterialRecord]] = defaultdict(list)
         n_ok = 0
         n_fail = 0
@@ -248,6 +255,7 @@ def derive_ktx2_from_release(
                     "baked_at": [now],
                 }
                 row_channels: list[str] = []
+                channel_lengths: dict[str, int] = {}
 
                 for ch in CANONICAL_CHANNELS:
                     if ch in channels:
@@ -256,6 +264,7 @@ def derive_ktx2_from_release(
                             ktx2_bytes = png_to_ktx2(png_bytes, ch)
                             row[ch] = [ktx2_bytes]
                             row_channels.append(ch)
+                            channel_lengths[ch] = len(ktx2_bytes)
                         except Exception:
                             log.warning(
                                 "%s/%s: fetch/transcode failed, nulling channel",
@@ -287,6 +296,9 @@ def derive_ktx2_from_release(
                         compression=compression,
                         use_dictionary=use_dictionary,
                     )
+                    collectors[category] = RowmapCollector()
+
+                collectors[category].record(mid, channel_lengths)
 
                 table = pa.table(row, schema=_SCHEMA)
                 writers[category].write_table(table)
@@ -338,19 +350,15 @@ def derive_ktx2_from_release(
         ]
         all_parquet_paths.extend(parquet_paths)
 
-        # ── generate rowmaps ──
-        # NOTE: The standard rowmap scanner searches for PNG magic bytes.
-        # KTX2 parquets will need a KTX2-aware scanner (searching for
-        # KTX2_MAGIC instead of PNG_MAGIC). Until that is implemented,
-        # rowmaps for KTX2 tiers will not contain correct byte offsets.
-        # For now we still call generate_rowmap_from_parquet so the
-        # structure is in place — the offset discovery will simply skip
-        # channels where PNG magic is not found.
-        from mat_vis_baker.parquet_writer import generate_rowmap_from_parquet, write_rowmap
-
+        # ── generate rowmaps (sidecar — KTX2-safe) ──
+        # The sidecar collector recorded exact byte lengths for every KTX2
+        # payload written. build_rowmap_from_sidecar locates the payload
+        # start inside each column chunk by matching on the KTX2 magic and
+        # confirming the known length fits — no IEND scanning required.
         for category in sorted(records_by_cat.keys()):
             pq_path = output_dir / f"mat-vis-{source}-{target_tier}-{category}.parquet"
-            rowmap = generate_rowmap_from_parquet(pq_path, source, target_tier, tag)
+            collector = collectors.get(category, RowmapCollector())
+            rowmap = build_rowmap_from_sidecar(pq_path, collector, source, target_tier, tag)
             rm_path = output_dir / f"{source}-{target_tier}-{category}-rowmap.json"
             write_rowmap(rowmap, rm_path)
 
