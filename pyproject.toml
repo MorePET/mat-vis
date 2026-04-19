@@ -12,6 +12,7 @@ baker = [
     "pyarrow>=15",
     "requests>=2.31",
     "pillow>=10.0",
+    "huggingface_hub>=0.25",
 ]
 materialx = [
     "materialx>=1.39",
