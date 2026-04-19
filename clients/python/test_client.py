@@ -50,60 +50,75 @@ def _mock_get(*args, **kwargs):
 
 
 MOCK_MANIFEST = {
-    "schema_version": 1,
-    "version": 1,  # retained for tests asserting on the legacy field
-    "release_tag": "v2026.04.0",
-    "tiers": {
-        "1k": {
-            "base_url": "https://example.com/releases/download/v2026.04.0/",
-            "sources": {
-                "ambientcg": {
-                    # Single rowmap — legacy shape. Search tests that need
-                    # broader category discovery override via mock_client_with_categories.
-                    "parquet_files": ["mat-vis-ambientcg-1k-stone.parquet"],
-                    "rowmap_files": ["ambientcg-1k-stone-rowmap.json"],
-                    "rowmap_file": "ambientcg-1k-stone-rowmap.json",
-                },
-                "polyhaven": {
-                    "parquet_files": ["mat-vis-polyhaven-1k-wood.parquet"],
-                    "rowmap_files": ["polyhaven-1k-wood-rowmap.json"],
-                    "rowmap_file": "polyhaven-1k-wood-rowmap.json",
-                },
-                "gpuopen": {
-                    "parquet_files": ["mat-vis-gpuopen-1k-other.parquet"],
-                    "rowmap_files": ["gpuopen-1k-other-rowmap.json"],
-                    "rowmap_file": "gpuopen-1k-other-rowmap.json",
+    "schema_version": 2,
+    "release_tag": "v2026.04.1",
+    "sources": {
+        "ambientcg": {
+            "catalog": "ambientcg.json",
+            "materials_count": 3,
+            "tiers": {
+                "1k": {
+                    "tar": "ambientcg-1k.tar",
+                    "rowmap": "ambientcg-1k-rowmap.json",
                 },
             },
-        }
+        },
+        "polyhaven": {
+            "catalog": "polyhaven.json",
+            "materials_count": 1,
+            "tiers": {
+                "1k": {
+                    "tar": "polyhaven-1k.tar",
+                    "rowmap": "polyhaven-1k-rowmap.json",
+                },
+            },
+        },
+        "gpuopen": {
+            "catalog": "gpuopen.json",
+            "materials_count": 1,
+            "tiers": {
+                "1k": {
+                    "tar": "gpuopen-1k.tar",
+                    "rowmap": "gpuopen-1k-rowmap.json",
+                },
+            },
+        },
     },
 }
 
-# Rowmap suitable for the gpuopen "test-uuid" material — mirrors the
-# ambientcg fixture's structure so MtlxSource.original.export() has
-# concrete channels to rewrite texture paths against.
+# Rowmap shape for the v0.6.0 tar substrate: no parquet_file, offsets
+# point at tar bytes. The client attaches `tar_file` on each channel at
+# read time from the manifest's tier entry.
 MOCK_ROWMAP_GPUOPEN = {
-    "parquet_file": "gpuopen-1k.parquet",
+    "version": 1,
+    "release_tag": "v2026.04.1",
+    "source": "gpuopen",
+    "tier": "1k",
+    "tar_file": "gpuopen-1k.tar",
     "materials": {
         "test-uuid": {
-            "color": {"offset": 0, "length": 1024},
-            "roughness": {"offset": 1024, "length": 512},
+            "color": {"offset": 512, "length": 1024},
+            "roughness": {"offset": 2048, "length": 512},
         },
     },
 }
 
 MOCK_ROWMAP = {
-    "parquet_file": "ambientcg-1k.parquet",
+    "version": 1,
+    "release_tag": "v2026.04.1",
+    "source": "ambientcg",
+    "tier": "1k",
+    "tar_file": "ambientcg-1k.tar",
     "materials": {
         "Rock064": {
-            "color": {"offset": 0, "length": 1024},
-            "normal": {"offset": 1024, "length": 2048},
-            "roughness": {"offset": 3072, "length": 512},
+            "color": {"offset": 512, "length": 1024},
+            "normal": {"offset": 2048, "length": 2048},
+            "roughness": {"offset": 4608, "length": 512},
         },
         "Metal032": {
-            "color": {"offset": 4000, "length": 800},
-            "metalness": {"offset": 4800, "length": 600},
-            "roughness": {"offset": 5400, "length": 500},
+            "color": {"offset": 5120, "length": 800},
+            "metalness": {"offset": 6144, "length": 600},
+            "roughness": {"offset": 7168, "length": 500},
         },
     },
 }
@@ -161,9 +176,9 @@ MOCK_INDEX_AMBIENTCG = [
 def mock_client():
     """Client with mocked HTTP and temp cache."""
     with tempfile.TemporaryDirectory() as tmp:
-        client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
-        # Pre-populate manifest cache at the tag-scoped path (0.5.0+).
-        cache_path = Path(tmp) / "v2026.04.0" / ".manifest.json"
+        client = MatVisClient(tag="v2026.04.1", cache_dir=Path(tmp))
+        # Pre-populate manifest cache at the tag-scoped path.
+        cache_path = Path(tmp) / "v2026.04.1" / ".manifest.json"
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(MOCK_MANIFEST))
         # Suppress the background update-check HTTP calls that would
@@ -177,22 +192,15 @@ def mock_search_client():
     """Client with a richer manifest (multiple rowmaps per source) so
     search() discovers the full category set. Used by search tests that
     reference categories not in the default single-rowmap fixture."""
+    # v0.6.0: no per-category partitioning (ADR-0007). The "rich"
+    # variant just raises the materials_count to match the full catalog
+    # used by search tests; category breadth comes from the catalog
+    # itself, not the manifest.
     rich_manifest = json.loads(json.dumps(MOCK_MANIFEST))  # deep copy
-    rich_manifest["tiers"]["1k"]["sources"]["ambientcg"].update(
-        parquet_files=[
-            "mat-vis-ambientcg-1k-stone.parquet",
-            "mat-vis-ambientcg-1k-metal.parquet",
-            "mat-vis-ambientcg-1k-wood.parquet",
-        ],
-        rowmap_files=[
-            "ambientcg-1k-stone-rowmap.json",
-            "ambientcg-1k-metal-rowmap.json",
-            "ambientcg-1k-wood-rowmap.json",
-        ],
-    )
+    rich_manifest["sources"]["ambientcg"]["materials_count"] = 3
     with tempfile.TemporaryDirectory() as tmp:
-        client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
-        cache_path = Path(tmp) / "v2026.04.0" / ".manifest.json"
+        client = MatVisClient(tag="v2026.04.1", cache_dir=Path(tmp))
+        cache_path = Path(tmp) / "v2026.04.1" / ".manifest.json"
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(rich_manifest))
         client._update_warned = True
@@ -223,8 +231,8 @@ class TestInRange:
 class TestClientManifest:
     def test_manifest_loads_from_cache(self, mock_client):
         m = mock_client.manifest
-        assert m["schema_version"] == 1
-        assert "tiers" in m
+        assert m["schema_version"] == 2
+        assert "sources" in m
 
     def test_tiers(self, mock_client):
         assert mock_client.tiers() == ["1k"]
@@ -242,8 +250,8 @@ def _fresh_client(cache_dir: Path) -> MatVisClient:
     """Client with MOCK_MANIFEST pre-cached but the update-check flag
     NOT suppressed — lets tests exercise the TTY / env-var gating path.
     """
-    client = MatVisClient(tag="v2026.04.0", cache_dir=cache_dir)
-    scoped = cache_dir / "v2026.04.0"
+    client = MatVisClient(tag="v2026.04.1", cache_dir=cache_dir)
+    scoped = cache_dir / "v2026.04.1"
     scoped.mkdir(parents=True, exist_ok=True)
     (scoped / ".manifest.json").write_text(json.dumps(MOCK_MANIFEST))
     return client
@@ -448,9 +456,9 @@ class TestClientRowmap:
     def test_rowmap_entry(self, mock_get, mock_client):
         entry = mock_client.rowmap_entry("ambientcg", "Rock064", "1k")
         assert "color" in entry
-        assert entry["color"]["offset"] == 0
+        assert entry["color"]["offset"] == 512
         assert entry["color"]["length"] == 1024
-        assert entry["color"]["parquet_file"] == "ambientcg-1k.parquet"
+        assert entry["color"]["tar_file"] == "ambientcg-1k.tar"
 
 
 class TestClientSearch:
@@ -500,7 +508,8 @@ class TestClientSearch:
         results = mock_search_client.search(source="ambientcg")
         assert len(results) == 3
 
-    def test_search_invalid_category_returns_empty(self, mock_client, caplog):
+    @patch("mat_vis_client.client._get_json")
+    def test_search_invalid_category_returns_empty(self, mock_get, mock_client, caplog):
         """Invalid category soft-warns and returns empty rather than raising.
 
         Raising would force consumers to validate against a moving-target
@@ -510,6 +519,9 @@ class TestClientSearch:
         """
         import logging
 
+        # v0.6.0 derives categories from per-source catalog entries; mock
+        # each `.index()` call with the fixture.
+        mock_get.return_value = MOCK_INDEX_AMBIENTCG
         with caplog.at_level(logging.WARNING, logger="mat-vis-client"):
             results = mock_client.search("invalid_category")
         assert results == []
@@ -716,7 +728,7 @@ class TestFriendlyNotFoundErrors:
     def test_unknown_source_suggests_available(self, mock_http, mock_json, mock_client):
         from mat_vis_client import MatVisError
 
-        with pytest.raises(MatVisError, match=r"source 'nope' not found in tier '1k'"):
+        with pytest.raises(MatVisError, match=r"source 'nope' not found"):
             mock_client.fetch_texture("nope", "Rock064", "color", "1k")
 
     @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
@@ -1196,87 +1208,88 @@ live = pytest.mark.skipif(
 )
 
 
+LIVE_TAG = "v2026.04.1-rc1"
+LIVE_SOURCE = "polyhaven"
+LIVE_TIER = "1k"
+
+
 @pytest.fixture
 def live_client():
-    """Client pointed at v2026.04.0 with temp cache."""
+    """Client pointed at the scoped-proof HF revision with a temp cache."""
     with tempfile.TemporaryDirectory() as tmp:
-        yield MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+        yield MatVisClient(tag=LIVE_TAG, cache_dir=Path(tmp))
 
 
 @live
 class TestLiveManifest:
     def test_fetch_manifest(self, live_client):
         m = live_client.manifest
-        assert m["schema_version"] == 1
-        assert "tiers" in m
+        assert m["schema_version"] == 2
+        assert "sources" in m
 
     def test_tiers(self, live_client):
         tiers = live_client.tiers()
-        assert "1k" in tiers
+        assert LIVE_TIER in tiers
 
     def test_sources(self, live_client):
-        sources = live_client.sources("1k")
-        assert "ambientcg" in sources
+        sources = live_client.sources(LIVE_TIER)
+        assert LIVE_SOURCE in sources
 
 
 @live
 class TestLiveRowmap:
     def test_fetch_rowmap(self, live_client):
-        rm = live_client.rowmap("ambientcg", "1k")
+        rm = live_client.rowmap(LIVE_SOURCE, LIVE_TIER)
         assert "materials" in rm
         assert len(rm["materials"]) > 0
 
     def test_materials_list(self, live_client):
-        mats = live_client.materials("ambientcg", "1k")
+        mats = live_client.materials(LIVE_SOURCE, LIVE_TIER)
         assert len(mats) > 0
         assert all(isinstance(m, str) for m in mats)
 
     def test_channels(self, live_client):
-        mats = live_client.materials("ambientcg", "1k")
-        channels = live_client.channels("ambientcg", mats[0], "1k")
+        mats = live_client.materials(LIVE_SOURCE, LIVE_TIER)
+        channels = live_client.channels(LIVE_SOURCE, mats[0], LIVE_TIER)
         assert "color" in channels
 
 
 @live
 class TestLiveFetchTexture:
     def test_fetch_returns_png(self, live_client):
-        mats = live_client.materials("ambientcg", "1k")
-        data = live_client.fetch_texture("ambientcg", mats[0], "color", "1k")
+        mats = live_client.materials(LIVE_SOURCE, LIVE_TIER)
+        data = live_client.fetch_texture(LIVE_SOURCE, mats[0], "color", LIVE_TIER)
         assert data[:4] == b"\x89PNG"
         assert len(data) > 1000
 
     def test_fetch_caches_locally(self, live_client):
-        mats = live_client.materials("ambientcg", "1k")
+        mats = live_client.materials(LIVE_SOURCE, LIVE_TIER)
         mid = mats[0]
-        data1 = live_client.fetch_texture("ambientcg", mid, "color", "1k")
-        data2 = live_client.fetch_texture("ambientcg", mid, "color", "1k")
+        data1 = live_client.fetch_texture(LIVE_SOURCE, mid, "color", LIVE_TIER)
+        data2 = live_client.fetch_texture(LIVE_SOURCE, mid, "color", LIVE_TIER)
         assert data1 == data2
 
     def test_fetch_multiple_channels(self, live_client):
-        mats = live_client.materials("ambientcg", "1k")
+        mats = live_client.materials(LIVE_SOURCE, LIVE_TIER)
         mid = mats[0]
-        channels = live_client.channels("ambientcg", mid, "1k")
+        channels = live_client.channels(LIVE_SOURCE, mid, LIVE_TIER)
         for ch in channels[:3]:
-            data = live_client.fetch_texture("ambientcg", mid, ch, "1k")
+            data = live_client.fetch_texture(LIVE_SOURCE, mid, ch, LIVE_TIER)
             assert data[:4] == b"\x89PNG", f"{mid}/{ch} is not PNG"
 
     def test_fetch_nonexistent_material_raises(self, live_client):
-        # 0.4.0: KeyError replaced by MatVisError carrying an Available list.
         from mat_vis_client import MatVisError
 
         with pytest.raises(MatVisError, match="material 'NONEXISTENT_XYZ' not found"):
-            live_client.fetch_texture("ambientcg", "NONEXISTENT_XYZ", "color", "1k")
+            live_client.fetch_texture(LIVE_SOURCE, "NONEXISTENT_XYZ", "color", LIVE_TIER)
 
 
-# ── Phase 2 proof: HF substrate fetch (ADR-0007, gated by MAT_VIS_USE_HF=1) ──
+# ── Phase 2 proof (physicallybased scalar catalog, live on HF) ──
 
 
-@pytest.mark.skipif(
-    os.environ.get("MAT_VIS_USE_HF") != "1",
-    reason="Phase-2 HF substrate proof; set MAT_VIS_USE_HF=1 to run",
-)
+@live
 def test_proof_phase_2_fetch_physicallybased_index_from_hf():
-    """Proof bake — physicallybased index fetchable from HF substrate."""
+    """Scalar catalog for physicallybased is fetchable from HF substrate."""
     with tempfile.TemporaryDirectory() as tmp:
         client = MatVisClient(tag="v2026.04.1-rc1", cache_dir=Path(tmp))
         idx = client.index("physicallybased")
