@@ -1118,11 +1118,18 @@ class MatVisCi:
         tag: Annotated[str, Doc("Release tag to validate")] = "v2026.04.0",
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
     ) -> str:
-        """Validate all expected release assets exist and range reads work.
+        """Validate all expected release assets against TWO independent gates.
 
-        Checks the manifest, verifies every source x tier has parquet + rowmap,
-        picks one random material per combination for an HTTP range read, and
-        confirms PNG magic bytes. Exits non-zero on any failure.
+        1. **File integrity** (inlined VALIDATE_RELEASE_SCRIPT) — manifest
+           exists, parquet+rowmap per source × tier, random range reads
+           verify PNG/KTX2 magic bytes, dangling rowmaps caught.
+        2. **Count / regression bench** (``scripts.validate_release``) —
+           cross-tier parity, previous-release regression; uses the
+           ``metrics/bake-metrics.parquet`` committed in the repo.
+
+        Both gates run unconditionally (``set +e``) so a failure in one
+        doesn't mask a failure in the other. Container exits non-zero
+        if either gate reports violations.
         """
         context = src or dag.host().directory(".")
         return await (
@@ -1136,7 +1143,27 @@ class MatVisCi:
                 contents=VALIDATE_RELEASE_SCRIPT,
                 permissions=0o755,
             )
-            .with_exec(["python", "/tmp/validate_release.py"])
+            # Install bench-gate dep, then run both gates with independent
+            # exit codes combined at the end. ``set +e`` keeps the script
+            # going past the first non-zero so we always see both reports.
+            .with_exec(
+                [
+                    "sh",
+                    "-c",
+                    (
+                        "pip install --quiet pyarrow && "
+                        "set +e; "
+                        "echo '=== gate 1: file integrity ==='; "
+                        "python /tmp/validate_release.py; rc1=$?; "
+                        "echo; echo '=== gate 2: count / regression bench ==='; "
+                        "python -m scripts.validate_release "
+                        "  --metrics metrics/bake-metrics.parquet "
+                        "  --tag $VALIDATE_TAG; rc2=$?; "
+                        'echo; echo "integrity_gate_rc=$rc1 bench_gate_rc=$rc2"; '
+                        "[ $rc1 -eq 0 ] && [ $rc2 -eq 0 ]"
+                    ),
+                ]
+            )
             .stdout()
         )
 
