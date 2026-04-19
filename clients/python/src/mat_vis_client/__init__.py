@@ -29,21 +29,36 @@ from typing import Any
 
 from mat_vis_client.adapters import export_mtlx, to_gltf, to_threejs
 from mat_vis_client.client import (
+    ChannelNotFoundError,
+    HTTPFetchError,
     MatVisClient,
     MatVisError,
+    MaterialNotFoundError,
     MtlxSource,
+    NetworkError,
+    NotFoundError,
     RateLimitError,
+    SourceNotFoundError,
+    TierNotFoundError,
     __version__,
     _in_range,
 )
 
 __all__ = [
+    "ChannelNotFoundError",
+    "HTTPFetchError",
     "MatVisClient",
     "MatVisError",
+    "MaterialNotFoundError",
     "MtlxSource",
+    "NetworkError",
+    "NotFoundError",
     "RateLimitError",
+    "SourceNotFoundError",
+    "TierNotFoundError",
     "__version__",
     "_in_range",
+    "get_client",
     "search",
     "prefetch",
     "rowmap_entry",
@@ -56,16 +71,41 @@ __all__ = [
 
 log = logging.getLogger("mat-vis-client")
 
-# Singleton client — lazy-initialized
+# Singleton client — lazy-initialized. Shared across callers so the
+# manifest, rowmaps, indexes, and on-disk texture cache are populated
+# once per process. Reach it via :func:`get_client`.
 _client: MatVisClient | None = None
 
 
-def _get_client() -> MatVisClient:
+def get_client() -> MatVisClient:
+    """Return the process-wide ``MatVisClient`` singleton.
+
+    Lazily constructed on first call, with indexes seeded. Downstream
+    consumers that want to share the manifest/index/texture cache with
+    the module-level ``search()`` / ``prefetch()`` helpers should use
+    this instead of ``MatVisClient()`` directly.
+    """
     global _client
     if _client is None:
         _client = MatVisClient()
         seed_indexes(_client)
     return _client
+
+
+def _get_client() -> MatVisClient:
+    """Deprecated: use :func:`get_client` instead.
+
+    Kept for one release to give downstream consumers (e.g. py-mat's
+    ``Vis.client``) time to migrate. Emits ``DeprecationWarning``.
+    """
+    import warnings
+
+    warnings.warn(
+        "mat_vis_client._get_client is deprecated; use get_client instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return get_client()
 
 
 def seed_indexes(client: MatVisClient) -> None:
@@ -112,7 +152,7 @@ def seed_indexes(client: MatVisClient) -> None:
 
 def get_manifest(release_tag: str | None = None) -> dict:
     """Fetch release manifest (URL discovery for all sources × tiers)."""
-    client = MatVisClient(tag=release_tag) if release_tag else _get_client()
+    client = MatVisClient(tag=release_tag) if release_tag else get_client()
     return client.manifest
 
 
@@ -122,40 +162,27 @@ def search(
     roughness: float | None = None,
     metalness: float | None = None,
     source: str | None = None,
+    tier: str = "1k",
     tag: str | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """Search the mat-vis index by category and scalar similarity.
 
-    Returns results sorted by score (lower = closer match).
+    Thin forwarder to :meth:`MatVisClient.search` with ``score=True`` —
+    the scoring/sorting + default ``limit=20`` are the only module-level
+    convenience on top of the method. Every other argument is just passed
+    through.
     """
-    client = MatVisClient(tag=tag) if tag else _get_client()
-
-    roughness_range = None
-    if roughness is not None:
-        roughness_range = (max(0.0, roughness - 0.2), min(1.0, roughness + 0.2))
-
-    metalness_range = None
-    if metalness is not None:
-        metalness_range = (max(0.0, metalness - 0.2), min(1.0, metalness + 0.2))
-
-    results = client.search(
-        category=category,
+    return get_client().search(
+        category,
+        roughness=roughness,
+        metalness=metalness,
         source=source,
-        roughness_range=roughness_range,
-        metalness_range=metalness_range,
+        tier=tier,
+        tag=tag,
+        score=True,
+        limit=limit,
     )
-
-    for r in results:
-        score = 0.0
-        if roughness is not None and r.get("roughness") is not None:
-            score += abs(r["roughness"] - roughness)
-        if metalness is not None and r.get("metalness") is not None:
-            score += abs(r["metalness"] - metalness)
-        r["score"] = score
-
-    results.sort(key=lambda r: r["score"])
-    return results[:limit]
 
 
 def prefetch(
@@ -165,7 +192,7 @@ def prefetch(
     tag: str | None = None,
 ) -> int:
     """Download all materials for a source × tier into the local cache."""
-    client = MatVisClient(tag=tag) if tag else _get_client()
+    client = MatVisClient(tag=tag) if tag else get_client()
     return client.prefetch(source, tier=tier)
 
 
@@ -177,5 +204,5 @@ def rowmap_entry(
     tag: str | None = None,
 ) -> dict[str, dict[str, int]]:
     """Get raw byte-offset info for DIY consumers."""
-    client = MatVisClient(tag=tag) if tag else _get_client()
+    client = MatVisClient(tag=tag) if tag else get_client()
     return client.rowmap_entry(source, material_id, tier=tier)

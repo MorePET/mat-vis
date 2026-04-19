@@ -13,9 +13,9 @@ const TAG = process.env.MAT_VIS_TAG || 'v2026.04.0';
 const client = new MatVisClient({ tag: TAG });
 
 describe('manifest', () => {
-  it('fetches manifest with version field', async () => {
+  it('fetches manifest with schema_version field', async () => {
     const m = await client.manifest();
-    assert.strictEqual(m.version, 1);
+    assert.strictEqual(m.schema_version, 1);
     assert.ok(m.tiers, 'manifest should have tiers');
   });
 

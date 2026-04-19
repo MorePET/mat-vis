@@ -44,7 +44,7 @@ DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" 
 # Version is kept in sync with clients/python/pyproject.toml by
 # scripts/sync-standalone-version.py (run via pre-commit). Do not
 # hand-edit — a drift test in tests/ fails CI if it disagrees.
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 # Same User-Agent as the installable package (issue #70). Standalone vs
 # pip-installed is an internal packaging detail; servers receiving the
 # request can't act on it and splitting UA populations fragments
@@ -127,23 +127,87 @@ RETRY_MAX_WAIT_SECONDS = int(os.environ.get("MAT_VIS_RETRY_MAX_WAIT", "60"))
 
 
 class MatVisError(Exception):
-    """Base class for mat-vis-client errors."""
+    """Base class for mat-vis-client errors.
+
+    Every exception surfaced to callers is a ``MatVisError`` subclass —
+    raw ``urllib.error.HTTPError`` / ``URLError`` never leaks out.
+    """
+
+
+class NotFoundError(MatVisError):
+    """A key was not found in a mat-vis registry."""
+
+    kind: str = "item"
+
+    def __init__(
+        self,
+        key: str,
+        available: list[str] | None = None,
+        context: str = "",
+    ) -> None:
+        self.key = key
+        self.available = list(available or [])
+        self.context = context
+        where = f" in {context}" if context else ""
+        hint = f". Available: {self.available}" if self.available else ""
+        super().__init__(f"{self.kind} {key!r} not found{where}{hint}")
+
+
+class MaterialNotFoundError(NotFoundError):
+    kind = "material"
+
+
+class SourceNotFoundError(NotFoundError):
+    kind = "source"
+
+
+class TierNotFoundError(NotFoundError):
+    kind = "tier"
+
+
+class ChannelNotFoundError(NotFoundError):
+    kind = "channel"
+
+
+_NOT_FOUND_BY_KIND: dict[str, type[NotFoundError]] = {
+    "material": MaterialNotFoundError,
+    "source": SourceNotFoundError,
+    "tier": TierNotFoundError,
+    "channel": ChannelNotFoundError,
+}
 
 
 def _lookup(mapping: dict, key: str, *, kind: str, context: str = "") -> object:
-    """Dict lookup that raises ``MatVisError`` with an "Available: [...]"
-    suggestion list instead of a bare ``KeyError``.
-
-    Catches the common typo case (wrong source/tier/material/channel) and
-    turns it into an actionable error message. Caller-supplied ``kind`` is
-    the thing being looked up (e.g. "material", "channel"); ``context``
-    adds a path qualifier like "ambientcg/1k" so the message is locatable.
+    """Dict lookup that raises the typed ``NotFoundError`` subclass for
+    ``kind`` (with an ``available=[...]`` hint) instead of ``KeyError``.
     """
     if key in mapping:
         return mapping[key]
     available = sorted(mapping.keys())
+    cls = _NOT_FOUND_BY_KIND.get(kind)
+    if cls is not None:
+        raise cls(key=key, available=available, context=context)
     where = f" in {context}" if context else ""
     raise MatVisError(f"{kind} {key!r} not found{where}. Available: {available}")
+
+
+class HTTPFetchError(MatVisError):
+    """HTTP fetch failed with a non-rate-limit error (404, 500, ...)."""
+
+    def __init__(self, url: str, code: int, reason: str = ""):
+        self.url = url
+        self.code = code
+        self.reason = reason
+        super().__init__(f"HTTP {code} for {url}{': ' + reason if reason else ''}")
+
+
+class NetworkError(MatVisError):
+    """Network-level failure (DNS / connection / timeout) after retries."""
+
+    def __init__(self, url: str, reason: str):
+        self.url = url
+        self.reason = reason
+        super().__init__(f"Network error for {url}: {reason}")
 
 
 class RateLimitError(MatVisError):
@@ -305,11 +369,14 @@ class MatVisClient:
         manifest_url: str | None = None,
         cache_dir: Path | None = None,
         tag: str | None = None,
+        cache: bool = True,
     ):
         self._cache_dir = cache_dir or DEFAULT_CACHE_DIR
+        self._cache = cache
         self._manifest: dict | None = None
         self._rowmaps: dict[str, dict] = {}
         self._indexes: dict[str, list[dict]] = {}
+        self._alt_clients: dict[str, "MatVisClient"] = {}
         # In-memory cache of resolved redirect URLs (github.com -> signed CDN).
         # GitHub's signed URLs expire ~5 min; we cache for 4 min to be safe.
         # Avoids hitting the rate-limited github.com redirect on every
@@ -323,6 +390,21 @@ class MatVisClient:
             self._manifest_url = f"{GITHUB_RELEASES}/download/{tag}/release-manifest.json"
         else:
             self._manifest_url = LATEST_MANIFEST_URL
+
+    @property
+    def _cache_scope(self) -> Path:
+        """Tag-scoped cache subdirectory (v1 / v2 never collide)."""
+        return self._cache_dir / (self._tag or "latest")
+
+    def at(self, tag: str) -> "MatVisClient":
+        """Return a client pinned to ``tag``, sharing this one's cache."""
+        if tag == self._tag:
+            return self
+        if tag not in self._alt_clients:
+            self._alt_clients[tag] = MatVisClient(
+                cache_dir=self._cache_dir, tag=tag, cache=self._cache
+            )
+        return self._alt_clients[tag]
 
     @property
     def manifest(self) -> dict:
@@ -801,71 +883,6 @@ class MatVisClient:
                 self._mtlx_originals[source] = {}
         return self._mtlx_originals[source]
 
-    # ── Deprecated mtlx shims ──────────────────────────────────
-
-    def to_mtlx(
-        self,
-        source: str,
-        material_id: str,
-        tier: str = "1k",
-        output_dir: str | Path = ".",
-    ) -> Path:
-        """Deprecated: use ``client.mtlx(src, id, tier).export(output_dir)``."""
-        import warnings
-
-        warnings.warn(
-            "client.to_mtlx() is deprecated. "
-            "Use client.mtlx(source, material_id, tier).export(output_dir) instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.mtlx(source, material_id, tier).export(output_dir)
-
-    def fetch_mtlx_original(self, source: str, material_id: str) -> str | None:
-        """Deprecated: use ``client.mtlx(src, id).original`` (None if unavailable).
-
-        Returns the raw upstream MaterialX XML string, or ``None`` if the
-        source has no original mtlx or the material isn't in the map.
-        """
-        import warnings
-
-        warnings.warn(
-            "client.fetch_mtlx_original() is deprecated. "
-            "Use client.mtlx(source, material_id).original and check for None; "
-            "then read .xml from the returned MtlxSource.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self._fetch_mtlx_original_map(source).get(material_id)
-
-    def materialize_mtlx(
-        self,
-        source: str,
-        material_id: str,
-        tier: str = "1k",
-        output_dir: str | Path = ".",
-    ) -> Path | None:
-        """Deprecated: use ``client.mtlx(src, id, tier).original.export(path)``.
-
-        Falls back to the synthesized variant when no upstream mtlx exists
-        (preserves pre-0.2 behavior).
-        """
-        import warnings
-
-        warnings.warn(
-            "client.materialize_mtlx() is deprecated. "
-            "Use client.mtlx(source, material_id, tier).original.export(output_dir); "
-            "handle the None case explicitly.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        source_obj = self.mtlx(source, material_id, tier)
-        original = source_obj.original
-        if original is None:
-            # Preserve previous fallback-to-synthesized behavior.
-            return source_obj.export(output_dir)
-        return original.export(output_dir)
-
     def rowmap_entry(
         self,
         source: str,
@@ -1220,9 +1237,11 @@ class MtlxSource:
         """True if this is the upstream-author document, not synthesized."""
         return self._is_original
 
-    @property
     def xml(self) -> str:
-        """Return the MaterialX XML as a string.
+        """Return the MaterialX XML as a string (method, not property).
+
+        Method form makes the network cost explicit and ports to
+        JS/Rust reference clients (no attribute-triggered IO).
 
         * Synthesized: generated in-memory from scalars + channel list.
           No PNGs are written and no texture bytes are fetched.
@@ -1287,18 +1306,19 @@ class MtlxSource:
             )
 
         # Original: fetch upstream, rewrite filename values to local PNGs.
-        xml_str = self.xml  # raises LookupError if gone from the map
+        xml_str = self.xml()  # raises LookupError if gone from the map
         rewritten = _rewrite_mtlx_texture_paths(xml_str, tex_dir, chs)
         mtlx_path = tex_dir / f"{self._material_id}.mtlx"
         mtlx_path.write_text(rewritten, encoding="utf-8")
         return mtlx_path
 
-    @property
     def original(self) -> MtlxSource | None:
         """Return the upstream-author variant if available, else ``None``.
 
-        Only synthesized :class:`MtlxSource` instances have ``.original``
-        — calling it on an already-original source returns ``None``.
+        Method, not a property: first call fetches a JSON map from the
+        network. Only synthesized MtlxSource instances have an original
+        — calling ``original()`` on an already-original source returns
+        ``None``.
 
         Fast check: the per-source "does this source offer originals"
         verdict is cached at the client level (first call fetches the

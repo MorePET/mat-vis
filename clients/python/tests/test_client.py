@@ -147,8 +147,9 @@ def mock_client():
     """Client with mocked HTTP and temp cache."""
     with tempfile.TemporaryDirectory() as tmp:
         client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
-        # Pre-populate manifest cache so no HTTP needed
-        cache_path = Path(tmp) / ".manifest.json"
+        # Pre-populate manifest cache so no HTTP needed (tag-scoped path).
+        cache_path = Path(tmp) / "v2026.04.0" / ".manifest.json"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(MOCK_MANIFEST))
         yield client
 
