@@ -44,8 +44,11 @@ DEFAULT_EXCLUDE_TIER_PREFIXES = ("ktx2-",)
 
 
 __all__ = [
+    "baked_ids_from_rowmap_dir",
+    "find_catalog_violations",
     "find_regressions",
     "find_tier_parity_violations",
+    "load_waivers",
     "main",
 ]
 
@@ -153,6 +156,127 @@ def find_tier_parity_violations(
                     }
                 )
     return violations
+
+
+# ── Phase 2: upstream-catalog contract ──────────────────────────
+
+
+def load_waivers(path: Path) -> dict[tuple[str, str], set[str]]:
+    """Parse ``waived.yaml`` → ``{(source, tier): {id, ...}}``.
+
+    Missing or empty file returns ``{}`` — waivers are optional. YAML
+    shape::
+
+        polyhaven:
+          "2k":
+            - id_not_available_upstream_at_2k
+        gpuopen:
+          "1k":
+            - special_case
+    """
+    path = Path(path)
+    if not path.exists():
+        return {}
+    raw = path.read_text()
+    if not raw.strip():
+        return {}
+
+    # PyYAML is the only external dep introduced here; fall back to a
+    # minimal parser if it's not installed (keeps the validator usable
+    # in stripped-down CI containers).
+    try:
+        import yaml  # type: ignore
+
+        data = yaml.safe_load(raw) or {}
+    except ImportError:  # pragma: no cover — tested envs install pyyaml
+        data = _minimal_yaml(raw)
+
+    out: dict[tuple[str, str], set[str]] = {}
+    for source, tiers in (data or {}).items():
+        for tier, ids in (tiers or {}).items():
+            key = (str(source), str(tier))
+            out[key] = set(ids or [])
+    return out
+
+
+def _minimal_yaml(s: str) -> dict:
+    """Bare-bones YAML subset parser for waived.yaml (source → tier → list).
+
+    Not a full YAML; only handles the exact two-level-plus-list shape we
+    document. Used only when PyYAML isn't installed.
+    """
+    out: dict = {}
+    current_source = None
+    current_tier = None
+    for line in s.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        stripped = line.strip()
+        if indent == 0 and stripped.endswith(":"):
+            current_source = stripped[:-1].strip().strip('"')
+            out[current_source] = {}
+            current_tier = None
+        elif indent == 2 and stripped.endswith(":"):
+            current_tier = stripped[:-1].strip().strip('"')
+            out[current_source][current_tier] = []
+        elif stripped.startswith("- ") and current_tier is not None:
+            out[current_source][current_tier].append(stripped[2:].strip().strip('"'))
+    return out
+
+
+def find_catalog_violations(
+    *,
+    upstream: dict[str, set[str]],
+    baked_per_tier: dict[tuple[str, str], set[str]],
+    waivers: dict[tuple[str, str], set[str]],
+) -> list[dict[str, Any]]:
+    """Compare baked IDs to ``upstream \\ waivers`` per (source, tier).
+
+    Returns one record per violating (source, tier) with the missing
+    and extra IDs. Sources not present in ``upstream`` are skipped —
+    the snapshot is incomplete for that source, not the bake.
+    """
+    violations: list[dict[str, Any]] = []
+    for (source, tier), baked in sorted(baked_per_tier.items()):
+        if source not in upstream:
+            continue
+        expected = upstream[source] - waivers.get((source, tier), set())
+        missing = expected - baked
+        extras = baked - upstream[source]
+        if missing or extras:
+            violations.append(
+                {
+                    "source": source,
+                    "tier": tier,
+                    "missing": missing,
+                    "extras": extras,
+                }
+            )
+    return violations
+
+
+def baked_ids_from_rowmap_dir(rowmap_dir: Path) -> dict[tuple[str, str], set[str]]:
+    """Scan ``rowmap_dir`` for ``{source}-{tier}-{category}-rowmap.json``
+    files, merge per (source, tier), return ``{(source, tier): {ids}}``.
+
+    Used at validation time to produce ``baked_per_tier`` for
+    :func:`find_catalog_violations`.
+    """
+    import json as _json
+    import re
+
+    pattern = re.compile(r"^(?P<source>[a-z0-9]+)-(?P<tier>[a-z0-9-]+?)-[a-z0-9]+-rowmap\.json$")
+    out: dict[tuple[str, str], set[str]] = {}
+    for rmp in Path(rowmap_dir).glob("*-rowmap.json"):
+        m = pattern.match(rmp.name)
+        if not m:
+            continue
+        key = (m.group("source"), m.group("tier"))
+        data = _json.loads(rmp.read_text())
+        ids = set(data.get("materials", {}).keys())
+        out.setdefault(key, set()).update(ids)
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
