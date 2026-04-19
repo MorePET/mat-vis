@@ -3,7 +3,7 @@
 > **Canonical enums.** The authoritative definitions for source names,
 > category values, channel names, and tier names live in the JSON
 > Schemas (`index-schema.json`, `rowmap-schema.json`,
-> `release-manifest-schema.json`). If this document or the ADRs
+> `release-manifest-schema-v2.json`). If this document or the ADRs
 > diverge from the schemas, the schemas win.
 
 Best-effort documentation of each upstream material source's API.
