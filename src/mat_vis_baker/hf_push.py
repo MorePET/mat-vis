@@ -1,0 +1,92 @@
+"""Atomic multi-file push to a Hugging Face dataset.
+
+Wrapper around ``huggingface_hub.HfApi.create_commit`` that mirrors
+what the v0.5.0 baker needs: push a list of ``(local_path,
+path_in_repo)`` pairs to a named revision of a dataset repo as a
+single atomic commit. If the target revision doesn't exist yet, it's
+created as a branch from ``main`` first.
+
+Atomicity is the substrate-level guarantee that makes the rowmap ↔
+tar consistency invariant hold without a validator pass (ADR-0007,
+bug class #79).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+
+log = logging.getLogger("mat-vis-baker.hf_push")
+
+
+def push_to_hf(
+    repo_id: str,
+    files: list[tuple[Path, str]],
+    revision: str,
+    commit_message: str,
+    *,
+    token: str | None = None,
+    create_branch_if_missing: bool = True,
+) -> str:
+    """Push a set of files to an HF dataset revision atomically.
+
+    Args:
+        repo_id: e.g. ``"gerchowl/mat-vis"``.
+        files: list of ``(local_path, path_in_repo)`` pairs. Every file
+            lands in one ``create_commit`` call.
+        revision: target branch/tag (e.g. ``"v2026.05.0"``).
+        commit_message: commit message.
+        token: HF access token. Falls back to the ``HF_TOKEN`` env var.
+        create_branch_if_missing: if True and ``revision`` is not an
+            existing branch, create it from ``main`` before committing.
+
+    Returns:
+        The commit SHA of the created commit, or ``""`` when ``files``
+        is empty (no-op, no API call).
+    """
+    if not files:
+        log.info("push_to_hf: no files, skipping")
+        return ""
+
+    from huggingface_hub import CommitOperationAdd, HfApi
+    from huggingface_hub.errors import RevisionNotFoundError
+
+    resolved_token = token if token is not None else os.environ.get("HF_TOKEN")
+    api = HfApi(token=resolved_token)
+
+    if create_branch_if_missing:
+        try:
+            api.list_repo_commits(repo_id=repo_id, repo_type="dataset", revision=revision)
+        except RevisionNotFoundError:
+            log.info("creating branch %s on %s", revision, repo_id)
+            api.create_branch(
+                repo_id=repo_id,
+                repo_type="dataset",
+                branch=revision,
+                revision="main",
+                exist_ok=True,
+            )
+
+    operations = [
+        CommitOperationAdd(path_in_repo=path_in_repo, path_or_fileobj=str(local_path))
+        for local_path, path_in_repo in files
+    ]
+
+    commit_info = api.create_commit(
+        repo_id=repo_id,
+        repo_type="dataset",
+        operations=operations,
+        commit_message=commit_message,
+        revision=revision,
+    )
+
+    sha = getattr(commit_info, "oid", "") or getattr(commit_info, "commit_oid", "")
+    log.info(
+        "push_to_hf: %d files → %s@%s (%s)",
+        len(files),
+        repo_id,
+        revision,
+        sha[:12] if sha else "?",
+    )
+    return sha
