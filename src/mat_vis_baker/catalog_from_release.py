@@ -77,7 +77,7 @@ SOURCE_URLS = {
 SOURCE_LICENSES = {
     "ambientcg": "CC0-1.0",
     "polyhaven": "CC0-1.0",
-    "gpuopen": "TBV (per material)",
+    "gpuopen": "MIT (©2022 AMD)",
     "physicallybased": "CC0-1.0",
 }
 

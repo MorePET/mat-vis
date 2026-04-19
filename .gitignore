@@ -243,3 +243,8 @@ result
 # Dagger (generated SDK, not tracked)
 .dagger/sdk/
 .dagger/uv.lock
+
+# Agent-facing handoff doc — kept local for fresh sessions, not part of
+# the repo's user-facing documentation. ADRs + GH issues are the
+# canonical, tracked specification.
+docs/HANDOFF.md
