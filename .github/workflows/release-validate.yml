@@ -66,15 +66,25 @@ jobs:
       # can't see. Blocking — if counts regress or tiers are skewed,
       # fail the workflow and let the notify-on-failure step open an
       # issue.
+      #
+      # ``if: always()`` — this is an INDEPENDENT gate from the Dagger
+      # validate-release above. They catch disjoint bug classes: the
+      # Dagger step catches file-level integrity (PNG magic, dangling
+      # rowmaps), the bench gate catches count-level regressions. Both
+      # must run on every release so neither can silently short-circuit
+      # the other. Workflow still fails if either gate fails.
       - name: Set up Python
+        if: always()
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install pyarrow (bench validator dep)
+        if: always()
         run: pip install --quiet pyarrow
 
       - name: Validate bench metrics
+        if: always()
         run: |
           python -m scripts.validate_release \
             --metrics metrics/bake-metrics.parquet \
