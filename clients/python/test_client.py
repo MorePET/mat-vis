@@ -1208,7 +1208,7 @@ live = pytest.mark.skipif(
 )
 
 
-LIVE_TAG = "v2026.04.1-rc1"
+LIVE_TAG = "v2026.04.1"
 LIVE_SOURCE = "polyhaven"
 LIVE_TIER = "1k"
 
@@ -1291,7 +1291,7 @@ class TestLiveFetchTexture:
 def test_proof_phase_2_fetch_physicallybased_index_from_hf():
     """Scalar catalog for physicallybased is fetchable from HF substrate."""
     with tempfile.TemporaryDirectory() as tmp:
-        client = MatVisClient(tag="v2026.04.1-rc1", cache_dir=Path(tmp))
+        client = MatVisClient(tag="v2026.04.1", cache_dir=Path(tmp))
         idx = client.index("physicallybased")
     assert len(idx) >= 50, f"expected ≥50 PB entries, got {len(idx)}"
     assert all("id" in e and "source" in e for e in idx)
