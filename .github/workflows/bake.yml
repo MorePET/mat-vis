@@ -1,5 +1,5 @@
 ---
-# Bake workflow — thin Dagger wrapper.
+# Bake workflow — atomic HF push per (source, tier) per ADR-0007.
 
 name: Bake
 
@@ -17,7 +17,7 @@ on:  # yamllint disable-line rule:truthy
           - gpuopen
           - physicallybased
       tier:
-        description: 'Resolution tier'
+        description: 'Resolution tier (scalar for physicallybased)'
         required: true
         default: '1k'
         type: choice
@@ -27,13 +27,16 @@ on:  # yamllint disable-line rule:truthy
           - 512
           - 1k
           - 2k
+          - 4k
+          - 8k
+          - scalar
       limit:
         description: 'Max materials (0 = all)'
         required: false
         default: '0'
         type: string
       offset:
-        description: 'Skip first N materials (for chunked execution)'
+        description: 'Skip first N materials'
         required: false
         default: '0'
         type: string
@@ -42,70 +45,60 @@ on:  # yamllint disable-line rule:truthy
         required: false
         default: '50'
         type: string
-      upload-chunks:
-        description: 'Upload + delete each parquet partition as it closes (frees runner disk)'
-        required: false
-        default: true
-        type: boolean
       release-tag:
-        description: 'Calver data release tag (e.g. v2026.04.0)'
-        required: false
-        default: 'v2026.04.0'
+        description: 'Calver data release tag (e.g. v2026.04.1)'
+        required: true
+        default: 'v2026.04.1'
         type: string
-      category:
-        description: 'Only bake materials in one normalized category (empty = all)'
-        required: false
-        default: ''
-        type: choice
-        options:
-          - ''
-          - ceramic
-          - concrete
-          - fabric
-          - glass
-          - metal
-          - organic
-          - other
-          - plastic
-          - stone
-          - wood
       dry-run:
-        description: 'Fetch + bake but skip release uploads'
+        description: 'Bake to local tar; skip the HF push'
         required: false
         default: false
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
   issues: write          # needed by notify-on-failure composite action
 
 jobs:
   bake:
-    name: Bake ${{ inputs.source }} ${{ inputs.tier }}
+    name: hf-bake ${{ inputs.source }} ${{ inputs.tier }}
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dagger/dagger-for-github@v8.4.1
+      - uses: astral-sh/setup-uv@v5
         with:
-          verb: call
-          module: .dagger
-          args: >-
-            bake-and-release
-            --src=.
-            --source=${{ inputs.source }}
-            --tier=${{ inputs.tier }}
-            --limit=${{ inputs.limit }}
-            --offset=${{ inputs.offset }}
-            --batch-size=${{ inputs.batch-size }}
-            --upload-chunks=${{ inputs.upload-chunks }}
-            --release-tag=${{ inputs.release-tag }}
-            --category=${{ inputs.category }}
-            --dry-run=${{ inputs.dry-run }}
-            --registry-pass=env:GITHUB_TOKEN
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          python-version: '3.12'
+
+      - name: Install baker
+        run: uv sync --all-extras
+
+      - name: hf-bake
+        run: |
+          set -euxo pipefail
+          limit_flag=""
+          if [ "${{ inputs.limit }}" != "0" ]; then
+            limit_flag="--limit ${{ inputs.limit }}"
+          fi
+          offset_flag=""
+          if [ "${{ inputs.offset }}" != "0" ]; then
+            offset_flag="--offset ${{ inputs.offset }}"
+          fi
+          dry_flag=""
+          if [ "${{ inputs.dry-run }}" = "true" ]; then
+            dry_flag="--dry-run"
+          fi
+          uv run mat-vis-baker hf-bake \
+            "${{ inputs.source }}" \
+            "${{ inputs.tier }}" \
+            /tmp/bake \
+            --release-tag "${{ inputs.release-tag }}" \
+            --batch-size "${{ inputs.batch-size }}" \
+            $limit_flag $offset_flag $dry_flag
 
       - name: Notify on failure
         if: failure()
@@ -113,11 +106,9 @@ jobs:
         with:
           label-prefix: "[bake-failed]"
           workflow-name: "bake"
-          target: "${{ inputs.source }}/${{ inputs.tier }}${{ inputs.category != '' && format('/{0}', inputs.category) || '' }} @ ${{ inputs.release-tag }}"
+          target: "${{ inputs.source }}/${{ inputs.tier }} @ ${{ inputs.release-tag }}"
           context: >-
             Likely causes: upstream API transient (rate-limit or 5xx),
-            runner disk filled, toktx/ktx2 encode failure (#82 territory),
-            or gh release upload failed silently. Check run logs for the
-            specific step that errored. If upload-chunks was true, some
-            parquets may be partially uploaded — validate-release will
-            surface any dangling rowmaps on next run.
+            runner disk filled during fetch, or HF push auth/size error.
+            Check the hf-bake step logs. Atomic HF commits mean a failed
+            bake leaves the target revision unchanged — safe to retry.
