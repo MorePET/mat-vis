@@ -61,34 +61,11 @@ jobs:
             validate-release --src=.
             --tag=${{ steps.tag.outputs.tag }}
 
-      # Bench gate (#88): catches tier-parity and cross-release
-      # regressions that the file-existence / PNG-magic checks above
-      # can't see. Blocking — if counts regress or tiers are skewed,
-      # fail the workflow and let the notify-on-failure step open an
-      # issue.
-      #
-      # ``if: always()`` — this is an INDEPENDENT gate from the Dagger
-      # validate-release above. They catch disjoint bug classes: the
-      # Dagger step catches file-level integrity (PNG magic, dangling
-      # rowmaps), the bench gate catches count-level regressions. Both
-      # must run on every release so neither can silently short-circuit
-      # the other. Workflow still fails if either gate fails.
-      - name: Set up Python
-        if: always()
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install pyarrow (bench validator dep)
-        if: always()
-        run: pip install --quiet pyarrow
-
-      - name: Validate bench metrics
-        if: always()
-        run: |
-          python -m scripts.validate_release \
-            --metrics metrics/bake-metrics.parquet \
-            --tag ${{ steps.tag.outputs.tag }}
+      # Both gates (file integrity + count/regression bench) now run
+      # inside the Dagger validate-release function above — it handles
+      # the combined exit code so we match the rest of the CI's
+      # Dagger-wrapped convention. See .dagger/src/mat_vis_ci/main.py
+      # `validate_release`.
 
       - name: Notify on failure
         if: failure()
