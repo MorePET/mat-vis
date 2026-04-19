@@ -1,12 +1,17 @@
 """CLI entry point for the mat-vis baker.
 
-Usage:
-    mat-vis-baker all <source> <tier> <output_dir> [--limit N] [--release-tag TAG]
-    mat-vis-baker derive <source> <tier> <source_dir> <output_dir> [--release-tag TAG]
-    mat-vis-baker derive-from-release <source> <tier> <output_dir> [--source-tier 1k] [--release-tag TAG] [--limit N]
-    mat-vis-baker fetch <source> <tier> <output_dir> [--limit N]
+v0.5.0+ (ADR-0007): the primary bake path is ``hf-bake`` — one atomic
+HF commit per ``(source, tier)``. The legacy ``all`` subcommand is a
+thin back-compat wrapper that routes to ``hf-bake``. ``derive`` /
+``derive-from-release`` / ``derive-ktx2`` are retired (issue #112
+will re-implement them on the tar substrate).
 
-Called directly in release.yml. Not a user-facing tool.
+Usage:
+    mat-vis-baker hf-bake <source> <tier> <work_dir> --release-tag <tag> [--limit N]
+    mat-vis-baker all <source> <tier> <work_dir> --release-tag <tag>  # back-compat → hf-bake
+    mat-vis-baker fetch <source> <tier> <output_dir> [--limit N]
+    mat-vis-baker catalog <release_tag>
+    mat-vis-baker pack-mtlx <output_dir>
 """
 
 from __future__ import annotations
@@ -16,11 +21,19 @@ import logging
 import sys
 from pathlib import Path
 
-from mat_vis_baker.common import CANONICAL_CATEGORIES, TIER_TO_PX, VALID_TIERS
+from mat_vis_baker.common import CANONICAL_CATEGORIES, TIER_TO_PX, VALID_TIERS  # noqa: F401
 
 log = logging.getLogger("mat-vis-baker")
 
 SOURCES = ["ambientcg", "polyhaven", "gpuopen", "physicallybased"]
+
+
+_RETIRED_DERIVE_MSG = (
+    "The {cmd!r} subcommand was retired by ADR-0007 (parquet/GH-Releases substrate "
+    "removed). The tar-based replacement is tracked in issue #112 — "
+    "https://github.com/MorePET/mat-vis/issues/112. Use `mat-vis-baker hf-bake` for "
+    "primary bakes in the meantime."
+)
 
 
 def _get_fetcher(source: str):
@@ -44,561 +57,44 @@ def _get_fetcher(source: str):
 
 
 def cmd_all(args: argparse.Namespace) -> int:
-    """Streaming pipeline: per-batch fetch → bake → append to lazy parquet writers → delete textures.
+    """Back-compat wrapper that routes to ``hf-bake`` (ADR-0007).
 
-    Disk usage stays bounded by BATCH_SIZE × per-material size. Suitable for
-    GH runners with 14GB disk even on 2k tier with thousands of materials.
+    The old parquet/GH-Releases bake path is gone. Existing callers
+    (bake.yml via Dagger, integration tests) invoke ``mat-vis-baker all``
+    with ``output_dir`` + ``--release-tag``; we translate those into a
+    ``hf-bake`` call with the same semantics. Flags that the HF path
+    supersedes (``--upload-chunks``, ``--category``) are ignored with a
+    warning — atomic HF commits eliminate the original reason they
+    existed.
     """
-    import shutil
-    import time
-    from datetime import datetime, timezone
+    from mat_vis_baker.hf_bake import bake_one
 
-    import pyarrow as pa
-    import pyarrow.parquet as pq
+    if getattr(args, "upload_chunks", False):
+        log.warning("--upload-chunks ignored: atomic HF commits replace chunk uploads")
+    if getattr(args, "category", None):
+        log.warning("--category ignored: per-category partitioning was retired by ADR-0007")
 
-    from mat_vis_baker.bake import bake_material
-    from mat_vis_baker.common import BAKER_VERSION, CANONICAL_CHANNELS, hash_textures
-    from mat_vis_baker.index_builder import build_index, write_index
-    from mat_vis_baker.parquet_writer import (
-        CHANNEL_COLS,
-        _SCHEMA,
-        RowmapCollector,
-        build_rowmap_from_sidecar,  # used by per-chunk upload path
-        emit_rowmaps_for_bake,
-        write_rowmap,  # used by per-chunk upload path
-    )
-    from mat_vis_baker.upload import (
-        UploadError,
-        load_progress,
-        save_progress,
-        upload_with_verify,
-    )
-
-    source = args.source
-    tier = args.tier
-    output_dir = Path(args.output_dir)
-    resolution_px = TIER_TO_PX[tier]
-    mtlx_dir = output_dir / "mtlx"
-    thumb_dir = output_dir / "mtlx"
-
-    # ── physicallybased: scalar only, no pipeline ──
-    if source == "physicallybased":
-        log.info("=== fetch physicallybased ===")
-        fetch = _get_fetcher(source)
-        records = fetch()
-        log.info("=== index (scalar only) ===")
-        index_data = build_index(records, source)
-        write_index(index_data, output_dir / f"{source}.json")
-        log.info("=== done: %d records ===", len(records))
-        return 0
-
-    # ── streaming bake: batched fetch + bake + pack + cleanup ──
-    BATCH_SIZE = int(getattr(args, "batch_size", 50) or 50)
-    fetch = _get_fetcher(source)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    textures_dir = output_dir / "textures"
-
-    now = datetime.now(timezone.utc).isoformat()
-    compression = {
-        col: "NONE" if col in CHANNEL_COLS else "ZSTD" for col in [f.name for f in _SCHEMA]
-    }
-    use_dictionary = {col: col not in CHANNEL_COLS for col in [f.name for f in _SCHEMA]}
-
-    # Per-category state: writer + chunk number + rowmap sidecar
-    writers: dict[str, pq.ParquetWriter] = {}
-    chunk_nums: dict[str, int] = {}
-    # (cat, chunk) -> RowmapCollector for the currently-open writer
-    collectors: dict[tuple[str, int], RowmapCollector] = {}
-    finalized_paths: list[Path] = []  # closed parquet files (for rowmap pass)
-    finalized_collectors: dict[Path, RowmapCollector] = {}
-    # Expected uploaded assets (for post-bake reconciliation)
-    expected_assets: list[tuple[Path, int]] = []  # (path, size)
-    completed_categories: set[str] = set()
-    all_records: list = []
-    n_ok = 0
-    n_failed = 0
-    t0 = time.monotonic()
-    user_limit = args.limit  # total cap if set
-
-    # Max bytes per parquet partition before splitting (GitHub asset limit is 2 GB).
-    MAX_PARTITION_BYTES = 1_800_000_000
-
-    # Optional upload callback — when a chunk closes, upload it + delete locally.
-    # --dry-run forces this off even if --upload-chunks was passed, so a dry
-    # run always lands its output in <output_dir>/ for inspection.
-    dry_run = bool(getattr(args, "dry_run", False))
-    upload_release_tag = (
-        args.release_tag if getattr(args, "upload_chunks", False) and not dry_run else None
-    )
-    category_filter = getattr(args, "category", None)
-    if dry_run:
-        log.info("=== DRY RUN — no release uploads; output stays in %s ===", output_dir)
-    if category_filter:
-        log.info("=== category filter: %s (other categories skipped) ===", category_filter)
-
-    # ── resume marker ──
-    cli_offset = args.offset or 0
-    offset = cli_offset
-    resumed = False
-    if cli_offset == 0:
-        prog = load_progress(output_dir)
-        if prog and prog.get("source") == source and prog.get("tier") == tier:
-            offset = int(prog.get("offset_done") or 0)
-            if offset > 0:
-                resumed = True
-                log.info(
-                    "resuming from progress marker: offset=%d (source=%s tier=%s)",
-                    offset,
-                    source,
-                    tier,
-                )
-    fetched_so_far = 0
-
-    def _partition_path(cat: str, chunk: int) -> Path:
-        # First chunk is unnumbered for backward compat; subsequent chunks get -N
-        if chunk == 1:
-            return output_dir / f"mat-vis-{source}-{tier}-{cat}.parquet"
-        return output_dir / f"mat-vis-{source}-{tier}-{cat}-{chunk}.parquet"
-
-    def _open_writer(cat: str, chunk: int) -> pq.ParquetWriter:
-        pq_path = _partition_path(cat, chunk)
-        # Write to .part; we'll os.replace on close.
-        part_path = pq_path.with_name(pq_path.name + ".part")
-        if part_path.exists():
-            part_path.unlink()
-        collectors[(cat, chunk)] = RowmapCollector()
-        return pq.ParquetWriter(
-            part_path, _SCHEMA, compression=compression, use_dictionary=use_dictionary
-        )
-
-    def _close_and_maybe_upload(cat: str) -> None:
-        """Close current writer for cat, optionally upload+delete the parquet.
-
-        Writes go to ``foo.parquet.part`` while the writer is open; on close,
-        we fsync and ``os.replace`` to ``foo.parquet``. If uploading, we use
-        ``upload_with_verify`` and only unlink the local file after the
-        remote size has been confirmed.
-        """
-        import os as _os
-
-        if cat not in writers:
-            return
-        writers[cat].close()
-        del writers[cat]
-        chunk = chunk_nums.get(cat, 1)
-        pq_path = _partition_path(cat, chunk)
-        part_path = pq_path.with_name(pq_path.name + ".part")
-
-        # fsync the .part before swapping in — crash between close and replace
-        # leaves a truncated file otherwise.
-        fd = _os.open(str(part_path), _os.O_RDONLY)
-        try:
-            _os.fsync(fd)
-        finally:
-            _os.close(fd)
-        _os.replace(part_path, pq_path)
-
-        finalized_paths.append(pq_path)
-        collector = collectors.pop((cat, chunk), RowmapCollector())
-        finalized_collectors[pq_path] = collector
-        log.info(
-            "closed partition %s (%.1f MB, %d rows in rowmap)",
-            pq_path.name,
-            pq_path.stat().st_size / 1e6,
-            len(collector.rows),
-        )
-        if upload_release_tag:
-            # Build rowmap FROM SIDECAR — authoritative, no magic-byte scan.
-            rowmap = build_rowmap_from_sidecar(pq_path, collector, source, tier, upload_release_tag)
-            rm_path = (
-                output_dir
-                / f"{pq_path.stem.replace(f'mat-vis-{source}-{tier}-', f'{source}-{tier}-')}-rowmap.json"
-            )
-            write_rowmap(rowmap, rm_path)
-
-            # Upload parquet first, then rowmap — fail loud on either.
-            pq_size = pq_path.stat().st_size
-            rm_size = rm_path.stat().st_size
-            upload_with_verify(pq_path, upload_release_tag)
-            upload_with_verify(rm_path, upload_release_tag)
-            expected_assets.append((pq_path, pq_size))
-            expected_assets.append((rm_path, rm_size))
-            pq_path.unlink(missing_ok=True)
-            log.info("uploaded + verified + deleted local %s", pq_path.name)
-        completed_categories.add(cat)
-
-    log.info(
-        "=== streaming bake: %s %s, batch=%d, offset=%d, limit=%s, max_partition=%.1f GB ===",
-        source,
-        tier,
-        BATCH_SIZE,
-        offset,
-        user_limit if user_limit else "all",
-        MAX_PARTITION_BYTES / 1e9,
-    )
-
-    try:
-        while True:
-            # Determine this batch's size
-            batch_limit = BATCH_SIZE
-            if user_limit and fetched_so_far + batch_limit > user_limit:
-                batch_limit = user_limit - fetched_so_far
-                if batch_limit <= 0:
-                    break
-
-            log.info("=== batch offset=%d limit=%d ===", offset, batch_limit)
-            t_b = time.monotonic()
-
-            # Fetch
-            batch = fetch(tier, textures_dir, limit=batch_limit, offset=offset, mtlx_dir=mtlx_dir)
-            if not batch:
-                log.info("no more materials, done")
-                break
-
-            # --category filter: drop records whose normalized category doesn't
-            # match. Applied after fetch so the texture downloads are already
-            # done — a true "listing-level" filter would need per-source
-            # changes (#68 delta-overlay territory). For surgical gap-fills
-            # this cost is the tradeoff against not having to bake everything.
-            if category_filter:
-                kept = [rec for rec in batch if rec.category == category_filter]
-                if len(kept) < len(batch):
-                    log.info(
-                        "category filter kept %d / %d materials in this batch",
-                        len(kept),
-                        len(batch),
-                    )
-                batch = kept
-                if not batch:
-                    # Fetched nothing relevant in this window; advance and keep going.
-                    offset += batch_limit
-                    fetched_so_far += batch_limit
-                    continue
-
-            # Bake (resize in place + hash)
-            for rec in batch:
-                if rec.status == "ok":
-                    bake_material(rec, output_dir / "baked", thumb_dir, tier)
-                    if rec.status == "ok":
-                        hash_textures(rec)
-
-            # Pack: append each ok record to its category writer (lazy open + chunk-split)
-            for rec in batch:
-                if rec.status != "ok":
-                    n_failed += 1
-                    continue
-
-                cat = rec.category
-
-                # Open writer if needed (first material in this category)
-                if cat not in writers:
-                    chunk_nums.setdefault(cat, 1)
-                    writers[cat] = _open_writer(cat, chunk_nums[cat])
-
-                row = {
-                    "id": [rec.id],
-                    "source": [source],
-                    "category": [rec.category],
-                    "resolution_px": [resolution_px],
-                    "source_url": [rec.source_url],
-                    "source_license": [rec.source_license],
-                    "baker_version": [BAKER_VERSION],
-                    "baked_at": [now],
-                }
-                channel_lengths: dict[str, int] = {}
-                for ch in CANONICAL_CHANNELS:
-                    path = rec.texture_paths.get(ch)
-                    data = path.read_bytes() if path and path.exists() else None
-                    row[ch] = [data]
-                    if data is not None:
-                        channel_lengths[ch] = len(data)
-
-                collectors[(cat, chunk_nums[cat])].record(rec.id, channel_lengths)
-
-                table = pa.table(row, schema=_SCHEMA)
-                writers[cat].write_table(table)
-                del row, table
-                n_ok += 1
-
-                # Check partition size — split if over limit. The writer is
-                # currently writing to ``foo.parquet.part`` (see _open_writer),
-                # so size-check on that path.
-                pq_part_path = _partition_path(cat, chunk_nums[cat]).with_name(
-                    _partition_path(cat, chunk_nums[cat]).name + ".part"
-                )
-                if pq_part_path.exists() and pq_part_path.stat().st_size >= MAX_PARTITION_BYTES:
-                    log.info(
-                        "partition %s reached %.1f GB, rotating",
-                        pq_part_path.name,
-                        pq_part_path.stat().st_size / 1e9,
-                    )
-                    _close_and_maybe_upload(cat)
-                    chunk_nums[cat] += 1
-                    writers[cat] = _open_writer(cat, chunk_nums[cat])
-
-            all_records.extend(batch)
-            fetched_so_far += len(batch)
-
-            # CLEAR cache: delete this batch's textures + baked dirs
-            if textures_dir.exists():
-                shutil.rmtree(textures_dir, ignore_errors=True)
-            baked_dir = output_dir / "baked"
-            if baked_dir.exists():
-                shutil.rmtree(baked_dir, ignore_errors=True)
-
-            # Disk usage check
-            try:
-                disk = shutil.disk_usage(str(output_dir))
-                free_gb = disk.free / 1e9
-            except Exception:
-                free_gb = -1
-            log.info(
-                "batch done: %d records (%.1fs), totals: %d ok %d fail, free disk: %.1f GB",
-                len(batch),
-                time.monotonic() - t_b,
-                n_ok,
-                n_failed,
-                free_gb,
-            )
-
-            offset += len(batch)
-
-            # Persist resume marker each batch
-            try:
-                save_progress(
-                    output_dir,
-                    source=source,
-                    tier=tier,
-                    offset_done=offset,
-                    chunk_nums=chunk_nums,
-                    completed_categories=sorted(completed_categories),
-                    release_tag=args.release_tag,
-                )
-            except Exception as e:  # pragma: no cover — marker is best-effort
-                log.warning("failed to save progress marker: %s", e)
-
-            # If batch came back smaller than requested, we're at the end
-            if len(batch) < batch_limit:
-                log.info("partial batch (%d < %d), done", len(batch), batch_limit)
-                break
-    finally:
-        # Close any still-open writers (also uploads if upload_chunks enabled)
-        for cat in list(writers.keys()):
-            _close_and_maybe_upload(cat)
-
-    t_stream = time.monotonic() - t0
-    log.info(
-        "PERF stream: %.1fs, %d ok / %d total (%.1f mat/s)%s",
-        t_stream,
-        n_ok,
-        n_ok + n_failed,
-        n_ok / max(t_stream, 0.1),
-        " (resumed)" if resumed else "",
-    )
-
-    if n_ok == 0:
-        log.error("no successful materials")
-        return 1
-
-    # ── generate rowmaps for any partitions still on disk ──
-    # These are partitions we did NOT upload-and-delete inside the streaming
-    # loop (i.e. when --upload-chunks is off). The sidecar collectors were
-    # captured at close time so this is authoritative, no scanning.
-    # Uses the consolidated emit_rowmaps_for_bake primitive so every bake
-    # pipeline (this one + ktx2 + derive-from-release) goes through the
-    # same code path — no more copy-pasted loops with drifting bugs.
-    log.info("=== rowmap generation (sidecar) ===")
-    t_rm = time.monotonic()
-    rm_paths = emit_rowmaps_for_bake(
-        finalized_paths,
-        finalized_collectors,
-        source=source,
+    tier = "scalar" if args.source == "physicallybased" else args.tier
+    result = bake_one(
+        source=args.source,
         tier=tier,
         release_tag=args.release_tag,
-        output_dir=output_dir,
+        work_dir=Path(args.output_dir),
+        limit=args.limit,
+        offset=args.offset,
+        batch_size=getattr(args, "batch_size", 50) or 50,
+        dry_run=getattr(args, "dry_run", False),
     )
-    total_bytes = sum(p.stat().st_size for p in finalized_paths if p.exists())
-    log.info(
-        "PERF rowmap: %.1fs, %d partitions, %.1f GB, %d rowmaps written",
-        time.monotonic() - t_rm,
-        len(finalized_paths),
-        total_bytes / 1e9,
-        len(rm_paths),
-    )
-
-    # ── post-bake reconciliation (upload_chunks path) ──
-    # Every parquet we promised to the release must now be there at the
-    # expected size. Fail loud if anything is missing or the wrong size.
-    if upload_release_tag and expected_assets:
-        from mat_vis_baker.upload import verify_upload_size
-
-        log.info("=== reconciling %d uploaded assets ===", len(expected_assets))
-        recon_failures: list[str] = []
-        for asset_path, expected_size in expected_assets:
-            if not verify_upload_size(upload_release_tag, asset_path.name, expected_size):
-                recon_failures.append(asset_path.name)
-        if recon_failures:
-            log.error(
-                "reconciliation FAILED — %d asset(s) missing or wrong size: %s",
-                len(recon_failures),
-                ", ".join(recon_failures),
-            )
-            raise UploadError(
-                f"reconciliation failed: {len(recon_failures)} asset(s): "
-                + ", ".join(recon_failures)
-            )
-        log.info("reconciliation OK — all %d assets verified", len(expected_assets))
-
-    # ── index + manifest + catalog ──
-    log.info("=== index + manifest + catalog ===")
-    index_data = build_index(all_records, source)
-    write_index(index_data, output_dir / f"{source}.json")
-
-    from mat_vis_baker.manifest import generate_manifest, write_manifest
-
-    manifest = generate_manifest(output_dir, args.release_tag, [source], [tier])
-    write_manifest(manifest, output_dir / "release-manifest.json")
-
-    from mat_vis_baker.catalog import generate_catalog, write_catalog
-
-    catalog_md = generate_catalog(output_dir, output_dir / "mtlx")
-    write_catalog(catalog_md, output_dir / "catalog.md")
-
-    t_total = time.monotonic() - t0
-    log.info("=== PERFORMANCE SUMMARY ===")
-    log.info("  stream:  %6.1fs  (%d ok, %d failed)", t_stream, n_ok, n_failed)
-    log.info("  total:   %6.1fs  (%.1f GB output)", t_total, total_bytes / 1e9)
-    return 0
+    log.info("hf-bake (via legacy `all`): %s", result)
+    return 0 if "error" not in result else 1
 
 
 def cmd_derive(args: argparse.Namespace) -> int:
-    """Derive a smaller tier from existing bake output — resize, repack, no download."""
-    import time
-    from concurrent.futures import ThreadPoolExecutor
-
-    from mat_vis_baker.bake import _validate_and_resize_png
-    from mat_vis_baker.common import TIER_TO_PX, hash_textures
-    from mat_vis_baker.index_builder import build_index, write_index
-    from mat_vis_baker.parquet_writer import generate_rowmap, write_parquet, write_rowmap
-
-    source_dir = Path(args.source_dir)
-    target_tier = args.tier
-    target_px = TIER_TO_PX[target_tier]
-    output_dir = Path(args.output_dir)
-    source = args.source
-
-    # Find existing texture files from a previous bake
-    tex_dir = source_dir / "textures"
-    if not tex_dir.exists():
-        log.error("No textures dir at %s — run 'all' first", tex_dir)
-        return 1
-
-    import json
-
-    index_path = source_dir / f"{source}.json"
-    if not index_path.exists():
-        log.error("No index at %s — run 'all' first", index_path)
-        return 1
-
-    index_data = json.loads(index_path.read_text())
-    ok_entries = [e for e in index_data if e.get("status") != "failed"]
-    log.info("deriving %s from %d materials at %dpx", target_tier, len(ok_entries), target_px)
-
-    t0 = time.monotonic()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    out_tex = output_dir / "textures"
-
-    from mat_vis_baker.common import MaterialRecord
-
-    records = []
-
-    def _derive_one(entry):
-        mid = entry["id"]
-        src_mat = tex_dir / mid
-        if not src_mat.exists():
-            return None
-        dst_mat = out_tex / mid
-        dst_mat.mkdir(parents=True, exist_ok=True)
-        paths = {}
-        for ch in entry.get("maps", []):
-            src_png = src_mat / f"{ch}.png"
-            if not src_png.exists():
-                continue
-            dst_png = dst_mat / f"{ch}.png"
-            import shutil
-
-            shutil.copy2(src_png, dst_png)
-            _validate_and_resize_png(dst_png, target_px)
-            paths[ch] = dst_png
-
-        if not paths:
-            return None
-
-        rec = MaterialRecord(
-            id=mid,
-            source=source,
-            name=entry.get("name", mid),
-            category=entry.get("category", "other"),
-            tags=entry.get("tags", []),
-            source_url=entry.get("source_url", ""),
-            source_license=entry.get("source_license", "CC0-1.0"),
-            last_updated=entry.get("last_updated", ""),
-            available_tiers=[target_tier],
-            maps=sorted(paths.keys()),
-            texture_paths=paths,
-        )
-        hash_textures(rec)
-        return rec
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(_derive_one, ok_entries))
-
-    records = [r for r in results if r is not None]
-    t_derive = time.monotonic() - t0
-    log.info("PERF derive: %.1fs, %d materials at %dpx", t_derive, len(records), target_px)
-
-    # Pack
-    from collections import defaultdict as _dd
-
-    by_cat: dict[str, list] = _dd(list)
-    for rec in records:
-        by_cat[rec.category].append(rec)
-
-    t1 = time.monotonic()
-    for cat, cat_records in sorted(by_cat.items()):
-        pq_path = output_dir / f"mat-vis-{source}-{target_tier}-{cat}.parquet"
-        write_parquet(cat_records, source, target_tier, pq_path, target_px)
-        rowmap = generate_rowmap(pq_path, source, target_tier, args.release_tag, cat_records)
-        write_rowmap(rowmap, output_dir / f"{source}-{target_tier}-{cat}-rowmap.json")
-
-    t_pack = time.monotonic() - t1
-
-    # Index
-    index_out = build_index(records, source)
-    write_index(index_out, output_dir / f"{source}.json")
-
-    log.info(
-        "PERF derive total: %.1fs (derive %.1fs + pack %.1fs), %d materials",
-        time.monotonic() - t0,
-        t_derive,
-        t_pack,
-        len(records),
-    )
-    return 0
+    raise NotImplementedError(_RETIRED_DERIVE_MSG.format(cmd="derive"))
 
 
 def cmd_derive_from_release(args: argparse.Namespace) -> int:
-    """Derive a smaller tier from an existing release's parquets (no download from upstream)."""
-    from mat_vis_baker.derive_from_release import derive_from_release
-
-    return derive_from_release(
-        source=args.source,
-        target_tier=args.tier,
-        output_dir=Path(args.output_dir),
-        source_tier=args.source_tier,
-        release_tag=args.release_tag,
-        limit=args.limit,
-    )
+    raise NotImplementedError(_RETIRED_DERIVE_MSG.format(cmd="derive-from-release"))
 
 
 def cmd_catalog(args: argparse.Namespace) -> int:
@@ -631,23 +127,7 @@ def cmd_catalog(args: argparse.Namespace) -> int:
 
 
 def cmd_derive_ktx2(args: argparse.Namespace) -> int:
-    """Derive KTX2 tier from existing release PNGs."""
-    from mat_vis_baker.ktx2 import derive_ktx2_from_release
-
-    output_dir = Path(args.output_dir)
-    source_tier = args.source_tier
-    target_tier = args.target_tier or f"ktx2-{source_tier}"
-    sources = [args.source] if args.source else None
-
-    paths = derive_ktx2_from_release(
-        tag=args.release_tag,
-        source_tier=source_tier,
-        target_tier=target_tier,
-        output_dir=output_dir,
-        sources=sources,
-    )
-    log.info("wrote %d KTX2 parquet files", len(paths))
-    return 0
+    raise NotImplementedError(_RETIRED_DERIVE_MSG.format(cmd="derive-ktx2"))
 
 
 def cmd_pack_mtlx(args: argparse.Namespace) -> int:
