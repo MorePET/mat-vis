@@ -1266,3 +1266,20 @@ class TestLiveFetchTexture:
 
         with pytest.raises(MatVisError, match="material 'NONEXISTENT_XYZ' not found"):
             live_client.fetch_texture("ambientcg", "NONEXISTENT_XYZ", "color", "1k")
+
+
+# ── Phase 2 proof: HF substrate fetch (ADR-0007, gated by MAT_VIS_USE_HF=1) ──
+
+
+@pytest.mark.skipif(
+    os.environ.get("MAT_VIS_USE_HF") != "1",
+    reason="Phase-2 HF substrate proof; set MAT_VIS_USE_HF=1 to run",
+)
+def test_proof_phase_2_fetch_physicallybased_index_from_hf():
+    """Proof bake — physicallybased index fetchable from HF substrate."""
+    with tempfile.TemporaryDirectory() as tmp:
+        client = MatVisClient(tag="v2026.05.0-rc1", cache_dir=Path(tmp))
+        idx = client.index("physicallybased")
+    assert len(idx) >= 50, f"expected ≥50 PB entries, got {len(idx)}"
+    assert all("id" in e and "source" in e for e in idx)
+    assert all(e["source"] == "physicallybased" for e in idx)

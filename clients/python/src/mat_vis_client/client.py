@@ -42,6 +42,16 @@ GITHUB_API = f"https://api.github.com/repos/{REPO}"
 GITHUB_RAW = f"https://raw.githubusercontent.com/{REPO}"
 LATEST_MANIFEST_URL = f"{GITHUB_RELEASES}/latest/download/release-manifest.json"
 PYPI_API = "https://pypi.org/pypi/mat-vis-client/json"
+
+# v0.5.0 HF-substrate scaffolding — Phase 2 (ADR-0007). When
+# MAT_VIS_USE_HF=1, the client fetches manifest + per-source indexes
+# from the HF dataset revision instead of GitHub Releases. Phase 3
+# makes this the default and drops the env flag.
+HF_DATASET = "gerchowl/mat-vis"
+HF_BASE = os.environ.get(
+    "MAT_VIS_HF_BASE",
+    f"https://huggingface.co/datasets/{HF_DATASET}/resolve",
+)
 DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" / "mat-vis"))
 
 # SSoT for version: clients/python/pyproject.toml. Derived at runtime so
@@ -421,6 +431,11 @@ class MatVisClient:
 
         if manifest_url:
             self._manifest_url = manifest_url
+        elif _env_flag("MAT_VIS_USE_HF"):
+            # Phase-2 scaffolding: HF substrate needs an explicit tag —
+            # there is no "latest" branch convention yet.
+            rev = tag or "main"
+            self._manifest_url = f"{HF_BASE}/{rev}/release-manifest.json"
         elif tag:
             self._manifest_url = f"{GITHUB_RELEASES}/download/{tag}/release-manifest.json"
         else:
@@ -760,6 +775,10 @@ class MatVisClient:
     def _index_url(self, source: str) -> str:
         """Build the URL for a source's index JSON."""
         ref = self._tag or "main"
+        if _env_flag("MAT_VIS_USE_HF"):
+            # Phase-2 scaffolding: the HF dataset root holds catalogs at
+            # <source>.json (no per-source index/ subtree — ADR-0007).
+            return f"{HF_BASE}/{ref}/{source}.json"
         return f"{GITHUB_RAW}/{ref}/index/{source}.json"
 
     def index(self, source: str) -> list[dict]:
