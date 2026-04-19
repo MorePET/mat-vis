@@ -114,12 +114,74 @@ def _download_maps(
 MAX_WORKERS = 8  # polyhaven does per-map downloads, so fewer workers to be polite
 
 
-def _fetch_one(slug: str, meta: dict, tier: str, output_dir: Path) -> MaterialRecord:
+def _download_mtlx(
+    file_info: dict,
+    tier: str,
+    mtlx_dir: Path,
+    slug: str,
+    session: requests.Session | None = None,
+) -> Path | None:
+    """Download polyhaven's per-tier .mtlx file, when present.
+
+    Polyhaven publishes a tier-specific MaterialX document for most
+    textures (sampled 30/30 had it). Shape from the API:
+
+        file_info["mtlx"][<tier_key>]["mtlx"] = {"url", "md5", "size", "include"}
+
+    The ``include`` map references the textures the .mtlx points at —
+    we don't download those here (they overlap with the texture-map
+    download path) and the .mtlx itself uses relative paths the client
+    rewrites at export time.
+
+    Writes to ``mtlx_dir/polyhaven/{slug}.mtlx``. ``pack-mtlx`` later
+    reads the same layout (per ``mtlx_tier.pack_original_mtlx_json``)
+    and bundles every source's .mtlx files into ``{source}-mtlx.json``.
+
+    Returns the written path, or None if no MTLX is available for this
+    material/tier or the download failed (logged, non-fatal — most
+    callers want the texture maps to land regardless of MTLX presence).
+    """
+    s = session or requests.Session()
+    tier_key = _TIER_KEYS.get(tier)
+    if not tier_key:
+        return None
+
+    mtlx_section = file_info.get("mtlx")
+    if not isinstance(mtlx_section, dict):
+        return None
+
+    tier_block = mtlx_section.get(tier_key, {})
+    if not isinstance(tier_block, dict):
+        return None
+    inner = tier_block.get("mtlx")
+    if not isinstance(inner, dict) or "url" not in inner:
+        return None
+
+    url = inner["url"]
+    out_path = mtlx_dir / "polyhaven" / f"{slug}.mtlx"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        resp = retry_request(url, session=s)
+        out_path.write_bytes(resp.content)
+        return out_path
+    except Exception:
+        log.warning("%s: mtlx download failed from %s", slug, url)
+        return None
+
+
+def _fetch_one(
+    slug: str, meta: dict, tier: str, output_dir: Path, mtlx_dir: Path | None = None
+) -> MaterialRecord:
     """Fetch a single polyhaven material. Called from thread pool."""
     name = meta.get("name", slug)
     try:
         file_info = _fetch_files(slug)
         textures = _download_maps(file_info, tier, output_dir, slug)
+
+        # MTLX is best-effort and runs after textures land — mtlx_dir is
+        # optional; when None we don't bother (matches the pre-#96 behavior).
+        if mtlx_dir is not None:
+            _download_mtlx(file_info, tier, mtlx_dir, slug)
 
         if not textures:
             return MaterialRecord(
@@ -185,7 +247,8 @@ def fetch(
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = {
-            pool.submit(_fetch_one, slug, assets[slug], tier, output_dir): slug for slug in slugs
+            pool.submit(_fetch_one, slug, assets[slug], tier, output_dir, mtlx_dir): slug
+            for slug in slugs
         }
         for i, future in enumerate(as_completed(futures), 1):
             rec = future.result()
