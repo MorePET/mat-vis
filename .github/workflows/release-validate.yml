@@ -61,6 +61,25 @@ jobs:
             validate-release --src=.
             --tag=${{ steps.tag.outputs.tag }}
 
+      # Bench gate (#88): catches tier-parity and cross-release
+      # regressions that the file-existence / PNG-magic checks above
+      # can't see. Blocking — if counts regress or tiers are skewed,
+      # fail the workflow and let the notify-on-failure step open an
+      # issue.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pyarrow (bench validator dep)
+        run: pip install --quiet pyarrow
+
+      - name: Validate bench metrics
+        run: |
+          python -m scripts.validate_release \
+            --metrics metrics/bake-metrics.parquet \
+            --tag ${{ steps.tag.outputs.tag }}
+
       - name: Notify on failure
         if: failure()
         uses: ./.github/actions/notify-on-failure
