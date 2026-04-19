@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Phase 2 proof bake: physicallybased → HF as v2026.05.0-rc1.
+"""Phase 2 proof bake: physicallybased → HF as v2026.04.1-rc1.
 
 End-to-end proof of the v0.5.0 substrate for the smallest source
 (scalar-only, no textures → no tar, just the catalog + manifest).
 Pushes `physicallybased.json` + `release-manifest.json` atomically to
-`gerchowl/mat-vis` under the pre-release revision `v2026.05.0-rc1`.
+`gerchowl/mat-vis` under the pre-release revision `v2026.04.1-rc1`.
 
 Usage:
 
@@ -28,7 +28,7 @@ from mat_vis_baker.index_builder import build_index  # noqa: E402
 from mat_vis_baker.sources import physicallybased  # noqa: E402
 
 REPO_ID = "gerchowl/mat-vis"
-REVISION = "v2026.05.0-rc1"
+REVISION = "v2026.04.1-rc1"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
 log = logging.getLogger("proof-phase-2")
@@ -67,7 +67,7 @@ def main() -> int:
                 (catalog_path, "physicallybased.json"),
             ],
             revision=REVISION,
-            commit_message=("feat(data): v2026.05.0-rc1 — phase-2 proof bake (physicallybased)"),
+            commit_message=("feat(data): v2026.04.1-rc1 — phase-2 proof bake (physicallybased)"),
         )
 
     base = f"https://huggingface.co/datasets/{REPO_ID}/resolve/{REVISION}"
