@@ -231,6 +231,10 @@ cache/
 release-staging/
 *.parquet
 
+# Keep the bake-metrics history in the repo — it IS source of truth for
+# the regression gate. Not a binary artifact; not a release deliverable.
+!metrics/bake-metrics.parquet
+
 # Nix / devenv
 .devenv/
 .devenv.flake.nix
