@@ -968,7 +968,7 @@ class MatVisCi:
     async def regenerate_rowmaps(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        release_tag: Annotated[str, Doc("Release tag")] = "v2026.04.0",
+        release_tag: Annotated[str, Doc("Release tag")] = "v0000.00.0",
         registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
     ) -> str:
         """Regenerate all rowmap JSONs for a release using the legacy scanner.
@@ -1048,7 +1048,7 @@ class MatVisCi:
     async def rebuild_manifest(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        release_tag: Annotated[str, Doc("Release tag")] = "v2026.04.0",
+        release_tag: Annotated[str, Doc("Release tag")] = "v0000.00.0",
         registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
     ) -> str:
         """Rebuild manifest only (no rowmap regeneration). Fast — just re-reads
