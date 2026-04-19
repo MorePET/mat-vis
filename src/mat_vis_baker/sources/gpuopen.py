@@ -1,7 +1,7 @@
 """GPUOpen MaterialX Library fetcher.
 
 API: https://api.matlib.gpuopen.com/api/packages/?limit=100&offset=0
-License: TBV (per material)
+License: MIT (©2022 AMD; verified via matlib.gpuopen.com per-material display)
 Format: ZIP with .mtlx + textures. Some materials have layered graphs.
 """
 
@@ -65,7 +65,7 @@ def _inject_mtlx_comment(mtlx_bytes: bytes, material_id: str, source_url: str) -
     """Inject source attribution comment into mtlx XML."""
     comment = (
         f"<!-- source: {source_url} -->\n"
-        f"<!-- license: TBV -->\n"
+        f"<!-- license: MIT (c)2022 AMD -->\n"
         f"<!-- material: {material_id} -->\n"
         f"<!-- fetched-by: mat-vis-baker -->\n"
     ).encode()
@@ -183,7 +183,7 @@ def _fetch_one(
             category=cat,
             tags=tags,
             source_url=f"https://matlib.gpuopen.com/main/materials/all?material={mid}",
-            source_license="TBV",
+            source_license="MIT",
             last_updated=pkg.get("updated_date", ""),
             available_tiers=[tier] if textures else [],
             maps=sorted(textures.keys()),

@@ -98,7 +98,7 @@ GET https://api.polyhaven.com/files/<asset_slug>
 | Field            | Value |
 |------------------|-------|
 | Website          | <https://matlib.gpuopen.com> |
-| License          | **TBV** (to be verified per material; check each material's metadata) |
+| License          | **MIT** (©2022 AMD; verified via matlib.gpuopen.com per-material display) |
 | Auth required    | No (currently) |
 | Rate limiting    | Unknown |
 
@@ -115,9 +115,11 @@ GET https://api.matlib.gpuopen.com/api/packages?limit=100&offset=0
 ### Download
 
 - Per-package detail (to get download URL):
+
   ```
   GET https://api.matlib.gpuopen.com/api/packages/<package_id>
   ```
+
 - Downloads are **ZIP packages** containing `.mtlx` + texture files.
 - Download URL is typically in `response.downloadUrl` or a similar field; verify at implementation time.
 
@@ -168,6 +170,7 @@ GET https://api.physicallybased.info/materials
 ### Color conversion
 
 - The `color` field is an RGB tuple in [0,1] range. Convert to `#RRGGBB` hex:
+
   ```python
   hex_color = "#{:02X}{:02X}{:02X}".format(
       int(round(r * 255)),
