@@ -2873,7 +2873,7 @@
 
 ## 💎 gpuopen
 
-> 9 materials | Tiers: 128, 1k, 256, 2k, 512, ktx2-128, ktx2-1k, ktx2-256, ktx2-512 | License: TBV (per material)
+> 9 materials | Tiers: 128, 1k, 256, 2k, 512, ktx2-128, ktx2-1k, ktx2-256, ktx2-512 | License: MIT (©2022 AMD)
 > [https://matlib.gpuopen.com](https://matlib.gpuopen.com)
 
 
