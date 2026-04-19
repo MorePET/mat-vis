@@ -14,7 +14,7 @@
     },
     "release_tag": {
       "type": "string",
-      "description": "Tag-name of the dataset revision. Calver for production releases (v2026.05.0), suffixed for pre-releases (v2026.05.0-rc1).",
+      "description": "Tag-name of the dataset revision. Calver for production releases (e.g. v2026.04.1), suffixed for pre-releases (e.g. v2026.04.1-rc1).",
       "pattern": "^v\\d{4}\\.\\d{2}\\.\\d+(-[A-Za-z0-9.]+)?$"
     },
     "sources": {

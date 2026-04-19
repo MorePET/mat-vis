@@ -1,4 +1,17 @@
-"""Build index/<source>.json from MaterialRecords."""
+"""Build index/<source>.json from MaterialRecords.
+
+The per-source catalog is a flat list of material entries (see
+``docs/specs/index-schema.json``). Every bake of ``(source, tier)``
+produces the **same** catalog shape — tier-specific info lives in
+``available_tiers`` on each entry, not in a separate file per tier.
+
+When a partial bake writes the catalog, it must **merge** with any
+entries already published under the same release revision on HF —
+otherwise a second bake for the same source (e.g. running each tier
+independently) clobbers what the first bake produced. That was the
+substrate-level root of #99 on the old GH-Releases substrate; ADR-0007
+fixes it by construction via the remote merge here + atomic commits.
+"""
 
 from __future__ import annotations
 
@@ -46,6 +59,68 @@ def build_index(records: list[MaterialRecord], source: str) -> list[dict]:
 
     entries.sort(key=lambda e: e["id"])
     return entries
+
+
+def merge_index(
+    existing: list[dict] | None,
+    new: list[dict],
+) -> list[dict]:
+    """Merge ``new`` into ``existing``, keyed by ``id``. New wins on conflict.
+
+    ``available_tiers`` and ``maps`` are merged (union, sorted) so a
+    second bake that only adds tier "2k" to a material that previously
+    had "1k" leaves both tiers exposed on the entry.
+    """
+    by_id: dict[str, dict] = {}
+    for e in existing or []:
+        by_id[e["id"]] = dict(e)
+    for e in new:
+        mid = e["id"]
+        if mid in by_id:
+            merged = dict(by_id[mid])
+            tiers = sorted(
+                set(merged.get("available_tiers", [])) | set(e.get("available_tiers", []))
+            )
+            maps = sorted(set(merged.get("maps", [])) | set(e.get("maps", [])))
+            merged.update(e)
+            merged["available_tiers"] = tiers
+            merged["maps"] = maps
+            by_id[mid] = merged
+        else:
+            by_id[mid] = dict(e)
+    return sorted(by_id.values(), key=lambda e: e["id"])
+
+
+def merge_remote_index(
+    *,
+    repo_id: str,
+    revision: str,
+    source: str,
+    local_entries: list[dict],
+    hf_token: str | None = None,
+) -> list[dict]:
+    """Fetch the remote catalog for ``source`` at ``revision`` and merge.
+
+    On first bake (file absent on remote), returns ``local_entries``
+    unchanged (already sorted by ``build_index``).
+    """
+    from mat_vis_baker.manifest import _download_json
+
+    remote = _download_json(
+        repo_id=repo_id, revision=revision, path=f"{source}.json", hf_token=hf_token
+    )
+    if remote is None:
+        log.info("no remote %s.json at %s — fresh catalog", source, revision)
+        return local_entries
+    merged = merge_index(remote, local_entries)
+    log.info(
+        "merged catalog %s: %d remote + %d local → %d entries",
+        source,
+        len(remote),
+        len(local_entries),
+        len(merged),
+    )
+    return merged
 
 
 def write_index(index_data: list[dict], output_path: Path) -> Path:

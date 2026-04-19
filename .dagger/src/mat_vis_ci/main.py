@@ -672,6 +672,8 @@ class MatVisCi:
                     "/tmp/integration",
                     "--limit",
                     "2",
+                    "--release-tag",
+                    "v0000.00.0",
                 ]
             )
             .with_new_file(

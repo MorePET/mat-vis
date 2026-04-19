@@ -46,7 +46,7 @@ Combine all three reviewers' simplifications into a single architectural cut, **
 
 - **Hugging Face Datasets**, repo `huggingface.co/datasets/gerchowl/mat-vis` (personal account; transfer to org TBD).
 - **Atomic commits** via `huggingface_hub.HfApi.create_commit` — manifest + every parquet/tar lands together or not at all.
-- **Tag-named revisions** retain calver naming (`v2026.05.0`, …) — same external version model.
+- **Tag-named revisions** retain calver naming (`v2026.04.1`, …) — same external version model.
 - **CloudFront-backed CDN** — `https://huggingface.co/datasets/gerchowl/mat-vis/resolve/<revision>/<path>`. Range reads work natively, no signed URLs.
 
 ### Container
@@ -59,7 +59,7 @@ Combine all three reviewers' simplifications into a single architectural cut, **
 ### Files per release (target)
 
 ```
-v2026.05.0/
+v2026.04.1/
   release-manifest.json              # {tier: {source: {tar_url, rowmap_url, materials_count}}}
   ambientcg.json                     # catalog: id/category/scalars/source_url/source_license
   polyhaven.json

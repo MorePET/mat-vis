@@ -35,7 +35,7 @@ def push_to_hf(
         repo_id: e.g. ``"gerchowl/mat-vis"``.
         files: list of ``(local_path, path_in_repo)`` pairs. Every file
             lands in one ``create_commit`` call.
-        revision: target branch/tag (e.g. ``"v2026.05.0"``).
+        revision: target branch/tag (e.g. ``"v2026.04.1"``).
         commit_message: commit message.
         token: HF access token. Falls back to the ``HF_TOKEN`` env var.
         create_branch_if_missing: if True and ``revision`` is not an

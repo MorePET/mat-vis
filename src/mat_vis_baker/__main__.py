@@ -675,6 +675,34 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hf_bake(args: argparse.Namespace) -> int:
+    """Bake (source, tier) → atomic HF push. The ADR-0007 replacement
+    for ``cmd_all``'s parquet/GH-Releases path."""
+    from mat_vis_baker.hf_bake import bake_one
+
+    tier = args.tier
+    if args.source == "physicallybased" or tier == "scalar":
+        # Scalar sources don't honor a tier — any non-"scalar" value
+        # passed here is a user error.
+        tier = "scalar"
+
+    result = bake_one(
+        source=args.source,
+        tier=tier,
+        release_tag=args.release_tag,
+        work_dir=Path(args.work_dir),
+        repo_id=args.repo_id,
+        limit=args.limit,
+        offset=args.offset,
+        batch_size=args.batch_size,
+        dry_run=args.dry_run,
+    )
+    log.info("hf-bake result: %s", result)
+    if "error" in result:
+        return 1
+    return 0
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
@@ -687,7 +715,7 @@ def main() -> int:
     p_all.add_argument("output_dir")
     p_all.add_argument("--offset", type=int, default=0, help="Skip first N materials")
     p_all.add_argument("--limit", type=int, default=None)
-    p_all.add_argument("--release-tag", default="v0000.00.0")
+    p_all.add_argument("--release-tag", required=True)
     p_all.add_argument(
         "--batch-size", type=int, default=50, help="Materials per streaming batch (default: 50)"
     )
@@ -723,7 +751,7 @@ def main() -> int:
         "source_dir", help="Directory with existing bake output (textures + index)"
     )
     p_derive.add_argument("output_dir")
-    p_derive.add_argument("--release-tag", default="v0000.00.0")
+    p_derive.add_argument("--release-tag", required=True)
 
     p_dfr = sub.add_parser(
         "derive-from-release",
@@ -735,7 +763,7 @@ def main() -> int:
     p_dfr.add_argument(
         "--source-tier", default="1k", choices=VALID_TIERS, help="Tier to read from (default: 1k)"
     )
-    p_dfr.add_argument("--release-tag", default="v0000.00.0")
+    p_dfr.add_argument("--release-tag", required=True)
     p_dfr.add_argument("--limit", type=int, default=None, help="Process only first N materials")
 
     p_fetch = sub.add_parser("fetch", help="Fetch textures from upstream")
@@ -756,7 +784,7 @@ def main() -> int:
         help="Derive KTX2-compressed tier from existing release PNGs",
     )
     p_ktx2.add_argument("output_dir")
-    p_ktx2.add_argument("--release-tag", default="v2026.04.0")
+    p_ktx2.add_argument("--release-tag", required=True)
     p_ktx2.add_argument(
         "--source-tier", default="1k", help="PNG tier to transcode from (default: 1k)"
     )
@@ -764,6 +792,32 @@ def main() -> int:
         "--target-tier", default=None, help="KTX2 tier name (default: ktx2-{source-tier})"
     )
     p_ktx2.add_argument("--source", default=None, help="Restrict to one source")
+
+    p_hf = sub.add_parser(
+        "hf-bake",
+        help="Bake (source, tier) and atomically push to HF Datasets (ADR-0007).",
+    )
+    p_hf.add_argument("source", choices=SOURCES)
+    p_hf.add_argument(
+        "tier",
+        choices=VALID_TIERS + ["scalar"],
+        help="Tier name, or 'scalar' for physicallybased (no textures).",
+    )
+    p_hf.add_argument("work_dir", help="Scratch dir for fetched + baked textures + tar.")
+    p_hf.add_argument("--release-tag", required=True)
+    p_hf.add_argument(
+        "--repo-id",
+        default="gerchowl/mat-vis",
+        help="HF dataset repo (default: gerchowl/mat-vis).",
+    )
+    p_hf.add_argument("--limit", type=int, default=None)
+    p_hf.add_argument("--offset", type=int, default=0)
+    p_hf.add_argument("--batch-size", type=int, default=50)
+    p_hf.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build tar + manifest locally; skip the HF push.",
+    )
 
     p_mtlx = sub.add_parser(
         "pack-mtlx",
@@ -789,6 +843,8 @@ def main() -> int:
         return cmd_derive_ktx2(args)
     if args.command == "pack-mtlx":
         return cmd_pack_mtlx(args)
+    if args.command == "hf-bake":
+        return cmd_hf_bake(args)
 
     parser.print_help()
     return 1
