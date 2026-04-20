@@ -65,7 +65,10 @@ jobs:
       ${{ inputs.source-tier }}
       → ${{ inputs.kind == 'resize' && inputs.target-tier || format('ktx2-{0}', inputs.source-tier) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    # 2k ktx2 transcodes with PIL re-encode + toktx per channel run
+    # ~3 h on free runners (2026-04-20 empirical). Headroom for
+    # ambientcg (largest source).
+    timeout-minutes: 480
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
