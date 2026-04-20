@@ -1,0 +1,89 @@
+---
+# Join the operator's tailnet and export OTEL_EXPORTER_OTLP_ENDPOINT so
+# every subsequent step in the job (including Dagger engine + baker
+# Python process) emits OTLP spans to the operator's self-hosted
+# grafana/otel-lgtm without a public endpoint.
+#
+# NOT wired into derive.yml / bake.yml by default — per
+# docs/observability.md, the OTLP collector + Tailscale tailnet are
+# operator-provided; enabling this action is opt-in.
+#
+# Usage (add as the first step before `uv run mat-vis-baker …` /
+# `dagger call …`):
+#
+#   - name: Join tailnet + export OTLP endpoint
+#     uses: ./.github/actions/otlp-tailnet
+#     with:
+#       hostname: otel.tail-abc123.ts.net
+#       port: "4318"
+#     env:
+#       TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+#
+# After this step, `OTEL_EXPORTER_OTLP_ENDPOINT` is set on
+# `$GITHUB_ENV` for the rest of the job. Dagger's engine reads it
+# natively (emitting one span per `dagger call` + per container op)
+# and the baker's OTel SDK picks it up via
+# src/mat_vis_baker/telemetry.py (opt-in, no-op otherwise).
+#
+# Teardown: the tailscale/github-action handles disconnection when the
+# job ends — nothing to clean up here.
+
+name: Join tailnet + export OTLP endpoint
+description: >-
+  Authenticate to the operator's tailnet via TS_AUTHKEY and export
+  OTEL_EXPORTER_OTLP_ENDPOINT so Dagger + baker spans flow to the
+  self-hosted grafana/otel-lgtm collector on that tailnet host.
+
+inputs:
+  hostname:
+    description: >-
+      Tailnet hostname of the OTLP collector, e.g.
+      `otel.tail-abc123.ts.net`. Operator-specific; no default.
+    required: true
+  port:
+    description: OTLP/HTTP port on the collector. grafana/otel-lgtm defaults to 4318.
+    required: false
+    default: "4318"
+  scheme:
+    description: >-
+      `http` (default — tailnet traffic is already WireGuard-encrypted
+      end-to-end) or `https` if the operator put TLS in front of the
+      collector (tailscale serve, reverse proxy).
+    required: false
+    default: "http"
+  tags:
+    description: >-
+      Comma-separated tailscale ACL tags applied to the ephemeral
+      runner node. Keep narrow (e.g. `tag:ci`) so ACLs can restrict
+      CI-originated traffic.
+    required: false
+    default: "tag:ci"
+
+runs:
+  using: composite
+  steps:
+    - name: Join tailnet
+      uses: tailscale/github-action@v2
+      with:
+        authkey: ${{ env.TS_AUTHKEY }}
+        tags: ${{ inputs.tags }}
+
+    - name: Export OTEL_EXPORTER_OTLP_ENDPOINT
+      shell: bash
+      env:
+        HOSTNAME: ${{ inputs.hostname }}
+        PORT: ${{ inputs.port }}
+        SCHEME: ${{ inputs.scheme }}
+      run: |
+        set -euo pipefail
+        endpoint="${SCHEME}://${HOSTNAME}:${PORT}"
+        echo "OTEL_EXPORTER_OTLP_ENDPOINT=${endpoint}" >> "${GITHUB_ENV}"
+        # Diagnostic: confirm reachability before workload runs. A
+        # failure here is almost always "tailnet ACL blocks runner"
+        # or "collector down" — fail fast with a clear signal.
+        if ! curl -fsS --max-time 5 -o /dev/null -w '%{http_code}\n' \
+             "${endpoint}/v1/traces" -X POST \
+             -H 'content-type: application/json' -d '{"resourceSpans":[]}'; then
+          echo "::warning::OTLP endpoint ${endpoint} not reachable from runner — spans will be dropped. Check tailnet ACLs + collector health."
+        fi
+        echo "OTLP endpoint wired: ${endpoint}"
