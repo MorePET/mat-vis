@@ -61,6 +61,7 @@ def test_source_schema_is_valid_json():
     with open(SOURCE) as f:
         data = json.load(f)
     props = data["items"]["properties"]
-    assert "enum" in props["category"]
+    # v3 (ADR-0011): category is nested under `mat_vis`.
+    assert "enum" in props["mat_vis"]["properties"]["category"]
     assert "enum" in props["source"]
     assert "enum" in props["maps"]["items"]
