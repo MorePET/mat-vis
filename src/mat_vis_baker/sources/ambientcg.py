@@ -16,10 +16,12 @@ from pathlib import Path
 import requests
 
 from mat_vis_baker.common import (
+    TIER_TO_PX,
     AttributionBlock,
     DatesBlock,
     MaterialRecord,
     MatVisBlock,
+    PhysicalBlock,
     check_zip_safety,
     normalize_category,
     normalize_channel,
@@ -163,6 +165,43 @@ def _extract_maps_from_zip(
     return result
 
 
+# ── curated-field extraction (Phase B, mat-vis#152) ─────────────
+
+
+def _dimensions_m(entry: dict) -> list[float | None] | None:
+    """Extract ``[x, y, z]`` in metres from upstream mm values.
+
+    ambientcg exposes ``dimensionX / dimensionY / dimensionZ`` in millimetres.
+    Convert to metres; treat ``0`` as "unknown" (not a real zero-thickness
+    material). If all three are missing entirely, return ``None`` so the
+    whole ``physical.dimensions_m`` field is null rather than ``[None, None, None]``.
+    """
+    keys = ("dimensionX", "dimensionY", "dimensionZ")
+    if not any(k in entry for k in keys):
+        return None
+    out: list[float | None] = []
+    for k in keys:
+        raw = entry.get(k)
+        if raw is None:
+            out.append(None)
+            continue
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            out.append(None)
+            continue
+        out.append(None if v == 0 else v / 1000.0)
+    return out
+
+
+def _max_resolution_px(tier: str) -> list[int] | None:
+    """Derive ``[w, h]`` in pixels from the baked tier."""
+    px = TIER_TO_PX.get(tier)
+    if px is None:
+        return None
+    return [px, px]
+
+
 # ── main fetch ──────────────────────────────────────────────────
 
 
@@ -201,6 +240,7 @@ def _fetch_one(entry: dict, tier: str, output_dir: Path, mtlx_dir: Path | None) 
         cat = normalize_category(entry.get("displayCategory", entry.get("category", "")))
         tags = entry.get("tags", [])
         release_date = (entry.get("releaseDate") or "")[:10] or None
+        description = entry.get("description") or None
 
         return MaterialRecord(
             id=mid,
@@ -209,7 +249,12 @@ def _fetch_one(entry: dict, tier: str, output_dir: Path, mtlx_dir: Path | None) 
                 name=name,
                 category=cat,
                 tags=tags,
+                description=description,
                 upstream_id=mid,
+                physical=PhysicalBlock(
+                    dimensions_m=_dimensions_m(entry),
+                    max_resolution_px=_max_resolution_px(tier),
+                ),
                 attribution=AttributionBlock(
                     license_spdx="CC0-1.0",
                     source_url=f"https://ambientcg.com/a/{mid}",
