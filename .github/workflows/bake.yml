@@ -64,7 +64,9 @@ jobs:
   bake:
     name: hf-bake ${{ inputs.source }} ${{ inputs.tier }}
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    # GH-hosted runners hard-cap at 360 min; 350 leaves headroom for
+    # the post-step log upload and any slack in the scheduler.
+    timeout-minutes: 350
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:

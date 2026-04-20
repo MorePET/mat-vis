@@ -1,6 +1,21 @@
 ---
 # Derive workflow — resize a smaller PNG tier or KTX2-transcode an
-# existing PNG tar on HF. Atomic-commits via hf-derive / hf-derive-ktx2.
+# existing PNG tar on HF, sharded across N runners (#134, #138).
+#
+# Shape:
+#   setup   — precomputes the shard-index list + target-tier name
+#   derive  — matrix[shard-index] runs mat-vis-baker hf-derive{,-ktx2}
+#             with --shard-index N --shard-total K; each shard is an
+#             atomic HF commit for its own tar + rowmap
+#   merge   — single job that runs mat-vis-baker merge-shards to
+#             reassemble the shard tars into one canonical tar and
+#             delete the shard artifacts in one atomic commit
+#   report  — notify-on-failure if any earlier job failed
+#
+# When shard-total == 1 the matrix produces one job, shard args are
+# omitted (so the output is polyhaven-512.tar directly), and the
+# merge step is skipped — gives back the legacy unsharded path
+# without code duplication.
 
 name: Derive
 
@@ -52,22 +67,99 @@ on:  # yamllint disable-line rule:truthy
         required: false
         default: 'gerchowl/mat-vis'
         type: string
+      shard-total:
+        description: 'Number of shards (1 = no sharding; defaults: 4 for resize, 8 for ktx2)'
+        required: false
+        default: '0'   # 0 = auto (see setup job)
+        type: string
 
 permissions:
   contents: read
   issues: write          # needed by notify-on-failure composite action
 
+# Serialise dispatches on the same (release, source, source-tier, kind).
+# Without this, two parallel dispatches race on shard-N-of-K paths; because
+# tar member order is non-deterministic under ThreadPoolExecutor, producer
+# A's bytes could land with producer B's rowmap offsets — silent corruption.
+# cancel-in-progress=false because we want to queue retries, not preempt
+# the in-flight derive mid-shard.
+concurrency:
+  group: derive-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ inputs.source }}-${{ inputs.source-tier }}-${{ inputs.kind }}
+  cancel-in-progress: false
+
 jobs:
+  setup:
+    name: setup (shards + target-tier)
+    runs-on: ubuntu-latest
+    outputs:
+      shard-total: ${{ steps.plan.outputs.shard-total }}
+      shards: ${{ steps.plan.outputs.shards }}
+      target-tier: ${{ steps.plan.outputs.target-tier }}
+    steps:
+      - id: plan
+        run: |
+          set -euo pipefail
+          kind="${{ inputs.kind }}"
+          req="${{ inputs.shard-total }}"
+          if [ "$req" = "0" ] || [ -z "$req" ]; then
+            if [ "$kind" = "ktx2" ]; then
+              K=8
+            else
+              K=4
+            fi
+          else
+            K="$req"
+          fi
+          if ! [[ "$K" =~ ^[0-9]+$ ]] || [ "$K" -lt 1 ]; then
+            echo "::error::shard-total must be a positive integer, got '$K'"
+            exit 1
+          fi
+
+          if [ "$kind" = "resize" ]; then
+            tier="${{ inputs.target-tier }}"
+          else
+            tier="ktx2-${{ inputs.source-tier }}"
+          fi
+
+          # Build JSON array [0, 1, …, K-1]
+          shards="[$(seq -s, 0 $((K-1)))]"
+
+          {
+            echo "shard-total=$K"
+            echo "shards=$shards"
+            echo "target-tier=$tier"
+          } >>"$GITHUB_OUTPUT"
+          echo "Plan: kind=$kind target-tier=$tier shard-total=$K shards=$shards"
+
   derive:
+    needs: setup
     name: >-
       ${{ inputs.kind }}
       ${{ inputs.source }}
       ${{ inputs.source-tier }}
-      → ${{ inputs.kind == 'resize' && inputs.target-tier || format('ktx2-{0}', inputs.source-tier) }}
+      → ${{ needs.setup.outputs.target-tier }}
+      (shard ${{ matrix.shard-index }}/${{ needs.setup.outputs.shard-total }})
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    # Shards of ktx2-2k can run ~3 h; 350 min gives headroom under
+    # the 360-min GH runner hard cap.
+    timeout-minutes: 350
+    strategy:
+      # Let all shards run to completion even if one fails — easier to
+      # triage which channels are broken than to bisect a cancelled set.
+      fail-fast: false
+      # 8 concurrent shards fits the org's 20-slot budget with room for
+      # other workflows. Users can pass shard-total > 8; excess queues.
+      max-parallel: 8
+      matrix:
+        shard-index: ${{ fromJson(needs.setup.outputs.shards) }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # Python logging is line-buffered on a pipe by default, which can
+      # stall the 30 s progress heartbeat (mat_vis_baker.hf_derive) for
+      # minutes in the GH Actions log stream. Unbuffered stdio makes the
+      # heartbeat visible in real time — the difference between "stuck"
+      # and "slow" when triaging a running shard.
+      PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -89,34 +181,92 @@ jobs:
       - name: Install baker
         run: uv sync --all-extras
 
-      - name: Derive
+      - name: Derive (shard ${{ matrix.shard-index }}/${{ needs.setup.outputs.shard-total }})
         run: |
           set -euxo pipefail
+          shard_flags=""
+          if [ "${{ needs.setup.outputs.shard-total }}" != "1" ]; then
+            shard_flags="--shard-index ${{ matrix.shard-index }} --shard-total ${{ needs.setup.outputs.shard-total }}"
+          fi
           if [ "${{ inputs.kind }}" = "resize" ]; then
+            # shellcheck disable=SC2086
             uv run mat-vis-baker hf-derive \
               "${{ inputs.source }}" \
               "${{ inputs.target-tier }}" \
               /tmp/derive \
               --source-tier "${{ inputs.source-tier }}" \
               --release-tag "${{ inputs.release-tag }}" \
-              --repo-id "${{ inputs.repo-id }}"
+              --repo-id "${{ inputs.repo-id }}" \
+              $shard_flags
           else
+            # shellcheck disable=SC2086
             uv run mat-vis-baker hf-derive-ktx2 \
               "${{ inputs.source }}" \
               /tmp/derive \
               --source-tier "${{ inputs.source-tier }}" \
               --release-tag "${{ inputs.release-tag }}" \
-              --repo-id "${{ inputs.repo-id }}"
+              --repo-id "${{ inputs.repo-id }}" \
+              $shard_flags
           fi
 
+  merge:
+    needs: [setup, derive]
+    # Skip merge when there's nothing to merge (shard-total=1 means the
+    # shard-aware flags weren't passed, so no shard-N-of-K artifacts
+    # exist on HF — the single-job output is already the final tar).
+    if: needs.setup.outputs.shard-total != '1'
+    name: merge-shards (${{ needs.setup.outputs.shard-total }} shards → ${{ needs.setup.outputs.target-tier }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install baker
+        run: uv sync --all-extras
+
+      - name: merge-shards
+        run: |
+          set -euxo pipefail
+          uv run mat-vis-baker merge-shards \
+            "${{ inputs.source }}" \
+            "${{ needs.setup.outputs.target-tier }}" \
+            /tmp/merge \
+            --release-tag "${{ inputs.release-tag }}" \
+            --repo-id "${{ inputs.repo-id }}"
+
+  report:
+    needs: [setup, derive, merge]
+    # Setup failure → downstream jobs are skipped (result != 'failure'),
+    # so check setup explicitly; otherwise a bad shard-total or tree
+    # listing fails silently with no issue filed.
+    if: >-
+      always() &&
+      (needs.setup.result == 'failure' ||
+       needs.derive.result == 'failure' ||
+       needs.merge.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - name: Notify on failure
-        if: failure()
         uses: ./.github/actions/notify-on-failure
         with:
           label-prefix: "[derive-failed]"
           workflow-name: "derive"
-          target: "${{ inputs.kind }} ${{ inputs.source }}/${{ inputs.source-tier }} @ ${{ inputs.release-tag }}"
+          target: >-
+            ${{ inputs.kind }} ${{ inputs.source }}/${{ inputs.source-tier }}
+            → ${{ needs.setup.outputs.target-tier }}
+            @ ${{ inputs.release-tag }} (shard-total=${{ needs.setup.outputs.shard-total }})
           context: >-
-            Atomic HF commits mean a failed derive leaves the target
-            revision unchanged — safe to retry. Check the derive step
-            logs for the specific channel that errored.
+            Sharded derive — at least one shard or the merge step failed.
+            Each shard commit is atomic, so succeeded shards are already
+            on HF. Recovery: open the failed Actions run and click
+            "Re-run failed jobs" (top right). That re-runs only the red
+            shards + the merge job, skipping the succeeded shards —
+            much cheaper than a fresh workflow_dispatch, which re-runs
+            every shard from scratch.
