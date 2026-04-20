@@ -274,6 +274,31 @@ def normalize_category(raw: str) -> str:
     return "other"
 
 
+# ── SPDX license normalization ──────────────────────────────────
+
+_SPDX_MAP: dict[str, str] = {
+    # upstream strings → SPDX identifiers. Extend per-source as new
+    # upstream license strings appear (covered by CI schema-diff gate).
+    "MIT Public Domain": "MIT",  # gpuopen (issue #168)
+}
+
+
+def normalize_spdx(raw: str | None) -> str:
+    """Map an upstream license string to a valid SPDX identifier.
+
+    Returns ``"NOASSERTION"`` (SPDX-valid, semantically ``unknown``)
+    when the input is empty or unmapped — safer than raising mid-bake
+    and schema-valid (``minLength: 1``).
+    """
+    if not raw or not raw.strip():
+        return "NOASSERTION"
+    key = raw.strip()
+    if key in _SPDX_MAP:
+        return _SPDX_MAP[key]
+    log.warning("normalize_spdx: unknown upstream license %r → NOASSERTION", key)
+    return "NOASSERTION"
+
+
 # ── channel normalization (per-source) ──────────────────────────
 
 _CHANNEL_MAPS: dict[str, dict[str, str]] = {

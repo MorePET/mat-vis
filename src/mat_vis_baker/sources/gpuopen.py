@@ -41,6 +41,7 @@ from mat_vis_baker.common import (
     check_zip_safety,
     normalize_category,
     normalize_channel,
+    normalize_spdx,
     retry_request,
     utc_now_iso,
 )
@@ -320,7 +321,13 @@ def _fetch_one(
             physical=PhysicalBlock(max_resolution_px=_max_resolution_px(tier)),
             attribution=AttributionBlock(
                 authors=_authors(mat),
-                license_spdx="MIT",
+                # Upstream ``license`` is a freeform string (the current
+                # live value is ``"MIT Public Domain"`` — not a valid
+                # SPDX id). normalize_spdx maps it to ``"MIT"`` and
+                # falls back to ``"NOASSERTION"`` for unknown strings
+                # so a drifted upstream value doesn't fail the bake
+                # (mat-vis#168).
+                license_spdx=normalize_spdx(mat.get("license")),
                 source_url=source_url,
             ),
             dates=DatesBlock(

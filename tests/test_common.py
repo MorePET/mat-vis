@@ -1,10 +1,13 @@
 """Tests for mat_vis_baker.common."""
 
+import logging
+
 from mat_vis_baker.common import (
     UpstreamBlock,
     _filter_upstream,
     normalize_category,
     normalize_channel,
+    normalize_spdx,
 )
 
 
@@ -82,6 +85,24 @@ class TestFilterUpstream:
     def test_missing_keys_are_not_inserted(self):
         """Allowlist lists what we WANT; absent keys stay absent."""
         assert _filter_upstream({}, frozenset({"a", "b"})) == {}
+
+
+class TestNormalizeSpdx:
+    def test_normalize_spdx_known_gpuopen(self):
+        assert normalize_spdx("MIT Public Domain") == "MIT"
+
+    def test_normalize_spdx_unknown_fallback(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="mat-vis-baker"):
+            assert normalize_spdx("Weird New License v7") == "NOASSERTION"
+        assert "unknown upstream license" in caplog.text
+
+    def test_normalize_spdx_none_and_empty(self):
+        assert normalize_spdx(None) == "NOASSERTION"
+        assert normalize_spdx("") == "NOASSERTION"
+        assert normalize_spdx("   ") == "NOASSERTION"
+
+    def test_normalize_spdx_whitespace_stripped(self):
+        assert normalize_spdx("  MIT Public Domain  ") == "MIT"
 
 
 class TestUpstreamBlock:
