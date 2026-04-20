@@ -10,6 +10,8 @@ different parameter conventions depending on where you called it.
 
 from __future__ import annotations
 
+import importlib.util as _importlib_util
+from pathlib import Path as _Path
 from unittest.mock import patch
 
 import pytest
@@ -250,3 +252,108 @@ def test_search_issue_167_repro_physicallybased_metals():
             results = c.search(source="physicallybased", metalness=1.0, tier="1k")
     ids = {r["material_id"] for r in results}
     assert ids == {"Iron", "Gold"}
+
+
+# ── Standalone search parity (mat-vis#171) ────────────────────────
+#
+# The single-file standalone at ``clients/python/mat_vis_client_standalone.py``
+# used to carry a minimal ``search()`` signature (no scalar shorthand, no
+# score/limit/tag). These tests exercise the ported kwargs so behavioral
+# regressions in the standalone get caught alongside the signature-drift
+# test in ``tests/test_standalone_drift.py``.
+
+
+def _load_standalone():
+    """Side-load the standalone module by file path (not on sys.path)."""
+    repo_root = _Path(__file__).resolve().parents[3]
+    path = repo_root / "clients" / "python" / "mat_vis_client_standalone.py"
+    spec = _importlib_util.spec_from_file_location("_mat_vis_standalone_for_search_tests", path)
+    assert spec is not None and spec.loader is not None
+    mod = _importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_standalone_search_scalar_roughness_widens():
+    """Standalone: ``search(roughness=0.3)`` widens into ± _SCALAR_WIDEN."""
+    std = _load_standalone()
+    c = std.MatVisClient()
+    with patch.object(c, "sources", return_value=["ambientcg"]):
+        with patch.object(c, "index", return_value=MOCK_INDEX):
+            with patch.object(c, "categories", return_value=frozenset(["metal", "wood"])):
+                results = c.search(category="metal", roughness=0.3)
+    ids = [r["material_id"] for r in results]
+    # Metal032 (0.3) and Metal050A (0.5, boundary inclusive) are within 0.3 ± 0.2.
+    assert "Metal032" in ids
+    assert "Metal050A" in ids
+
+
+def test_standalone_search_score_sorts_ascending_by_distance():
+    """Standalone: ``search(roughness=0.3, score=True)`` attaches + sorts by distance."""
+    std = _load_standalone()
+    c = std.MatVisClient()
+    with patch.object(c, "sources", return_value=["ambientcg"]):
+        with patch.object(c, "index", return_value=MOCK_INDEX):
+            with patch.object(c, "categories", return_value=frozenset(["metal", "wood"])):
+                results = c.search(category="metal", roughness=0.3, score=True)
+    ids = [r["material_id"] for r in results]
+    assert ids[0] == "Metal032"  # diff 0 comes first
+    for r in results:
+        assert "score" in r
+
+
+def test_standalone_search_limit_truncates():
+    """Standalone: ``search(limit=N)`` truncates result list."""
+    std = _load_standalone()
+    c = std.MatVisClient()
+    with patch.object(c, "sources", return_value=["ambientcg"]):
+        with patch.object(c, "index", return_value=MOCK_INDEX):
+            with patch.object(c, "categories", return_value=frozenset(["metal", "wood"])):
+                results = c.search(limit=1)
+    assert len(results) == 1
+
+
+def test_standalone_search_tag_kwarg_accepted():
+    """Standalone: ``search(tag=...)`` dispatches to a pinned client without TypeError.
+
+    We don't assert on the pinned client's behaviour — only that the call
+    signature accepts the kwarg and forwards it through ``self.at(tag)``.
+    """
+    std = _load_standalone()
+    c = std.MatVisClient()
+
+    class _FakePinned:
+        calls: list[dict] = []
+
+        def search(self, category=None, **kwargs):
+            _FakePinned.calls.append({"category": category, **kwargs})
+            return []
+
+    with patch.object(c, "at", return_value=_FakePinned()):
+        out = c.search(category="metal", tag="v2026.04.1")
+    assert out == []
+    assert _FakePinned.calls and _FakePinned.calls[0]["category"] == "metal"
+
+
+def test_standalone_search_rejects_both_scalar_and_range():
+    """Standalone mirrors the packaged guard: can't pass both shorthand + range."""
+    std = _load_standalone()
+    c = std.MatVisClient()
+    with pytest.raises(std.MatVisError, match="roughness"):
+        c.search(roughness=0.3, roughness_range=(0.1, 0.5))
+
+
+def test_standalone_module_level_search_forwards_with_score_and_limit():
+    """Standalone's module-level ``search()`` applies score=True + default limit=20."""
+    std = _load_standalone()
+    # Reset the standalone's own singleton so the patch targets a fresh client.
+    std._client = None
+    client = std.get_client()
+    with patch.object(client, "sources", return_value=["ambientcg"]):
+        with patch.object(client, "index", return_value=MOCK_INDEX):
+            with patch.object(client, "categories", return_value=frozenset(["metal", "wood"])):
+                mod_results = std.search(category="metal", roughness=0.3)
+    # score=True was applied, so results carry a 'score' field and are sorted.
+    assert mod_results
+    assert "score" in mod_results[0]
+    assert mod_results[0]["material_id"] == "Metal032"
