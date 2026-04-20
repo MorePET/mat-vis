@@ -77,18 +77,28 @@ which is what we want, since channel semantics (color / normal /
 roughness / …) are carried by the channel name in the tar, not by
 a tag on the container.
 
-### 4. Fail-fast on systemic failure
+### 4. Two-layer failure detection
 
-`_stream_transform_into_tar` watches the first N=50 completions. If
-more than 20% have failed by then, the transform is broken
-systematically (missing binary, bad auth, format mismatch) and the
-pool is cancelled with a `RuntimeError` that includes the first
-error's stderr.
+*(Revised after /falsify review 2026-04-20 — the original one-shot
+"first-50 completions" gate was broken: the `completed <= 50 +
+max_workers` boundary made it inert after channel ~58, so any
+mid-run regression slipped through silently.)*
 
-Per-channel failures above that window keep being logged but do not
-abort — a handful of bad textures shouldn't fail an 11,000-channel
-bake, and the rowmap simply omits them (clients get a typed
-`ChannelNotFoundError` on read if they ask).
+- **Continuous sliding-window fail-fast.** A `deque(maxlen=50)` of
+  recent successes/failures, checked on every completion. If the
+  window's failure ratio exceeds 20% and at least 50 samples have
+  accumulated, abort with the first error inline. Catches
+  mid-run regressions (HF rate-limit at channel 200, toktx segfault
+  on a specific PNG class encountered late, disk-full).
+- **Terminal success-rate gate.** Overall `n_ok / n_total` must be
+  ≥ 90% at finalize or the run raises rather than pushing. Prevents
+  the "1 out of 11 k succeeded → publish a near-empty tar" silent
+  failure mode.
+
+A handful of bad textures (<10% of total, under the terminal gate)
+is still tolerated — the rowmap simply omits them, and clients get a
+typed `ChannelNotFoundError` on read. Covered by
+`tests/test_hf_derive_gates.py`.
 
 ### 5. Propagate `toktx` stderr
 
@@ -111,12 +121,20 @@ the log. Cheap (~200 B per run) and no-op outside GH Actions.
 ### What the CI signal looks like now
 
 - Broken transform (missing binary, auth): **fails in <1 minute**
-  after the first 50 channels complete.
+  once the sliding window fills.
 - Systematic data corruption (ICC on every input): fails in <1
-  minute (same fail-fast).
-- Sparse failures (a handful of bad textures out of thousands):
-  counted, logged, step-summary records them; the run succeeds
-  and the rowmap reflects the gap.
+  minute (same sliding-window gate).
+- Mid-run regression (rate-limit at channel 200, format bug on later
+  inputs, disk-full): **fails within 50 completions of the regression
+  starting** — the sliding window keeps working past the early
+  boundary. This was the `/falsify` finding; the pre-hardening
+  one-shot gate missed this class entirely.
+- Sparse failures (<10% of total, tolerable fraction of bad
+  textures): counted, logged, step-summary records them; run
+  succeeds and the rowmap reflects the gap.
+- Success rate between 10% and threshold (i.e., sub-window but
+  overall-bad): terminal gate refuses to push. No more "published
+  1 out of 11 000 and called it v2026.xx.0".
 
 ### What this doesn't fix
 
@@ -136,3 +154,26 @@ the log. Cheap (~200 B per run) and no-op outside GH Actions.
   generous).
 - We add a fifth pipeline that doesn't fit the "download → transform
   → upload" shape and needs different IO primitives.
+
+## Falsification review (2026-04-20)
+
+Three adversarial reviewers spawned with no shared context:
+
+- **`::group::`-as-live-progress claim** — BROKEN. The markers render
+  post-hoc; live runs show an open auto-scrolling buffer. Concurrent
+  workers violate the "one group at a time" model. Dropped in favour
+  of a periodic heartbeat log line + this ADR's terminal gate.
+- **Dagger overhead estimates** — per-channel overhead is 2–10 s warm,
+  not 0.5–1 s (refutes the "minutes wasted" phrasing; the actual
+  number is hours). Per-shard overhead is 5–10% on stock GitHub
+  runners, not 1–2%. Engine bootstrap is 60–120 s cold, not 30 s.
+  Cache persistence across CI re-runs requires Dagger Cloud / Depot.
+  Directional conclusion (Dagger at shard granularity, not per
+  channel) still stands, but the numeric claims supporting it are
+  tightened.
+- **Fail-fast coverage** — BROKEN. The original one-shot gate had a
+  `completed <= EARLY_WINDOW + max_workers` clause that made it inert
+  after channel ~58. Hardened to the continuous sliding window
+  documented above + the terminal success-rate gate.
+
+Commit: see the commit adding `tests/test_hf_derive_gates.py`.
