@@ -77,6 +77,16 @@ permissions:
   contents: read
   issues: write          # needed by notify-on-failure composite action
 
+# Serialise dispatches on the same (release, source, source-tier, kind).
+# Without this, two parallel dispatches race on shard-N-of-K paths; because
+# tar member order is non-deterministic under ThreadPoolExecutor, producer
+# A's bytes could land with producer B's rowmap offsets — silent corruption.
+# cancel-in-progress=false because we want to queue retries, not preempt
+# the in-flight derive mid-shard.
+concurrency:
+  group: derive-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ inputs.source }}-${{ inputs.source-tier }}-${{ inputs.kind }}
+  cancel-in-progress: false
+
 jobs:
   setup:
     name: setup (shards + target-tier)
@@ -144,6 +154,12 @@ jobs:
         shard-index: ${{ fromJson(needs.setup.outputs.shards) }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # Python logging is line-buffered on a pipe by default, which can
+      # stall the 30 s progress heartbeat (mat_vis_baker.hf_derive) for
+      # minutes in the GH Actions log stream. Unbuffered stdio makes the
+      # heartbeat visible in real time — the difference between "stuck"
+      # and "slow" when triaging a running shard.
+      PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@v4
 
@@ -226,7 +242,14 @@ jobs:
 
   report:
     needs: [setup, derive, merge]
-    if: always() && (needs.derive.result == 'failure' || needs.merge.result == 'failure')
+    # Setup failure → downstream jobs are skipped (result != 'failure'),
+    # so check setup explicitly; otherwise a bad shard-total or tree
+    # listing fails silently with no issue filed.
+    if: >-
+      always() &&
+      (needs.setup.result == 'failure' ||
+       needs.derive.result == 'failure' ||
+       needs.merge.result == 'failure')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -240,9 +263,10 @@ jobs:
             → ${{ needs.setup.outputs.target-tier }}
             @ ${{ inputs.release-tag }} (shard-total=${{ needs.setup.outputs.shard-total }})
           context: >-
-            Sharded derive — at least one shard failed, or the
-            merge-shards step failed. Each shard commit is atomic, so
-            partial progress is safely stored on HF. Re-run the failed
-            shard(s) by dispatching Derive with the same inputs — the
-            succeeded shards' tars are already in place (merge-shards
-            will pick them up once the last shard lands).
+            Sharded derive — at least one shard or the merge step failed.
+            Each shard commit is atomic, so succeeded shards are already
+            on HF. Recovery: open the failed Actions run and click
+            "Re-run failed jobs" (top right). That re-runs only the red
+            shards + the merge job, skipping the succeeded shards —
+            much cheaper than a fresh workflow_dispatch, which re-runs
+            every shard from scratch.
