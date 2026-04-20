@@ -891,12 +891,18 @@ class MatVisClient:
             catalog = f"{source}.json"
         return self._hf_url(catalog)
 
-    def index(self, source: str) -> list[dict]:
-        """Fetch and cache the per-source catalog JSON.
+    def _load_index_raw(self, source: str) -> list[dict]:
+        """Fetch + cache the per-source catalog JSON, verbatim (with ``upstream``).
 
-        v0.6.0: resolves to ``<HF_BASE>/<revision>/<source>.json`` via
-        the manifest. No GH-Raw fallback — the catalog lives in the
-        same dataset revision as everything else (ADR-0007).
+        Internal accessor used by :meth:`upstream`, :meth:`_resolve_material_id`,
+        :meth:`_scalars_for`, and :meth:`search`'s filter loop — anywhere the
+        server-side shape is needed. Public callers get the stripped view from
+        :meth:`index`.
+
+        Guards the v2/v3 boundary: a v3 client pointed at a v2 catalog (e.g.
+        a user who pinned ``tag="v2026.04.0"`` before rebaking) would silently
+        return empty ``search()`` / ``categories()`` because every ``mat_vis``
+        lookup misses. Fail loudly instead (ADR-0011 / mat-vis#152).
         """
         if source not in self._indexes:
             cache_path = self._cache_scope / ".indexes" / f"{source}.json"
@@ -907,7 +913,102 @@ class MatVisClient:
                 data = _get_json(self._index_url(source))
                 self._indexes[source] = data
                 self._cache_write_text(cache_path, json.dumps(data, indent=2))
+            self._assert_v3_catalog(source, self._indexes[source])
         return self._indexes[source]
+
+    @staticmethod
+    def _assert_v3_catalog(source: str, entries: list[dict]) -> None:
+        """Raise if ``entries`` is a pre-ADR-0011 (v2) catalog.
+
+        Detection: any entry missing a top-level ``mat_vis`` key but carrying
+        one of the v2 semantic keys (``category``, ``name`` directly). A truly
+        empty catalog (``entries=[]``) is ambiguous but harmless — no silent
+        failure surface, so allow it.
+        """
+        if not isinstance(entries, list) or not entries:
+            return
+        sample = entries[0]
+        if not isinstance(sample, dict):
+            return
+        if "mat_vis" in sample:
+            return
+        # v2-shaped entry: top-level semantic fields instead of mat_vis block.
+        if any(k in sample for k in ("category", "color_hex", "roughness")):
+            raise MatVisError(
+                f"catalog for source {source!r} predates ADR-0011 (v2 shape). "
+                f"This client requires v3 catalogs (mat_vis block). "
+                f"Pin tag='v2026.04.1' or newer, or downgrade to mat-vis-client 0.5.x."
+            )
+
+    @staticmethod
+    def _strip_upstream(entry: dict) -> dict:
+        """Return a shallow copy of ``entry`` with the ``upstream`` key removed.
+
+        Layer-2 (``upstream.raw``) is explicitly NOT stable — shipping it in
+        every ``index()`` / ``search()`` response would drag unstable upstream
+        shape into the query surface. Consumers that want it use
+        :meth:`upstream` directly.
+
+        Shallow copy only — inner dicts are shared with the cache. Caller
+        promises not to mutate; that matches the existing read-only
+        contract on search results.
+        """
+        if "upstream" not in entry:
+            return entry
+        return {k: v for k, v in entry.items() if k != "upstream"}
+
+    def index(self, source: str) -> list[dict]:
+        """Fetch and cache the per-source catalog JSON.
+
+        v0.6.0: resolves to ``<HF_BASE>/<revision>/<source>.json`` via
+        the manifest. No GH-Raw fallback — the catalog lives in the
+        same dataset revision as everything else (ADR-0007).
+
+        The ``upstream`` block (Layer 2 of ADR-0011) is stripped from
+        every entry — it's the verbatim upstream response, intentionally
+        NOT part of the stable query surface. Use :meth:`upstream` to
+        access it for a specific material.
+        """
+        return [self._strip_upstream(e) for e in self._load_index_raw(source)]
+
+    def upstream(
+        self,
+        source: str,
+        material_id: str,
+        tier: str = "1k",
+    ) -> dict:
+        """Return the verbatim upstream metadata for a material.
+
+        The shape is source-specific and **unstable** — not covered by
+        semver. Use this for advanced queries that need upstream fields
+        not exposed via ``mat_vis.*``; for anything that MUST be stable,
+        stick to ``client.index()`` / ``client.search()`` and the
+        Layer-1 contract.
+
+        ``material_id`` may be the canonical id or a human-readable name;
+        resolution goes through the same path as every other per-material
+        accessor (:meth:`_resolve_material_id`). Unknown ids / ambiguous
+        names raise typed errors just like ``fetch_texture``.
+
+        Returns ``{}`` when the entry exists but carries no ``upstream``
+        block — typical for pre-v3 catalogs that haven't been re-baked.
+        """
+        resolved = self._resolve_material_id(source, material_id, tier)
+        for entry in self._load_index_raw(source):
+            if entry.get("id") != resolved:
+                continue
+            upstream = entry.get("upstream") or {}
+            raw = upstream.get("raw")
+            if not isinstance(raw, dict):
+                return {}
+            return raw
+        # _resolve_material_id should have caught missing ids, but be
+        # defensive — the rowmap/index disagreement path is real.
+        raise UnknownMaterialError(
+            key=material_id,
+            available=[],
+            context=f"{source}/{tier}",
+        )
 
     _SCALAR_WIDEN = 0.2  # scalar shorthand → range half-width
 

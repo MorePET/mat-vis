@@ -30,14 +30,19 @@ from pathlib import Path
 import requests
 
 from mat_vis_baker.common import (
+    TIER_TO_PX,
     AttributionBlock,
     DatesBlock,
     MaterialRecord,
     MatVisBlock,
+    PhysicalBlock,
+    UpstreamBlock,
+    _filter_upstream,
     check_zip_safety,
     normalize_category,
     normalize_channel,
     retry_request,
+    utc_now_iso,
 )
 
 log = logging.getLogger("mat-vis-baker.gpuopen")
@@ -45,6 +50,36 @@ log = logging.getLogger("mat-vis-baker.gpuopen")
 API_BASE = "https://api.matlib.gpuopen.com/api"
 PAGE_SIZE = 100
 MAX_WORKERS = 10
+
+
+# ── upstream allowlist (Layer 2, ADR-0011 / mat-vis#152 phase-c) ─
+#
+# gpuopen's ``/materials`` response carries a lot of UI-state fodder
+# (``favorite``, ``notification_status``, viewer flags) and byte-heavy
+# payload trees (``packages``, ``renders``, ``renders_order``,
+# ``viewer_package``) we don't want to mirror. Keep only semantic
+# + provenance keys. The MaterialX filename is worth keeping — it's
+# the upstream anchor for the .mtlx we already publish.
+#
+# Fetcher-internal underscore-prefixed keys (``_category_title``,
+# ``_tag_titles``, ``_packages_detail``) are never allowlisted, so
+# _filter_upstream drops them automatically.
+UPSTREAM_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "id",
+        "title",
+        "author",
+        "license",
+        "material_type",
+        "status",
+        "created_date",
+        "updated_date",
+        "published_date",
+        "description",
+        "mtlx_filename",
+        "mtlx_material_name",
+    }
+)
 
 
 # ── discovery ───────────────────────────────────────────────────
@@ -206,6 +241,49 @@ def _extract_from_zip(
 # ── per-material worker ───────────────────────────────────────
 
 
+def _authors(mat: dict) -> list[str]:
+    """gpuopen exposes a single ``author`` string (typically ``"AMD"``).
+
+    Wrap in a list to match the ``attribution.authors`` contract. Empty
+    / missing → ``[]``.
+    """
+    raw = mat.get("author")
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    return [raw.strip()]
+
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _iso_date(raw: object) -> str | None:
+    """gpuopen dates are ISO datetimes; truncate to ``YYYY-MM-DD``.
+
+    Guards against malformed upstream input (Phase B #152 review):
+    ``"2022/08/01"[:10]`` used to pass through verbatim as
+    ``"2022/08/01"``, which would fail any downstream ISO parser. We
+    slice then re-validate with ``^\\d{4}-\\d{2}-\\d{2}$``; on a mismatch
+    return ``None`` so the record just carries no date rather than a
+    malformed one.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    candidate = raw[:10]
+    if not _ISO_DATE_RE.match(candidate):
+        return None
+    return candidate
+
+
+def _max_resolution_px(tier: str) -> list[int] | None:
+    """Derive ``[w, h]`` in pixels from the baked tier (gpuopen packages
+    are labeled ``"1k 8b"``, ``"2k 8b"``, ...; the tier prefix is the px
+    we extract)."""
+    px = TIER_TO_PX.get(tier)
+    if px is None:
+        return None
+    return [px, px]
+
+
 def _fetch_one(
     mat: dict,
     tier: str,
@@ -223,25 +301,39 @@ def _fetch_one(
     name = mat.get("title") or mid
     category = normalize_category(mat.get("_category_title", ""))
     tags = list(mat.get("_tag_titles", []))
+    description = mat.get("description") or None
     source_url = f"https://matlib.gpuopen.com/main/materials/all?material={mid}"
+    upstream = UpstreamBlock(
+        source="gpuopen",
+        schema_version=1,
+        fetched_at=utc_now_iso(),
+        raw=_filter_upstream(mat, UPSTREAM_ALLOWLIST),
+    )
 
     def _mat_vis(maps: list[str] | None = None) -> MatVisBlock:
         return MatVisBlock(
             name=name,
             category=category,
             tags=tags,
+            description=description,
             upstream_id=mid,
+            physical=PhysicalBlock(max_resolution_px=_max_resolution_px(tier)),
             attribution=AttributionBlock(
+                authors=_authors(mat),
                 license_spdx="MIT",
                 source_url=source_url,
             ),
-            dates=DatesBlock(updated=mat.get("updated_date") or None),
+            dates=DatesBlock(
+                published=_iso_date(mat.get("published_date")),
+                updated=_iso_date(mat.get("updated_date")),
+            ),
         )
 
     failed = lambda: MaterialRecord(  # noqa: E731 — local shorthand
         id=mid,
         source="gpuopen",
         mat_vis=_mat_vis(),
+        upstream=upstream,
         status="failed",
     )
 
@@ -274,6 +366,7 @@ def _fetch_one(
             id=mid,
             source="gpuopen",
             mat_vis=_mat_vis(),
+            upstream=upstream,
             available_tiers=[tier] if textures else [],
             maps=sorted(textures.keys()),
             texture_paths=texture_paths,

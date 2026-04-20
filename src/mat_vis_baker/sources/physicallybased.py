@@ -17,13 +17,52 @@ from mat_vis_baker.common import (
     MaterialRecord,
     MatVisBlock,
     PBRBlock,
+    UpstreamBlock,
+    _filter_upstream,
     normalize_category,
     retry_request,
+    utc_now_iso,
 )
 
 log = logging.getLogger("mat-vis-baker.physicallybased")
 
 API_URL = "https://api.physicallybased.info/materials"
+
+
+# ── upstream allowlist (Layer 2, ADR-0011 / mat-vis#152 phase-c) ─
+#
+# physicallybased.info is already a scientific dataset: almost every key
+# is load-bearing (scalar PBR, dispersion, complex IOR, subsurface,
+# acoustic). We mirror the lot — the allowlist exists to make NEW upstream
+# keys show up in the schema-diff gate, not to prune good data.
+UPSTREAM_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "name",
+        "category",
+        "group",
+        "description",
+        "tags",
+        "reference",
+        "sources",
+        "color",
+        "roughness",
+        "metalness",
+        "ior",
+        "specularColor",
+        "complexIor",
+        "transmission",
+        "transmissionDepth",
+        "transmissionDispersion",
+        "density",
+        "densityRange",
+        "viscosity",
+        "surfaceTension",
+        "subsurfaceRadius",
+        "thinFilmIor",
+        "thinFilmThickness",
+        "acousticAbsorption",
+    }
+)
 
 
 def _color_rgb(rgb: object) -> list[float] | None:
@@ -34,6 +73,52 @@ def _color_rgb(rgb: object) -> list[float] | None:
         return [float(rgb[0]), float(rgb[1]), float(rgb[2])]
     except (TypeError, ValueError):
         return None
+
+
+def _specular_f0(raw: object) -> list[float] | None:
+    """Extract ``[r, g, b]`` from upstream ``specularColor`` if valid.
+
+    physicallybased.info exposes ``specularColor`` as a float triple on
+    dielectrics (absent on most metals — ``None`` passthrough). Same shape
+    contract as ``_color_rgb``; decoupled so future per-field validation
+    can diverge without churn.
+    """
+    if not isinstance(raw, list) or len(raw) < 3:
+        return None
+    try:
+        return [float(raw[0]), float(raw[1]), float(raw[2])]
+    except (TypeError, ValueError):
+        return None
+
+
+def _transmission(raw: object) -> float | None:
+    """Upstream ``transmission`` is a single float (0..1) or missing."""
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _complex_ior(raw: object) -> list[float] | None:
+    """Passthrough ``complexIor`` verbatim as a list of floats.
+
+    physicallybased.info publishes 6-element wavelength-resolved complex
+    IOR triples for metals (``[n_r, k_r, n_g, k_g, n_b, k_b]``). Some
+    entries upstream diverge in length; we coerce to list and keep all
+    data in Phase B — stripping / length validation is Phase C's
+    allowlist + schema-diff gate.
+    """
+    if not isinstance(raw, list) or not raw:
+        return None
+    out: list[float] = []
+    for v in raw:
+        try:
+            out.append(float(v))
+        except (TypeError, ValueError):
+            return None
+    return out
 
 
 def _normalize_tags(raw: object) -> list[str]:
@@ -66,6 +151,10 @@ def fetch(*, session: requests.Session | None = None) -> list[MaterialRecord]:
     materials = resp.json()
     log.info("fetched %d materials", len(materials))
 
+    # One fetched_at for the whole batch — physicallybased is a single
+    # API call, so every record legitimately shares the same timestamp.
+    fetched_at = utc_now_iso()
+
     records: list[MaterialRecord] = []
     for mat in materials:
         name = mat.get("name", "")
@@ -82,17 +171,27 @@ def fetch(*, session: requests.Session | None = None) -> list[MaterialRecord]:
                 name=name,
                 category=cat,
                 tags=_normalize_tags(mat.get("tags")),
+                description=mat.get("description") or None,
                 upstream_id=mid,
                 pbr=PBRBlock(
                     color_rgb=_color_rgb(mat.get("color")),
                     roughness=mat.get("roughness"),
                     metalness=mat.get("metalness"),
                     ior=mat.get("ior"),
+                    specular_f0=_specular_f0(mat.get("specularColor")),
+                    transmission=_transmission(mat.get("transmission")),
+                    complex_ior=_complex_ior(mat.get("complexIor")),
                 ),
                 attribution=AttributionBlock(
                     license_spdx="CC0-1.0",
                     source_url="https://physicallybased.info",
                 ),
+            ),
+            upstream=UpstreamBlock(
+                source="physicallybased",
+                schema_version=1,
+                fetched_at=fetched_at,
+                raw=_filter_upstream(mat, UPSTREAM_ALLOWLIST),
             ),
             available_tiers=[],
             maps=[],
