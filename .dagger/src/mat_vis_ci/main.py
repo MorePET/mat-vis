@@ -10,6 +10,10 @@ Usage:
     dagger call smoke-baker          # verify hf-tar baker container (#135)
     dagger call bake                 # port of hf-bake → atomic HF commit (#136)
     dagger call smoke-bake           # dry-run bake against gerchowl/mat-vis-tst (#136)
+    dagger call derive               # hf-derive wrapper (#137)
+    dagger call derive-ktx2          # hf-derive-ktx2 wrapper (#137)
+    dagger call merge-shards         # merge-shards wrapper (#137)
+    dagger call smoke-derive         # dry-run hf-derive shard against tst repo (#137)
     dagger call probe-sources        # verify upstream API connectivity
     dagger call test-all             # lint + test + smoke + probe
     dagger call test-client-python   # pytest on Python reference client
@@ -625,6 +629,178 @@ class MatVisCi:
         return (
             f"=== mat-vis-baker --help ===\n{top}\n"
             f"=== mat-vis-baker merge-shards --help ===\n{merge}"
+        )
+
+    # ── derive pipeline (#137) ─────────────────────────────────────
+
+    @function
+    async def derive(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        source: Annotated[str, Doc("Upstream (ambientcg/polyhaven/gpuopen)")],
+        target_tier: Annotated[str, Doc("Smaller tier to derive, e.g. 512")],
+        source_tier: Annotated[str, Doc("Existing PNG tar tier to resize from")],
+        release_tag: Annotated[str, Doc("Calver release tag, e.g. v2026.04.1")],
+        hf_token: Annotated[dagger.Secret, Doc("HF API token for atomic commits")],
+        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis",
+        dry_run: Annotated[bool, Doc("Skip the HF push; build locally")] = False,
+        shard_index: Annotated[int, Doc("0-based shard index; -1 disables")] = -1,
+        shard_total: Annotated[int, Doc("Total shards; -1 disables")] = -1,
+    ) -> str:
+        """Port of ``mat-vis-baker hf-derive`` (#137).
+
+        Resizes a larger HF PNG tar into a smaller tier via atomic commit.
+        No KTX2 toolchain needed — ``_baker_container(with_ktx2=False)``.
+
+        Sharding (#134 / PR #146): pass ``shard_index`` + ``shard_total``
+        both >= 0 to split the work. ``-1``/``-1`` means no sharding
+        (single-runner derive).
+        """
+        ctr = self._baker_container(context, with_ktx2=False, hf_token=hf_token)
+        cmd = [
+            "uv",
+            "run",
+            "mat-vis-baker",
+            "hf-derive",
+            source,
+            target_tier,
+            "/tmp/derive",
+            "--source-tier",
+            source_tier,
+            "--release-tag",
+            release_tag,
+            "--repo-id",
+            repo_id,
+        ]
+        if dry_run:
+            cmd.append("--dry-run")
+        if shard_index >= 0 and shard_total >= 0:
+            cmd += [
+                "--shard-index",
+                str(shard_index),
+                "--shard-total",
+                str(shard_total),
+            ]
+        return await ctr.with_exec(cmd).stdout()
+
+    @function
+    async def derive_ktx2(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        source: Annotated[str, Doc("Upstream (ambientcg/polyhaven/gpuopen)")],
+        source_tier: Annotated[str, Doc("Existing PNG tar tier to transcode")],
+        release_tag: Annotated[str, Doc("Calver release tag")],
+        hf_token: Annotated[dagger.Secret, Doc("HF API token for atomic commits")],
+        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis",
+        target_tier: Annotated[
+            str, Doc("KTX2 target tier; empty = default ktx2-<source-tier>")
+        ] = "",
+        dry_run: Annotated[bool, Doc("Skip the HF push; build locally")] = False,
+        shard_index: Annotated[int, Doc("0-based shard index; -1 disables")] = -1,
+        shard_total: Annotated[int, Doc("Total shards; -1 disables")] = -1,
+    ) -> str:
+        """Port of ``mat-vis-baker hf-derive-ktx2`` (#137).
+
+        Transcodes an existing HF PNG tar to KTX2. Requires ``toktx``,
+        so ``_baker_container(with_ktx2=True)``.
+
+        The CLI's ``--target-tier`` is optional (defaults to
+        ``ktx2-<source-tier>``). Dagger can't express "omit this arg";
+        we use ``target_tier=""`` as a sentinel that means "use the CLI
+        default" and only pass ``--target-tier`` when the operator
+        supplied a non-empty value.
+        """
+        ctr = self._baker_container(context, with_ktx2=True, hf_token=hf_token)
+        cmd = [
+            "uv",
+            "run",
+            "mat-vis-baker",
+            "hf-derive-ktx2",
+            source,
+            "/tmp/derive",
+            "--source-tier",
+            source_tier,
+            "--release-tag",
+            release_tag,
+            "--repo-id",
+            repo_id,
+        ]
+        if target_tier:
+            cmd += ["--target-tier", target_tier]
+        if dry_run:
+            cmd.append("--dry-run")
+        if shard_index >= 0 and shard_total >= 0:
+            cmd += [
+                "--shard-index",
+                str(shard_index),
+                "--shard-total",
+                str(shard_total),
+            ]
+        return await ctr.with_exec(cmd).stdout()
+
+    @function
+    async def merge_shards(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        source: Annotated[str, Doc("Upstream (ambientcg/polyhaven/gpuopen)")],
+        tier: Annotated[str, Doc("Tier name (e.g. '1k', 'ktx2-1k')")],
+        release_tag: Annotated[str, Doc("Calver release tag")],
+        hf_token: Annotated[dagger.Secret, Doc("HF API token for atomic commits")],
+        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis",
+        dry_run: Annotated[bool, Doc("Skip the HF push; merge locally")] = False,
+        keep_shards: Annotated[bool, Doc("Don't delete shard artifacts after merge")] = False,
+    ) -> str:
+        """Port of ``mat-vis-baker merge-shards`` (#137).
+
+        Reassembles shard-N-of-K artifacts into one tar + rowmap. Works
+        uniformly for PNG tiers and KTX2 tiers — the CLI range-reads +
+        re-packs without transcoding, so no ``toktx`` needed;
+        ``_baker_container(with_ktx2=False)``.
+        """
+        ctr = self._baker_container(context, with_ktx2=False, hf_token=hf_token)
+        cmd = [
+            "uv",
+            "run",
+            "mat-vis-baker",
+            "merge-shards",
+            source,
+            tier,
+            "/tmp/merge",
+            "--release-tag",
+            release_tag,
+            "--repo-id",
+            repo_id,
+        ]
+        if dry_run:
+            cmd.append("--dry-run")
+        if keep_shards:
+            cmd.append("--keep-shards")
+        return await ctr.with_exec(cmd).stdout()
+
+    @function
+    async def smoke_derive(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        hf_token: Annotated[dagger.Secret, Doc("HF API token (smoke repo read)")],
+    ) -> str:
+        """Smoke-test the derive wrapper (#137).
+
+        Runs ``derive`` against ``gerchowl/mat-vis-tst`` @ ``v0.0.1-smoke``
+        with source=polyhaven, source-tier=1k → target-tier=512, shard 0/4,
+        ``--dry-run``. Exercises the baker container + CLI flag plumbing
+        without pushing to HF. Must complete under ~60s.
+        """
+        return await self.derive(
+            context,
+            source="polyhaven",
+            target_tier="512",
+            source_tier="1k",
+            release_tag="v0.0.1-smoke",
+            hf_token=hf_token,
+            repo_id="gerchowl/mat-vis-tst",
+            dry_run=True,
+            shard_index=0,
+            shard_total=4,
         )
 
     @function
