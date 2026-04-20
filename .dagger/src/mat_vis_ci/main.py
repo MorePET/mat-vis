@@ -99,7 +99,7 @@ if ok < len(SOURCES):
 '''
 
 VERIFY_SCRIPT = '''\
-"""Verify hf-bake --dry-run output: tar + rowmap + manifest + range-read."""
+"""Verify hf-bake --dry-run output: tar + rowmap + catalog + range-read."""
 
 import json
 import sys
@@ -113,14 +113,11 @@ assert tar_files, f"No tar files in {out_dir}"
 rowmap_files = sorted(out_dir.glob("*-rowmap.json"))
 assert rowmap_files, f"No rowmap files in {out_dir}"
 
-manifest_path = out_dir / "release-manifest.json"
-assert manifest_path.exists(), "release-manifest.json missing"
-manifest = json.loads(manifest_path.read_text())
-assert manifest.get("schema_version") == 2, "manifest must be schema_version=2"
-
+# Bake no longer writes release-manifest.json (clients derive it from
+# the HF tree listing — ADR-0007 race-free design). Just check catalog + tars.
 catalog_files = [
     p for p in out_dir.glob("*.json")
-    if p.name not in ("release-manifest.json",) and not p.name.endswith("-rowmap.json")
+    if not p.name.endswith("-rowmap.json") and p.name != "release-manifest.json"
 ]
 assert catalog_files, "No per-source catalog JSON"
 
@@ -165,7 +162,6 @@ if errors:
 print(f"  OK tars: {len(tar_files)} file(s)")
 print(f"  OK rowmaps: {len(rowmap_files)} file(s), {total_materials} materials")
 print(f"  OK range-read: {verified} channels verified (all PNG)")
-print(f"  OK manifest: schema_version=2, {len(manifest.get('sources', {}))} sources")
 print(f"  OK catalogs: {len(catalog_files)} file(s)")
 print(f"\\nintegration test passed")
 '''
