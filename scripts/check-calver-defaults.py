@@ -27,7 +27,7 @@ SCAN_DIRS = ("src", "scripts", ".dagger/src")
 # calver string. Everything else under .github/workflows/ is scanned.
 WORKFLOW_DEFAULT_ALLOWED = {
     Path(".github/workflows/bake.yml"),
-    Path(".github/workflows/derive-ktx2.yml"),
+    Path(".github/workflows/derive.yml"),
 }
 
 CALVER_RE = re.compile(r"v20\d{2}\.\d{2}\.\d+(-[A-Za-z0-9.]+)?")
