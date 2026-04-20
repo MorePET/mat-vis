@@ -36,6 +36,52 @@ def _color_rgb(rgb: object) -> list[float] | None:
         return None
 
 
+def _specular_f0(raw: object) -> list[float] | None:
+    """Extract ``[r, g, b]`` from upstream ``specularColor`` if valid.
+
+    physicallybased.info exposes ``specularColor`` as a float triple on
+    dielectrics (absent on most metals — ``None`` passthrough). Same shape
+    contract as ``_color_rgb``; decoupled so future per-field validation
+    can diverge without churn.
+    """
+    if not isinstance(raw, list) or len(raw) < 3:
+        return None
+    try:
+        return [float(raw[0]), float(raw[1]), float(raw[2])]
+    except (TypeError, ValueError):
+        return None
+
+
+def _transmission(raw: object) -> float | None:
+    """Upstream ``transmission`` is a single float (0..1) or missing."""
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _complex_ior(raw: object) -> list[float] | None:
+    """Passthrough ``complexIor`` verbatim as a list of floats.
+
+    physicallybased.info publishes 6-element wavelength-resolved complex
+    IOR triples for metals (``[n_r, k_r, n_g, k_g, n_b, k_b]``). Some
+    entries upstream diverge in length; we coerce to list and keep all
+    data in Phase B — stripping / length validation is Phase C's
+    allowlist + schema-diff gate.
+    """
+    if not isinstance(raw, list) or not raw:
+        return None
+    out: list[float] = []
+    for v in raw:
+        try:
+            out.append(float(v))
+        except (TypeError, ValueError):
+            return None
+    return out
+
+
 def _normalize_tags(raw: object) -> list[str]:
     """Normalize upstream tags to lowercase, stripped, de-duplicated strings.
 
@@ -82,12 +128,16 @@ def fetch(*, session: requests.Session | None = None) -> list[MaterialRecord]:
                 name=name,
                 category=cat,
                 tags=_normalize_tags(mat.get("tags")),
+                description=mat.get("description") or None,
                 upstream_id=mid,
                 pbr=PBRBlock(
                     color_rgb=_color_rgb(mat.get("color")),
                     roughness=mat.get("roughness"),
                     metalness=mat.get("metalness"),
                     ior=mat.get("ior"),
+                    specular_f0=_specular_f0(mat.get("specularColor")),
+                    transmission=_transmission(mat.get("transmission")),
+                    complex_ior=_complex_ior(mat.get("complexIor")),
                 ),
                 attribution=AttributionBlock(
                     license_spdx="CC0-1.0",

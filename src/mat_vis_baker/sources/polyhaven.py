@@ -8,14 +8,17 @@ Format: Individual PNG downloads per map per resolution (no ZIP).
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 
 from mat_vis_baker.common import (
     AttributionBlock,
+    DatesBlock,
     MaterialRecord,
     MatVisBlock,
+    PhysicalBlock,
     normalize_category,
     normalize_channel,
     retry_request,
@@ -108,6 +111,72 @@ def _download_maps(
             log.warning("%s/%s: download failed from %s", material_id, channel, url)
 
     return result
+
+
+# ── curated-field extraction (Phase B, mat-vis#152) ─────────────
+
+
+def _dimensions_m(raw: object) -> list[float | None] | None:
+    """Extract ``[x, y, None]`` in metres from polyhaven's mm 2-tuple.
+
+    polyhaven's ``dimensions`` is a 2-element list in millimetres (no
+    Z-axis upstream). Convert to metres, add ``None`` for the Z slot so
+    callers see a consistent ``[x, y, z]`` shape. Handles list / dict /
+    missing / zero defensively; returns ``None`` when upstream has
+    nothing usable.
+    """
+    if raw is None:
+        return None
+    # Some entries upstream have dict-shaped dimensions in edge cases;
+    # be permissive here — take numeric-keyed values if present.
+    if isinstance(raw, dict):
+        raw = [raw.get("x"), raw.get("y")]
+    if not isinstance(raw, list) or len(raw) < 2:
+        return None
+
+    def _one(v: object) -> float | None:
+        if v is None:
+            return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return None if f == 0 else f / 1000.0
+
+    x, y = _one(raw[0]), _one(raw[1])
+    if x is None and y is None:
+        return None
+    return [x, y, None]
+
+
+def _max_resolution_px(raw: object) -> list[int] | None:
+    """Normalize polyhaven's ``max_resolution`` (already px) to ``[w, h]``."""
+    if not isinstance(raw, list) or len(raw) < 2:
+        return None
+    try:
+        return [int(raw[0]), int(raw[1])]
+    except (TypeError, ValueError):
+        return None
+
+
+def _authors(meta: dict) -> list[str]:
+    """polyhaven's ``authors`` is ``{name: role}``; we want the name list."""
+    raw = meta.get("authors")
+    if not isinstance(raw, dict):
+        return []
+    return list(raw.keys())
+
+
+def _published_date(meta: dict) -> str | None:
+    """polyhaven's ``date_published`` is a Unix epoch (int); return ISO date (UTC)."""
+    raw = meta.get("date_published")
+    if raw is None:
+        return None
+    try:
+        ts = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
 # ── main fetch ──────────────────────────────────────────────────
@@ -209,6 +278,7 @@ def _fetch_one(
             cat_str = ""
         cat = normalize_category(cat_str)
         tags = meta.get("tags", [])
+        description = meta.get("description") or None
 
         return MaterialRecord(
             id=slug,
@@ -217,11 +287,18 @@ def _fetch_one(
                 name=name,
                 category=cat,
                 tags=tags,
+                description=description,
                 upstream_id=slug,
+                physical=PhysicalBlock(
+                    dimensions_m=_dimensions_m(meta.get("dimensions")),
+                    max_resolution_px=_max_resolution_px(meta.get("max_resolution")),
+                ),
                 attribution=AttributionBlock(
+                    authors=_authors(meta),
                     license_spdx="CC0-1.0",
                     source_url=f"https://polyhaven.com/a/{slug}",
                 ),
+                dates=DatesBlock(published=_published_date(meta)),
             ),
             available_tiers=[tier],
             maps=sorted(textures.keys()),
