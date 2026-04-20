@@ -26,7 +26,11 @@ def channel_shard(material_id: str, channel: str, shard_total: int) -> int:
     """Return the shard index (0-based) that owns ``(material_id, channel)``."""
     if shard_total < 1:
         raise ValueError(f"shard_total must be >= 1, got {shard_total}")
-    key = f"{material_id}/{channel}".encode()
+    # Null byte separator so no mid+ch concatenation can collide with any
+    # other pair, regardless of what characters either side may contain.
+    # (Upstream ids and canonical channels are slugs today, but the
+    # helper is a reusable primitive — robustness is cheap here.)
+    key = b"%s\x00%s" % (material_id.encode(), channel.encode())
     digest = hashlib.md5(key, usedforsecurity=False).digest()
     bucket = int.from_bytes(digest[:4], "big")
     return bucket % shard_total

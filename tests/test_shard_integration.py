@@ -122,6 +122,41 @@ def test_shard_coverage_union_equals_unsharded(tmp_path: Path) -> None:
     assert union == ref_pairs
 
 
+def test_empty_shard_is_noop_not_error(tmp_path: Path) -> None:
+    """When shard_total is large enough that some shards own zero
+    channels, those shards must return cleanly (no terminal-gate
+    crash). Uses a 1-material source with shard_total=8; most shards
+    are guaranteed to be empty."""
+    src_tar, src_rowmap = _build_src(tmp_path, n_materials=1)
+    src_bytes = src_tar.read_bytes()
+
+    hit_empty = False
+    for i in range(8):
+        dest = tmp_path / f"s{i}"
+        with (
+            patch("mat_vis_baker.hf_derive._pin_commit", return_value="deadbeef"),
+            patch("mat_vis_baker.hf_derive._fetch_rowmap", return_value=src_rowmap),
+            patch("mat_vis_baker.hf_derive._range_read", side_effect=_mock_range(src_bytes)),
+        ):
+            result = derive_smaller_tier(
+                source="polyhaven",
+                target_tier="512",
+                source_tier="1k",
+                release_tag="v0.0.0-test",
+                work_dir=dest,
+                hf_token="t",
+                dry_run=True,
+                workers=1,
+                shard=(i, 8),
+            )
+        # A shard with no work returns ok=0 with "no channels resized"
+        # — not a crash.
+        if result.get("ok", 0) == 0:
+            hit_empty = True
+            assert "error" in result
+    assert hit_empty, "expected at least one empty shard in this setup"
+
+
 def test_shard_deterministic_bytes(tmp_path: Path) -> None:
     """Same input + same shard index → identical output bytes (re-runnable)."""
     src_tar, src_rowmap = _build_src(tmp_path, n_materials=8)

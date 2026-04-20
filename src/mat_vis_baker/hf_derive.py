@@ -254,14 +254,18 @@ def _stream_transform_into_tar(
 
     # Terminal gate: refuse to ship a partial tar. A few dozen bad
     # textures in a 11k-channel bake is tolerable; sub-90% is not.
-    ok_ratio = n_ok / n_total if n_total else 0.0
-    if ok_ratio < TERMINAL_MIN_OK_RATIO:
-        _write_step_summary(label, n_ok, n_failed, n_total, first_error)
-        raise RuntimeError(
-            f"{label}: terminal check — {n_ok}/{n_total} succeeded "
-            f"({ok_ratio * 100:.1f}% < {int(TERMINAL_MIN_OK_RATIO * 100)}%). "
-            f"Refusing to push a partial tar. First error: {first_error}"
-        )
+    # Empty shards (n_total == 0 — possible when shard_total grows
+    # past the channel count on a sparse source) are legitimately
+    # no-ops and must skip the gate rather than crash.
+    if n_total > 0:
+        ok_ratio = n_ok / n_total
+        if ok_ratio < TERMINAL_MIN_OK_RATIO:
+            _write_step_summary(label, n_ok, n_failed, n_total, first_error)
+            raise RuntimeError(
+                f"{label}: terminal check — {n_ok}/{n_total} succeeded "
+                f"({ok_ratio * 100:.1f}% < {int(TERMINAL_MIN_OK_RATIO * 100)}%). "
+                f"Refusing to push a partial tar. First error: {first_error}"
+            )
 
     log.info("%s done: %d ok / %d failed / %d total", label, n_ok, n_failed, n_total)
     _write_step_summary(label, n_ok, n_failed, n_total, first_error)
