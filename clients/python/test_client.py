@@ -1296,3 +1296,58 @@ def test_proof_phase_2_fetch_physicallybased_index_from_hf():
     assert len(idx) >= 50, f"expected ≥50 PB entries, got {len(idx)}"
     assert all("id" in e and "source" in e for e in idx)
     assert all(e["source"] == "physicallybased" for e in idx)
+
+
+class TestFetchTextureMagicAccepts:
+    """Regression: fetch_texture must accept both PNG and KTX2 payloads.
+
+    The 0.6.0 client initially hardcoded a PNG magic check that rejected
+    KTX2 tiers — a live smoke bake to gerchowl/mat-vis-tst caught it.
+    """
+
+    def _make_client(self, tmp: Path, length: int, tier: str) -> MatVisClient:
+        manifest = {
+            "schema_version": 2,
+            "release_tag": "test",
+            "sources": {
+                "polyhaven": {
+                    "catalog": "polyhaven.json",
+                    "materials_count": 1,
+                    "tiers": {
+                        tier: {"tar": f"poly-{tier}.tar", "rowmap": f"poly-{tier}-rowmap.json"}
+                    },
+                }
+            },
+        }
+        client = MatVisClient(tag="test", cache_dir=tmp)
+        (tmp / "test").mkdir(parents=True, exist_ok=True)
+        (tmp / "test" / ".manifest.json").write_text(json.dumps(manifest))
+        client._update_warned = True
+        client._rowmaps[f"polyhaven-{tier}"] = {
+            "tar_file": f"poly-{tier}.tar",
+            "materials": {
+                "M": {"color": {"offset": 0, "length": length, "tar_file": f"poly-{tier}.tar"}}
+            },
+        }
+        return client
+
+    def test_accepts_png(self, tmp_path):
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        client = self._make_client(tmp_path, len(png), "1k")
+        with patch("mat_vis_client.client._get", return_value=png):
+            data = client.fetch_texture("polyhaven", "M", "color", "1k")
+        assert data == png
+
+    def test_accepts_ktx2(self, tmp_path):
+        ktx2 = b"\xabKTX 20\xbb\r\n\x1a\n" + b"\x00" * 100
+        client = self._make_client(tmp_path, len(ktx2), "ktx2-1k")
+        with patch("mat_vis_client.client._get", return_value=ktx2):
+            data = client.fetch_texture("polyhaven", "M", "color", "ktx2-1k")
+        assert data == ktx2
+
+    def test_rejects_non_png_non_ktx2(self, tmp_path):
+        junk = b"NOPE" + b"\x00" * 100
+        client = self._make_client(tmp_path, len(junk), "1k")
+        with patch("mat_vis_client.client._get", return_value=junk):
+            with pytest.raises(ValueError, match="Expected PNG or KTX2"):
+                client.fetch_texture("polyhaven", "M", "color", "1k")

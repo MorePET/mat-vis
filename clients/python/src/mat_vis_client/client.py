@@ -1131,9 +1131,15 @@ class MatVisClient:
         range_header = f"bytes={offset}-{offset + length - 1}"
         data = _get(url, headers={"Range": range_header})
 
-        # Verify PNG
-        if data[:4] != b"\x89PNG":
-            raise ValueError(f"Expected PNG, got {data[:4]!r}")
+        # Verify payload magic matches one of the formats we bake:
+        # PNG (\x89PNG\r\n\x1a\n) or KTX2 (\xabKTX 20\xbb\r\n\x1a\n).
+        _PNG = b"\x89PNG\r\n\x1a\n"
+        _KTX2 = b"\xabKTX 20\xbb\r\n\x1a\n"
+        if not (data.startswith(_PNG) or data.startswith(_KTX2)):
+            raise ValueError(
+                f"Expected PNG or KTX2 bytes, got {data[:12]!r} "
+                f"({source}/{material_id}/{channel} @ {tier})"
+            )
 
         # Cache (tag-scoped; no-op if cache=False)
         self._cache_write_bytes(cache_path, data)
