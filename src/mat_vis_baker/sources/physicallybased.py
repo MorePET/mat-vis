@@ -33,6 +33,29 @@ def _rgb_to_hex(rgb: list[float] | None) -> str | None:
     )
 
 
+def _normalize_tags(raw: object) -> list[str]:
+    """Normalize upstream tags to lowercase, stripped, de-duplicated strings.
+
+    physicallybased.info's ``tags`` is a list of strings, but a handful of
+    entries contain a single empty string (``[""]``) and some values carry
+    stray whitespace or mixed case. Drop empties, collapse casing, and
+    preserve first-seen order so the output is stable across bakes.
+    """
+    if not isinstance(raw, list):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in raw:
+        if not isinstance(t, str):
+            continue
+        norm = t.strip().lower()
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return out
+
+
 def fetch(*, session: requests.Session | None = None) -> list[MaterialRecord]:
     """Fetch all physicallybased materials (scalar only, no tier needed)."""
     s = session or requests.Session()
@@ -54,6 +77,7 @@ def fetch(*, session: requests.Session | None = None) -> list[MaterialRecord]:
             source="physicallybased",
             name=name,
             category=cat,
+            tags=_normalize_tags(mat.get("tags")),
             source_url="https://physicallybased.info",
             source_license="CC0-1.0",
             color_hex=color_hex,
