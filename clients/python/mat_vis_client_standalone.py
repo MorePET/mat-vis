@@ -855,14 +855,21 @@ class MatVisClient:
             context=f"{source}/{tier}",
         )
 
+    _SCALAR_WIDEN = 0.2  # scalar shorthand → range half-width
+
     def search(
         self,
         category: str | None = None,
         *,
+        roughness: float | None = None,
+        metalness: float | None = None,
         roughness_range: tuple[float, float] | None = None,
         metalness_range: tuple[float, float] | None = None,
         source: str | None = None,
         tier: str = "1k",
+        tag: str | None = None,
+        score: bool = False,
+        limit: int | None = None,
     ) -> list[dict]:
         """Search materials by category and scalar ranges.
 
@@ -871,12 +878,47 @@ class MatVisClient:
 
         Args:
             category: Filter by material category (e.g. "metal", "wood").
+            roughness: Scalar shorthand. Matches within ± ``_SCALAR_WIDEN``.
+                Mutually exclusive with ``roughness_range``.
+            metalness: Scalar shorthand. Same semantics as ``roughness``.
             roughness_range: (min, max) roughness filter, inclusive.
             metalness_range: (min, max) metalness filter, inclusive.
             source: Limit search to one source. If None, searches all
                     sources available for the given tier.
             tier: Only return materials that have this tier available.
+            tag: Optional release tag override (see .at()).
+            score: When True and a scalar shorthand is passed, attach a
+                ``score`` field (absolute distance) and sort ascending.
+            limit: Cap the returned list length.
         """
+        if tag is not None and tag != self._tag:
+            return self.at(tag).search(
+                category,
+                roughness=roughness,
+                metalness=metalness,
+                roughness_range=roughness_range,
+                metalness_range=metalness_range,
+                source=source,
+                tier=tier,
+                score=score,
+                limit=limit,
+            )
+        # Scalar + range on the same dimension is ambiguous — reject.
+        if roughness is not None and roughness_range is not None:
+            raise MatVisError("pass roughness OR roughness_range, not both")
+        if metalness is not None and metalness_range is not None:
+            raise MatVisError("pass metalness OR metalness_range, not both")
+        # Scalar shorthand widens into an inclusive range.
+        if roughness is not None:
+            roughness_range = (
+                max(0.0, roughness - self._SCALAR_WIDEN),
+                min(1.0, roughness + self._SCALAR_WIDEN),
+            )
+        if metalness is not None:
+            metalness_range = (
+                max(0.0, metalness - self._SCALAR_WIDEN),
+                min(1.0, metalness + self._SCALAR_WIDEN),
+            )
         if category:
             valid = self.categories()  # discovered from manifest
             if valid and category not in valid:
@@ -911,6 +953,19 @@ class MatVisClient:
                     continue
                 results.append(entry)
 
+        if score and (roughness is not None or metalness is not None):
+            for r in results:
+                pbr = (r.get("mat_vis") or {}).get("pbr") or {}
+                s = 0.0
+                if roughness is not None and pbr.get("roughness") is not None:
+                    s += abs(pbr["roughness"] - roughness)
+                if metalness is not None and pbr.get("metalness") is not None:
+                    s += abs(pbr["metalness"] - metalness)
+                r["score"] = s
+            results.sort(key=lambda r: r["score"])
+
+        if limit is not None:
+            results = results[:limit]
         return results
 
     # ── Bulk operations ─────────────────────────────────────────
@@ -1699,6 +1754,59 @@ def main():
             print(
                 f"  {kind:8s}  {entry['current'] or '?'} {arrow} {entry['latest'] or '?'}{marker}"
             )
+
+
+# ── Module-level convenience API ────────────────────────────────
+#
+# Mirrors the packaged ``mat_vis_client.__init__`` helpers so that the
+# single-file standalone exposes the same free-function surface as the
+# installable package. Kept thin: delegates to a process-wide singleton
+# client so repeated calls share manifest / index / texture caches.
+
+_client: MatVisClient | None = None
+
+
+def get_client() -> MatVisClient:
+    """Return the process-wide ``MatVisClient`` singleton.
+
+    Lazily constructed on first call. Downstream consumers that want to
+    share the manifest/index/texture cache with the module-level
+    ``search()`` helper should use this instead of ``MatVisClient()``
+    directly.
+    """
+    global _client
+    if _client is None:
+        _client = MatVisClient()
+    return _client
+
+
+def search(
+    *,
+    category: str | None = None,
+    roughness: float | None = None,
+    metalness: float | None = None,
+    source: str | None = None,
+    tier: str = "1k",
+    tag: str | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Search the mat-vis index by category and scalar similarity.
+
+    Thin forwarder to :meth:`MatVisClient.search` with ``score=True`` —
+    the scoring/sorting + default ``limit=20`` are the only module-level
+    convenience on top of the method. Every other argument is just passed
+    through.
+    """
+    return get_client().search(
+        category,
+        roughness=roughness,
+        metalness=metalness,
+        source=source,
+        tier=tier,
+        tag=tag,
+        score=True,
+        limit=limit,
+    )
 
 
 if __name__ == "__main__":
