@@ -11,6 +11,7 @@ to one tier).
 from __future__ import annotations
 
 import io
+import logging
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -42,6 +43,10 @@ def _mat(**overrides: object) -> dict:
         "title": "Oak Planks",
         "description": "Warm oak planks.",
         "author": "AMD",
+        # Matches live upstream as of 2026-04 (mat-vis#168 probe: 454/454
+        # gpuopen materials carry this exact string). normalize_spdx
+        # maps it to "MIT".
+        "license": "MIT Public Domain",
         "published_date": "2022-08-01T12:00:00Z",
         "updated_date": "2023-03-15T09:30:00Z",
         "_category_title": "Wood",
@@ -231,6 +236,42 @@ def test_fetch_one_strips_fetcher_internals_and_packages(tmp_path: Path) -> None
         "notification_status",
     ):
         assert dropped not in raw, dropped
+
+
+# ── license_spdx routing through normalize_spdx (mat-vis#168) ───
+
+
+def test_fetch_one_routes_license_through_normalize_spdx(tmp_path: Path) -> None:
+    """Upstream ``license="MIT Public Domain"`` maps to SPDX ``"MIT"``
+    via ``normalize_spdx`` — not a hardcoded constant (mat-vis#168)."""
+    mat = _mat(license="MIT Public Domain")
+    mock_resp = MagicMock(content=_fake_zip_bytes())
+    with patch("mat_vis_baker.sources.gpuopen.retry_request", return_value=mock_resp):
+        rec = _fetch_one(mat, "1k", tmp_path, mtlx_dir=None)
+    assert rec.mat_vis.attribution.license_spdx == "MIT"
+
+
+def test_fetch_one_unknown_license_falls_back_to_noassertion(tmp_path: Path, caplog) -> None:
+    """Drifted / new upstream license strings surface as ``"NOASSERTION"``
+    with a warning rather than failing the bake."""
+    mat = _mat(license="Something Weird")
+    mock_resp = MagicMock(content=_fake_zip_bytes())
+    with caplog.at_level(logging.WARNING, logger="mat-vis-baker"):
+        with patch("mat_vis_baker.sources.gpuopen.retry_request", return_value=mock_resp):
+            rec = _fetch_one(mat, "1k", tmp_path, mtlx_dir=None)
+    assert rec.mat_vis.attribution.license_spdx == "NOASSERTION"
+    assert "unknown upstream license" in caplog.text
+
+
+def test_fetch_one_missing_license_falls_back_to_noassertion(tmp_path: Path) -> None:
+    """A record with no ``license`` key still produces a schema-valid
+    SPDX identifier (``"NOASSERTION"``)."""
+    mat = _mat()
+    mat.pop("license", None)
+    mock_resp = MagicMock(content=_fake_zip_bytes())
+    with patch("mat_vis_baker.sources.gpuopen.retry_request", return_value=mock_resp):
+        rec = _fetch_one(mat, "1k", tmp_path, mtlx_dir=None)
+    assert rec.mat_vis.attribution.license_spdx == "NOASSERTION"
 
 
 def test_upstream_allowlist_includes_mtlx_anchor() -> None:
