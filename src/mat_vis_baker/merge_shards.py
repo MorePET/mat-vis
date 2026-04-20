@@ -180,7 +180,10 @@ def merge_shards(
 
     with TarWriter(out_tar_path) as tw:
         for idx, total, tar_repo_path in shards:
-            rowmap_repo_path = tar_repo_path.replace(".tar", "-rowmap.json")
+            # Rowmap lives at the same path with `.tar` swapped for
+            # `-rowmap.json`. rsplit guards against any future naming
+            # scheme that happens to contain `.tar` mid-path.
+            rowmap_repo_path = tar_repo_path.rsplit(".tar", 1)[0] + "-rowmap.json"
             tar_url = f"{resolve_base}/{tar_repo_path}"
             rowmap_url = f"{resolve_base}/{rowmap_repo_path}"
             rowmap = _fetch_json(rowmap_url, hf_token)

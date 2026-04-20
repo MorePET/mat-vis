@@ -294,13 +294,17 @@ def bake_one(
                 len(remote_catalog),
             )
     else:
-        # Sharded bake: write a partial catalog alongside the shard tar.
-        # merge-shards will union all partial catalogs into the final
-        # `<source>.json`. No remote-catalog check — concurrent shards
-        # MUST each publish their partial without stepping on each other.
+        # Sharded bake: write a partial catalog alongside the shard tar
+        # containing only the records this shard actually baked —
+        # skipped records belong to other shards and would bloat every
+        # shard's upload by ~K× if included (merge-shards dedupes
+        # regardless, but the extra bytes per push are pure waste).
+        # merge-shards unions all partials into <source>.json. No
+        # remote-catalog check — concurrent shards publish independently.
         partial_catalog_name = f"{source}-{tier}{suffix}.catalog.json"
         partial_catalog_path = work_dir / partial_catalog_name
-        index = build_index(all_records, source)
+        this_shard_records = [r for r in all_records if r.status != "skipped"]
+        index = build_index(this_shard_records, source)
         partial_catalog_path.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n")
         files_to_push.append((partial_catalog_path, partial_catalog_name))
         log.info(
