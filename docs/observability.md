@@ -18,6 +18,41 @@ One image: Grafana + Tempo (traces) + Loki (logs) + Mimir/Prometheus
 (metrics). Open <http://localhost:3000>, default login
 `admin` / `admin`.
 
+### Import the committed dashboard
+
+The canonical pipeline dashboard ships with the repo:
+
+- [`docs/observability/dashboard.json`](./observability/dashboard.json)
+
+Import via **Dashboards → New → Import → Upload JSON file**, or via
+the API:
+
+```bash
+curl -s -u admin:admin -H 'Content-Type: application/json' \
+  -X POST http://localhost:3000/api/dashboards/import \
+  -d "$(jq '{dashboard: ., overwrite: true, inputs: [], folderUid: ""}' \
+        docs/observability/dashboard.json)"
+```
+
+Panels:
+
+- **Shard pipeline** — `stream.transform` root spans from
+  `service.name=mat-vis-baker` with `label`, `n_total`, `max_workers`,
+  `shard_index`, `shard_total`, `outcome`, `n_ok`, `n_failed` as
+  columns; `n_failed` colour-coded, `outcome` mapped
+  `ok`/`fail_fast`.
+- **Progress events** — 30-s rolling `progress` span events
+  (`n_ok` / `n_failed` / `rate_per_s`) as a table. Narrow the time
+  picker to one trace window to watch a single run.
+- **Dagger pipeline** — spans from `service.name~="dagger.*"` (Dagger
+  engine emits these natively when `OTEL_EXPORTER_OTLP_ENDPOINT` is
+  set). Shows container builds + function invocations surrounding
+  the baker spans.
+
+Tested against `grafana/otel-lgtm:latest` (Grafana 12.4, Tempo
+default datasource `uid=tempo`). Dashboard pinned to schemaVersion
+39 for backwards compatibility with Grafana 10.4+/11.x/12.x.
+
 ## Point the baker at it
 
 Install the extra:
@@ -48,17 +83,35 @@ Host machine (laptop, Pi, home server) on your tailnet:
 tailscale serve --bg --https=3000 http://localhost:3000
 ```
 
-Grab the tailnet hostname (`otel.tail-xxx.ts.net`). In the workflow:
+Grab the tailnet hostname (`otel.tail-xxx.ts.net`). Use the
+repo-local composite action
+[`./.github/actions/otlp-tailnet`](../.github/actions/otlp-tailnet/action.yml)
+which wraps the tailnet join + endpoint export:
 
 ```yaml
-- uses: tailscale/github-action@v2
+- name: Join tailnet + export OTLP endpoint
+  uses: ./.github/actions/otlp-tailnet
   with:
-    authkey: ${{ secrets.TS_AUTHKEY }}
-    tags: tag:ci
-- run: |
-    export OTEL_EXPORTER_OTLP_ENDPOINT=http://otel.tail-xxx.ts.net:4318
-    mat-vis-baker hf-derive ...
+    hostname: otel.tail-xxx.ts.net
+    port: "4318"
+  env:
+    TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+
+- run: uv run mat-vis-baker hf-derive ...   # spans flow automatically
+- run: dagger call integration-test ...     # Dagger engine spans too
 ```
+
+After the step runs, `OTEL_EXPORTER_OTLP_ENDPOINT` is exported to
+`$GITHUB_ENV` for the rest of the job — Dagger's engine picks it up
+natively (one span per `dagger call` + per container op) and the
+baker's OTel SDK picks it up via `src/mat_vis_baker/telemetry.py`.
+The action also probes `/v1/traces` so a blocked tailnet ACL or
+down collector surfaces as a step warning instead of silently
+dropped spans.
+
+The action is **not** wired into `derive.yml` / `bake.yml` — those
+workflows stay operator-agnostic. Drop the step into a fork /
+override workflow if you want CI spans.
 
 The runner joins your tailnet briefly, emits spans, leaves. No
 public endpoint, no inbound firewall holes.
@@ -81,6 +134,10 @@ debugging; not an audit trail).
 
 - ADR-0009: derive pipeline decisions (fail-fast, sliding window,
   telemetry hooks).
+- ADR-0010: full-pipeline observability (Dagger + baker → same
+  OTLP collector).
 - Issue #131: full self-host spec.
 - Issue #129: Dagger pipeline (optional, emits to the same OTLP
   receiver).
+- Issue #139: this wiring — committed Grafana dashboard + reusable
+  Tailscale composite action.
