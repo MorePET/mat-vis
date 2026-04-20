@@ -902,7 +902,12 @@ class MatVisClient:
                     continue
                 if metalness_range and not _in_range(pbr.get("metalness"), *metalness_range):
                     continue
-                if tier not in entry.get("available_tiers", []):
+                # Scalar-only entries (e.g. physicallybased) advertise no
+                # textures — treat missing/empty ``available_tiers`` as
+                # tier-independent so they pass any tier filter (#167).
+                # Textured entries still get gated to the requested tier.
+                entry_tiers = entry.get("available_tiers")
+                if entry_tiers and tier not in entry_tiers:
                     continue
                 results.append(entry)
 

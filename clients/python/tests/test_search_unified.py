@@ -17,11 +17,25 @@ import pytest
 import mat_vis_client
 
 
-def _entry(mid: str, cat: str, r: float, m: float, tiers: list[str]) -> dict:
-    """Build a v3-shaped index entry (ADR-0011 / mat-vis#152)."""
-    return {
+def _entry(
+    mid: str,
+    cat: str,
+    r: float,
+    m: float,
+    tiers: list[str],
+    *,
+    source: str = "ambientcg",
+    omit_tiers: bool = False,
+) -> dict:
+    """Build a v3-shaped index entry (ADR-0011 / mat-vis#152).
+
+    When ``omit_tiers`` is True, ``available_tiers`` is left out of the
+    dict entirely (simulates legacy/scalar-only shape). Otherwise the
+    key is always present, possibly with an empty list.
+    """
+    entry = {
         "material_id": mid,
-        "source": "ambientcg",
+        "source": source,
         "mat_vis": {
             "name": mid,
             "category": cat,
@@ -47,6 +61,9 @@ def _entry(mid: str, cat: str, r: float, m: float, tiers: list[str]) -> dict:
         },
         "available_tiers": tiers,
     }
+    if omit_tiers:
+        entry.pop("available_tiers", None)
+    return entry
 
 
 MOCK_INDEX = [
@@ -142,3 +159,94 @@ def test_module_search_forwards_to_client_method():
 
     # Module-level is equivalent to method-level with score=True
     assert [r["material_id"] for r in mod_results] == [r["material_id"] for r in method_results]
+
+
+# ── Tier filter: scalar-only entries are tier-independent (#167) ───
+
+
+@pytest.mark.parametrize("tier", ["1k", "4k", "nonsense"])
+def test_search_scalar_only_no_tier_key_matches_any_tier(tier):
+    """Entry without an ``available_tiers`` key is treated as
+    tier-independent — it passes any tier filter (#167)."""
+    from mat_vis_client import MatVisClient
+
+    c = MatVisClient()
+    index = [_entry("Iron", "metal", 0.4, 1.0, [], source="physicallybased", omit_tiers=True)]
+    # Explicit source → search doesn't call self.sources(tier).
+    with patch.object(c, "index", return_value=index):
+        with patch.object(c, "categories", return_value=frozenset(["metal"])):
+            results = c.search(source="physicallybased", tier=tier)
+    assert [r["material_id"] for r in results] == ["Iron"]
+
+
+@pytest.mark.parametrize("tier", ["1k", "4k", "nonsense"])
+def test_search_scalar_only_empty_tiers_matches_any_tier(tier):
+    """Entry with ``available_tiers=[]`` (the physicallybased shape) is
+    treated as tier-independent — it passes any tier filter (#167)."""
+    from mat_vis_client import MatVisClient
+
+    c = MatVisClient()
+    index = [_entry("Copper", "metal", 0.35, 1.0, [], source="physicallybased")]
+    with patch.object(c, "index", return_value=index):
+        with patch.object(c, "categories", return_value=frozenset(["metal"])):
+            results = c.search(source="physicallybased", tier=tier)
+    assert [r["material_id"] for r in results] == ["Copper"]
+
+
+def test_search_textured_entry_excluded_on_tier_miss():
+    """Regression guard: a textured entry with a non-empty
+    ``available_tiers`` list is still excluded when its tiers don't
+    cover the requested tier (ambientcg/polyhaven/gpuopen)."""
+    from mat_vis_client import MatVisClient
+
+    c = MatVisClient()
+    index = [_entry("Rock001", "stone", 0.9, 0.0, ["1k", "2k"])]
+    with patch.object(c, "index", return_value=index):
+        with patch.object(c, "categories", return_value=frozenset(["stone"])):
+            results = c.search(source="ambientcg", tier="4k")
+    assert results == []
+
+
+def test_search_mixed_cross_source_returns_scalar_and_textured():
+    """With ``tier="1k"`` across sources, both scalar-only
+    (physicallybased) and textured entries covering 1k are returned."""
+    from mat_vis_client import MatVisClient
+
+    c = MatVisClient()
+    acg = _entry("Metal032", "metal", 0.3, 1.0, ["1k", "2k"], source="ambientcg")
+    pb = _entry("Iron", "metal", 0.4, 1.0, [], source="physicallybased")
+    polyh_miss = _entry("gold_foil", "metal", 0.2, 1.0, ["2k", "4k"], source="polyhaven")
+
+    def _fake_index(src: str):
+        return {
+            "ambientcg": [acg],
+            "physicallybased": [pb],
+            "polyhaven": [polyh_miss],
+        }[src]
+
+    with patch.object(c, "sources", return_value=["ambientcg", "physicallybased", "polyhaven"]):
+        with patch.object(c, "index", side_effect=_fake_index):
+            with patch.object(c, "categories", return_value=frozenset(["metal"])):
+                results = c.search(category="metal", tier="1k")
+    ids = {r["material_id"] for r in results}
+    assert ids == {"Metal032", "Iron"}  # polyhaven's 2k/4k-only entry excluded
+
+
+def test_search_issue_167_repro_physicallybased_metals():
+    """End-to-end repro of mat-vis#167:
+    ``search(source="physicallybased", metalness=1.0, tier="1k")`` used
+    to return ``[]`` because physicallybased advertises no textures.
+    Now returns its metal entries."""
+    from mat_vis_client import MatVisClient
+
+    c = MatVisClient()
+    index = [
+        _entry("Iron", "metal", 0.4, 1.0, [], source="physicallybased"),
+        _entry("Gold", "metal", 0.2, 1.0, [], source="physicallybased"),
+        _entry("Oak", "wood", 0.7, 0.0, [], source="physicallybased"),
+    ]
+    with patch.object(c, "index", return_value=index):
+        with patch.object(c, "categories", return_value=frozenset(["metal", "wood"])):
+            results = c.search(source="physicallybased", metalness=1.0, tier="1k")
+    ids = {r["material_id"] for r in results}
+    assert ids == {"Iron", "Gold"}
