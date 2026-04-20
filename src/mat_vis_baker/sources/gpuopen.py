@@ -30,10 +30,12 @@ from pathlib import Path
 import requests
 
 from mat_vis_baker.common import (
+    TIER_TO_PX,
     AttributionBlock,
     DatesBlock,
     MaterialRecord,
     MatVisBlock,
+    PhysicalBlock,
     check_zip_safety,
     normalize_category,
     normalize_channel,
@@ -206,6 +208,35 @@ def _extract_from_zip(
 # ── per-material worker ───────────────────────────────────────
 
 
+def _authors(mat: dict) -> list[str]:
+    """gpuopen exposes a single ``author`` string (typically ``"AMD"``).
+
+    Wrap in a list to match the ``attribution.authors`` contract. Empty
+    / missing → ``[]``.
+    """
+    raw = mat.get("author")
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    return [raw.strip()]
+
+
+def _iso_date(raw: object) -> str | None:
+    """gpuopen dates are ISO datetimes; truncate to ``YYYY-MM-DD``."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    return raw[:10]
+
+
+def _max_resolution_px(tier: str) -> list[int] | None:
+    """Derive ``[w, h]`` in pixels from the baked tier (gpuopen packages
+    are labeled ``"1k 8b"``, ``"2k 8b"``, ...; the tier prefix is the px
+    we extract)."""
+    px = TIER_TO_PX.get(tier)
+    if px is None:
+        return None
+    return [px, px]
+
+
 def _fetch_one(
     mat: dict,
     tier: str,
@@ -223,6 +254,7 @@ def _fetch_one(
     name = mat.get("title") or mid
     category = normalize_category(mat.get("_category_title", ""))
     tags = list(mat.get("_tag_titles", []))
+    description = mat.get("description") or None
     source_url = f"https://matlib.gpuopen.com/main/materials/all?material={mid}"
 
     def _mat_vis(maps: list[str] | None = None) -> MatVisBlock:
@@ -230,12 +262,18 @@ def _fetch_one(
             name=name,
             category=category,
             tags=tags,
+            description=description,
             upstream_id=mid,
+            physical=PhysicalBlock(max_resolution_px=_max_resolution_px(tier)),
             attribution=AttributionBlock(
+                authors=_authors(mat),
                 license_spdx="MIT",
                 source_url=source_url,
             ),
-            dates=DatesBlock(updated=mat.get("updated_date") or None),
+            dates=DatesBlock(
+                published=_iso_date(mat.get("published_date")),
+                updated=_iso_date(mat.get("updated_date")),
+            ),
         )
 
     failed = lambda: MaterialRecord(  # noqa: E731 — local shorthand
