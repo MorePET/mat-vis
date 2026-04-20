@@ -134,12 +134,27 @@ def _stream_transform_into_tar(
         raw = _range_read(session=session, tar_url=tar_url, spec=spec, token=token)
         return mid, ch, transform(raw)
 
-    # Fail-fast thresholds: if the first N completions show a failure
-    # rate above the cap, the whole transform is almost certainly broken
-    # (missing binary, bad auth, format mismatch) and we should abort
-    # before grinding through thousands of channels.
-    EARLY_WINDOW = 50
-    EARLY_FAIL_RATIO = 0.20
+    # Two-layer failure detection:
+    #
+    # (1) *Continuous* fail-fast — a sliding-window check that stays
+    #     armed for the whole run, not a one-shot at the first-50
+    #     boundary. If the last WINDOW completions exceed FAIL_RATIO
+    #     failures and we've seen at least MIN_SAMPLES overall, abort.
+    #     Catches mid-run regressions (rate-limit, disk-full, a
+    #     position-correlated format bug) that earlier versions missed.
+    #
+    # (2) *Terminal* success-rate gate — after all work drains,
+    #     reject a run whose overall success rate is below
+    #     TERMINAL_MIN_OK_RATIO. Prevents publishing a near-empty tar
+    #     with ``n_ok == 1`` as if it were a valid derive.
+    WINDOW = 50
+    MIN_SAMPLES = 50
+    FAIL_RATIO = 0.20
+    TERMINAL_MIN_OK_RATIO = 0.90
+
+    from collections import deque
+
+    recent = deque(maxlen=WINDOW)  # True=failure, False=success
 
     n_ok = 0
     n_failed = 0
@@ -153,36 +168,51 @@ def _stream_transform_into_tar(
                 r_mid, r_ch, out_bytes = fut.result()
                 tw.add_channel(r_mid, r_ch, out_bytes)
                 n_ok += 1
+                recent.append(False)
             except Exception as e:
                 if first_error is None:
                     first_error = f"{mid}/{ch}: {e}"
                 log.warning("%s/%s: %s failed: %s", mid, ch, label, e)
                 n_failed += 1
+                recent.append(True)
 
             completed = n_ok + n_failed
             if (
-                completed >= EARLY_WINDOW
-                and n_failed / completed > EARLY_FAIL_RATIO
-                and completed == n_failed + n_ok  # guard
-                and completed <= EARLY_WINDOW + max_workers  # only at window boundary
+                completed >= MIN_SAMPLES
+                and len(recent) == WINDOW
+                and sum(recent) / WINDOW > FAIL_RATIO
             ):
                 pool.shutdown(wait=False, cancel_futures=True)
                 raise RuntimeError(
-                    f"{label}: fail-fast — {n_failed}/{completed} channels failed "
-                    f"(>{int(EARLY_FAIL_RATIO * 100)}% threshold). "
+                    f"{label}: fail-fast — last {WINDOW} completions had "
+                    f"{sum(recent)} failures (>{int(FAIL_RATIO * 100)}%) "
+                    f"after {completed}/{n_total} total. "
                     f"First error: {first_error}"
                 )
 
             if time.monotonic() - t_last > 30:
                 log.info(
-                    "%s progress: %d/%d ok, %d failed",
+                    "%s progress: %d/%d ok, %d failed (window=%d%%)",
                     label,
                     n_ok,
                     n_total,
                     n_failed,
+                    int(100 * sum(recent) / max(1, len(recent))),
                 )
                 t_last = time.monotonic()
         new_materials = tw.finalize()
+
+    # Terminal gate: refuse to ship a partial tar. A few dozen bad
+    # textures in a 11k-channel bake is tolerable; sub-90% is not.
+    ok_ratio = n_ok / n_total if n_total else 0.0
+    if ok_ratio < TERMINAL_MIN_OK_RATIO:
+        _write_step_summary(label, n_ok, n_failed, n_total, first_error)
+        raise RuntimeError(
+            f"{label}: terminal check — {n_ok}/{n_total} succeeded "
+            f"({ok_ratio * 100:.1f}% < {int(TERMINAL_MIN_OK_RATIO * 100)}%). "
+            f"Refusing to push a partial tar. First error: {first_error}"
+        )
+
     log.info("%s done: %d ok / %d failed / %d total", label, n_ok, n_failed, n_total)
     _write_step_summary(label, n_ok, n_failed, n_total, first_error)
     return new_materials, n_ok, n_failed
