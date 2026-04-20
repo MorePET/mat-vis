@@ -155,6 +155,38 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hf_derive(args: argparse.Namespace) -> int:
+    from mat_vis_baker.hf_derive import derive_smaller_tier
+
+    result = derive_smaller_tier(
+        source=args.source,
+        target_tier=args.target_tier,
+        source_tier=args.source_tier,
+        release_tag=args.release_tag,
+        work_dir=Path(args.work_dir),
+        repo_id=args.repo_id,
+        dry_run=args.dry_run,
+    )
+    log.info("hf-derive result: %s", result)
+    return 0 if "error" not in result else 1
+
+
+def cmd_hf_derive_ktx2(args: argparse.Namespace) -> int:
+    from mat_vis_baker.hf_derive import derive_ktx2_tier
+
+    result = derive_ktx2_tier(
+        source=args.source,
+        source_tier=args.source_tier,
+        release_tag=args.release_tag,
+        work_dir=Path(args.work_dir),
+        repo_id=args.repo_id,
+        dry_run=args.dry_run,
+        target_tier=args.target_tier,
+    )
+    log.info("hf-derive-ktx2 result: %s", result)
+    return 0 if "error" not in result else 1
+
+
 def cmd_hf_bake(args: argparse.Namespace) -> int:
     """Bake (source, tier) → atomic HF push. The ADR-0007 replacement
     for ``cmd_all``'s parquet/GH-Releases path."""
@@ -299,6 +331,30 @@ def main() -> int:
         help="Build tar + manifest locally; skip the HF push.",
     )
 
+    p_hd = sub.add_parser(
+        "hf-derive",
+        help="Derive a smaller tier from an existing HF PNG tar (resize).",
+    )
+    p_hd.add_argument("source", choices=SOURCES)
+    p_hd.add_argument("target_tier", choices=VALID_TIERS)
+    p_hd.add_argument("work_dir")
+    p_hd.add_argument("--source-tier", default="1k", choices=VALID_TIERS)
+    p_hd.add_argument("--release-tag", required=True)
+    p_hd.add_argument("--repo-id", default="gerchowl/mat-vis")
+    p_hd.add_argument("--dry-run", action="store_true")
+
+    p_hk = sub.add_parser(
+        "hf-derive-ktx2",
+        help="Transcode an existing HF PNG tar → KTX2 (requires `toktx`).",
+    )
+    p_hk.add_argument("source", choices=SOURCES)
+    p_hk.add_argument("work_dir")
+    p_hk.add_argument("--source-tier", default="1k", choices=VALID_TIERS)
+    p_hk.add_argument("--target-tier", default=None, help="Default: ktx2-<source-tier>.")
+    p_hk.add_argument("--release-tag", required=True)
+    p_hk.add_argument("--repo-id", default="gerchowl/mat-vis")
+    p_hk.add_argument("--dry-run", action="store_true")
+
     p_mtlx = sub.add_parser(
         "pack-mtlx",
         help="Pack original upstream .mtlx files into JSON map for release",
@@ -325,6 +381,10 @@ def main() -> int:
         return cmd_pack_mtlx(args)
     if args.command == "hf-bake":
         return cmd_hf_bake(args)
+    if args.command == "hf-derive":
+        return cmd_hf_derive(args)
+    if args.command == "hf-derive-ktx2":
+        return cmd_hf_derive_ktx2(args)
 
     parser.print_help()
     return 1
