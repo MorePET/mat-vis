@@ -30,7 +30,10 @@ from pathlib import Path
 import requests
 
 from mat_vis_baker.common import (
+    AttributionBlock,
+    DatesBlock,
     MaterialRecord,
+    MatVisBlock,
     check_zip_safety,
     normalize_category,
     normalize_channel,
@@ -220,13 +223,25 @@ def _fetch_one(
     name = mat.get("title") or mid
     category = normalize_category(mat.get("_category_title", ""))
     tags = list(mat.get("_tag_titles", []))
+    source_url = f"https://matlib.gpuopen.com/main/materials/all?material={mid}"
+
+    def _mat_vis(maps: list[str] | None = None) -> MatVisBlock:
+        return MatVisBlock(
+            name=name,
+            category=category,
+            tags=tags,
+            upstream_id=mid,
+            attribution=AttributionBlock(
+                license_spdx="MIT",
+                source_url=source_url,
+            ),
+            dates=DatesBlock(updated=mat.get("updated_date") or None),
+        )
 
     failed = lambda: MaterialRecord(  # noqa: E731 — local shorthand
         id=mid,
         source="gpuopen",
-        name=name,
-        category=category,
-        tags=tags,
+        mat_vis=_mat_vis(),
         status="failed",
     )
 
@@ -258,12 +273,7 @@ def _fetch_one(
         return MaterialRecord(
             id=mid,
             source="gpuopen",
-            name=name,
-            category=category,
-            tags=tags,
-            source_url=f"https://matlib.gpuopen.com/main/materials/all?material={mid}",
-            source_license="MIT",
-            last_updated=mat.get("updated_date", ""),
+            mat_vis=_mat_vis(),
             available_tiers=[tier] if textures else [],
             maps=sorted(textures.keys()),
             texture_paths=texture_paths,

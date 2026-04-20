@@ -332,23 +332,80 @@ def normalize_channel(source: str, raw_name: str) -> str | None:
 # ── data types ──────────────────────────────────────────────────
 
 
-@dataclass
-class MaterialRecord:
-    """Intermediate record passed between pipeline stages."""
+# ── Layer 1: mat_vis curated block (ADR-0011 / mat-vis#152) ────
+#
+# Stable, unified, cross-source-normalized fields. Every index entry
+# carries exactly this shape; missing upstream values are ``None``, not
+# absent, so the key set is stable. This block is the ONLY query surface
+# — ``client.search()`` / ``client.index()`` look here and nowhere else.
 
-    id: str
-    source: str
-    name: str
-    category: str
-    tags: list[str] = field(default_factory=list)
-    source_url: str = ""
-    source_license: str = "CC0-1.0"
-    source_mtlx_url: str | None = None
-    color_hex: str | None = None
+
+@dataclass
+class PhysicalBlock:
+    """Physical dimensions / resolution, normalized to SI where applicable."""
+
+    dimensions_m: list[float | None] | None = None  # [x, y, z?] in metres
+    max_resolution_px: list[int] | None = None  # [w, h]
+
+
+@dataclass
+class PBRBlock:
+    """Physically-based rendering scalars, mostly from physicallybased.info."""
+
+    color_rgb: list[float] | None = None  # [r, g, b] float 0..1
     roughness: float | None = None
     metalness: float | None = None
     ior: float | None = None
-    last_updated: str = ""
+    specular_f0: list[float] | None = None  # [r, g, b] float
+    transmission: float | None = None
+    complex_ior: list[float] | None = None  # 6-float wavelength-resolved
+
+
+@dataclass
+class AttributionBlock:
+    """Upstream attribution / licensing (SPDX where known)."""
+
+    authors: list[str] = field(default_factory=list)
+    license_spdx: str = "CC0-1.0"
+    source_url: str = ""
+
+
+@dataclass
+class DatesBlock:
+    """Upstream publish / update dates, normalized to ISO-8601 (YYYY-MM-DD)."""
+
+    published: str | None = None
+    updated: str | None = None
+
+
+@dataclass
+class MatVisBlock:
+    """Layer-1 curated contract. Semver-stable across v0.6.x."""
+
+    name: str = ""
+    category: str = "other"
+    tags: list[str] = field(default_factory=list)
+    description: str | None = None
+    physical: PhysicalBlock = field(default_factory=PhysicalBlock)
+    pbr: PBRBlock = field(default_factory=PBRBlock)
+    attribution: AttributionBlock = field(default_factory=AttributionBlock)
+    dates: DatesBlock = field(default_factory=DatesBlock)
+    upstream_id: str = ""
+
+
+@dataclass
+class MaterialRecord:
+    """Intermediate record passed between pipeline stages.
+
+    Top-level carries bake-pipeline fields only (``id``, ``source``, tier /
+    channel / hash state). Everything semantic lives under ``mat_vis``. The
+    verbatim ``upstream`` block (Layer 2, ADR-0011) is added in Phase C
+    (mat-vis#152 phase-c).
+    """
+
+    id: str
+    source: str
+    mat_vis: MatVisBlock = field(default_factory=MatVisBlock)
     available_tiers: list[str] = field(default_factory=list)
     maps: list[str] = field(default_factory=list)
     texture_paths: dict[str, Path] = field(default_factory=dict)

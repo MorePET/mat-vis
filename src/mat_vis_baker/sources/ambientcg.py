@@ -16,7 +16,10 @@ from pathlib import Path
 import requests
 
 from mat_vis_baker.common import (
+    AttributionBlock,
+    DatesBlock,
     MaterialRecord,
+    MatVisBlock,
     check_zip_safety,
     normalize_category,
     normalize_channel,
@@ -182,22 +185,37 @@ def _fetch_one(entry: dict, tier: str, output_dir: Path, mtlx_dir: Path | None) 
 
         if not textures:
             return MaterialRecord(
-                id=mid, source="ambientcg", name=name, category="other", status="failed"
+                id=mid,
+                source="ambientcg",
+                mat_vis=MatVisBlock(
+                    name=name,
+                    upstream_id=mid,
+                    attribution=AttributionBlock(
+                        license_spdx="CC0-1.0",
+                        source_url=f"https://ambientcg.com/a/{mid}",
+                    ),
+                ),
+                status="failed",
             )
 
         cat = normalize_category(entry.get("displayCategory", entry.get("category", "")))
         tags = entry.get("tags", [])
-        release_date = (entry.get("releaseDate") or "")[:10]
+        release_date = (entry.get("releaseDate") or "")[:10] or None
 
         return MaterialRecord(
             id=mid,
             source="ambientcg",
-            name=name,
-            category=cat,
-            tags=tags,
-            source_url=f"https://ambientcg.com/a/{mid}",
-            source_license="CC0-1.0",
-            last_updated=release_date,
+            mat_vis=MatVisBlock(
+                name=name,
+                category=cat,
+                tags=tags,
+                upstream_id=mid,
+                attribution=AttributionBlock(
+                    license_spdx="CC0-1.0",
+                    source_url=f"https://ambientcg.com/a/{mid}",
+                ),
+                dates=DatesBlock(published=release_date, updated=release_date),
+            ),
             available_tiers=[tier],
             maps=sorted(textures.keys()),
             texture_paths=textures,
@@ -205,7 +223,17 @@ def _fetch_one(entry: dict, tier: str, output_dir: Path, mtlx_dir: Path | None) 
     except Exception:
         log.exception("%s: fetch failed", mid)
         return MaterialRecord(
-            id=mid, source="ambientcg", name=name, category="other", status="failed"
+            id=mid,
+            source="ambientcg",
+            mat_vis=MatVisBlock(
+                name=name,
+                upstream_id=mid,
+                attribution=AttributionBlock(
+                    license_spdx="CC0-1.0",
+                    source_url=f"https://ambientcg.com/a/{mid}",
+                ),
+            ),
+            status="failed",
         )
 
 

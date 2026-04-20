@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from mat_vis_baker.common import MaterialRecord
+from mat_vis_baker.common import (
+    AttributionBlock,
+    DatesBlock,
+    MaterialRecord,
+    MatVisBlock,
+)
 
 
 @pytest.fixture
@@ -34,12 +39,17 @@ def sample_record(tmp_path: Path, tiny_png_bytes: bytes) -> MaterialRecord:
     return MaterialRecord(
         id="TestMat001",
         source="ambientcg",
-        name="Test Material",
-        category="metal",
-        tags=["test"],
-        source_url="https://example.com/a/TestMat001",
-        source_license="CC0-1.0",
-        last_updated="2026-04-16",
+        mat_vis=MatVisBlock(
+            name="Test Material",
+            category="metal",
+            tags=["test"],
+            upstream_id="TestMat001",
+            attribution=AttributionBlock(
+                license_spdx="CC0-1.0",
+                source_url="https://example.com/a/TestMat001",
+            ),
+            dates=DatesBlock(published="2026-04-16", updated="2026-04-16"),
+        ),
         available_tiers=["1k"],
         maps=sorted(paths.keys()),
         texture_paths=paths,
@@ -64,12 +74,17 @@ def sample_records(tmp_path: Path, tiny_png_bytes: bytes) -> list[MaterialRecord
             MaterialRecord(
                 id=mid,
                 source="ambientcg",
-                name=f"Test Material {i}",
-                category="metal",
-                tags=["test"],
-                source_url=f"https://example.com/a/{mid}",
-                source_license="CC0-1.0",
-                last_updated="2026-04-16",
+                mat_vis=MatVisBlock(
+                    name=f"Test Material {i}",
+                    category="metal",
+                    tags=["test"],
+                    upstream_id=mid,
+                    attribution=AttributionBlock(
+                        license_spdx="CC0-1.0",
+                        source_url=f"https://example.com/a/{mid}",
+                    ),
+                    dates=DatesBlock(published="2026-04-16", updated="2026-04-16"),
+                ),
                 available_tiers=["1k"],
                 maps=sorted(paths.keys()),
                 texture_paths=paths,
