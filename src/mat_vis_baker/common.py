@@ -406,7 +406,6 @@ class MaterialRecord:
     id: str
     source: str
     mat_vis: MatVisBlock = field(default_factory=MatVisBlock)
-    source_mtlx_url: str | None = None  # bake-time artifact pointer, not user-facing metadata
     available_tiers: list[str] = field(default_factory=list)
     maps: list[str] = field(default_factory=list)
     texture_paths: dict[str, Path] = field(default_factory=dict)
