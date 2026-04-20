@@ -691,14 +691,13 @@ class MatVisClient:
     def categories(self) -> tuple[str, ...]:
         """Discover material categories from per-source catalogs.
 
-        ADR-0007 removed the per-category partitioning dimension, so
-        categories are read from ``entry.category`` in each catalog.
+        v3 (ADR-0011 / mat-vis#152) reads ``entry["mat_vis"]["category"]``.
         """
         global CATEGORIES
         found: set[str] = set()
         for source in self.sources():
             for entry in self.index(source):
-                cat = entry.get("category")
+                cat = (entry.get("mat_vis") or {}).get("category")
                 if cat:
                     found.add(cat)
         result = tuple(sorted(found))
@@ -818,11 +817,13 @@ class MatVisClient:
 
         for src in sources:
             for entry in self.index(src):
-                if category and entry.get("category") != category:
+                mv = entry.get("mat_vis") or {}
+                pbr = mv.get("pbr") or {}
+                if category and mv.get("category") != category:
                     continue
-                if roughness_range and not _in_range(entry.get("roughness"), *roughness_range):
+                if roughness_range and not _in_range(pbr.get("roughness"), *roughness_range):
                     continue
-                if metalness_range and not _in_range(entry.get("metalness"), *metalness_range):
+                if metalness_range and not _in_range(pbr.get("metalness"), *metalness_range):
                     continue
                 if tier not in entry.get("available_tiers", []):
                     continue
@@ -912,18 +913,33 @@ class MatVisClient:
     def _scalars_for(self, source: str, material_id: str) -> dict:
         """Look up PBR scalars for a material from the source index.
 
+        v3 (ADR-0011): reads ``mat_vis.pbr.*`` and synthesizes a
+        ``color_hex`` string from ``pbr.color_rgb`` for the adapters
+        (``to_threejs`` / ``to_gltf`` / ``to_mtlx``) which still consume
+        the hex shape.
+
         Silent on failure — returns ``{}`` if the index is unavailable or
-        the material isn't found. Used by :class:`MtlxSource` to fill in
-        shader scalar inputs when a texture channel is absent.
+        the material isn't found.
         """
         scalars: dict = {}
         try:
             for entry in self.index(source):
-                if entry["id"] == material_id:
-                    for k in ("roughness", "metalness", "ior", "color_hex"):
-                        if k in entry and entry[k] is not None:
-                            scalars[k] = entry[k]
-                    break
+                if entry["id"] != material_id:
+                    continue
+                pbr = (entry.get("mat_vis") or {}).get("pbr") or {}
+                for k in ("roughness", "metalness", "ior"):
+                    v = pbr.get(k)
+                    if v is not None:
+                        scalars[k] = v
+                rgb = pbr.get("color_rgb")
+                if isinstance(rgb, list) and len(rgb) >= 3:
+                    r, g, b = rgb[:3]
+                    scalars["color_hex"] = "#{:02X}{:02X}{:02X}".format(
+                        int(round(r * 255)),
+                        int(round(g * 255)),
+                        int(round(b * 255)),
+                    )
+                break
         except Exception:
             pass
         return scalars
@@ -1535,13 +1551,15 @@ def main():
             tier=args.tier,
         )
         for entry in results:
+            mv = entry.get("mat_vis") or {}
+            pbr = mv.get("pbr") or {}
             scalars = []
-            if entry.get("roughness") is not None:
-                scalars.append(f"R={entry['roughness']:.2f}")
-            if entry.get("metalness") is not None:
-                scalars.append(f"M={entry['metalness']:.2f}")
+            if pbr.get("roughness") is not None:
+                scalars.append(f"R={pbr['roughness']:.2f}")
+            if pbr.get("metalness") is not None:
+                scalars.append(f"M={pbr['metalness']:.2f}")
             scalar_str = f" ({', '.join(scalars)})" if scalars else ""
-            print(f"{entry['source']}/{entry['id']}  [{entry.get('category', '?')}]{scalar_str}")
+            print(f"{entry['source']}/{entry['id']}  [{mv.get('category', '?')}]{scalar_str}")
         print(f"\n{len(results)} result(s)", file=sys.stderr)
 
     elif args.cmd == "prefetch":
