@@ -40,6 +40,7 @@ from mat_vis_baker.common import (
 from mat_vis_baker.hf_push import push_to_hf
 from mat_vis_baker.index_builder import build_index
 from mat_vis_baker.manifest import _download_json
+from mat_vis_baker.shard_utils import material_in_shard, shard_suffix
 from mat_vis_baker.tar_writer import TarWriter
 
 log = logging.getLogger("mat-vis-baker.hf_bake")
@@ -124,6 +125,7 @@ def bake_one(
     batch_size: int = DEFAULT_BATCH_SIZE,
     hf_token: str | None = None,
     dry_run: bool = False,
+    shard: tuple[int, int] | None = None,
 ) -> dict:
     """Bake one ``(source, tier)`` into a tar and atomic-commit to HF.
 
@@ -132,8 +134,16 @@ def bake_one(
     tar grows but raw downloads do not accumulate.
 
     Scalar sources route through ``bake_scalar_source`` automatically.
-    """
+
+    When ``shard=(index, total)`` is set, only materials whose id
+    hashes into the given shard are baked — the fetcher still walks
+    every upstream entry (upstream APIs are paginated, not random-
+    access), but ``material_in_shard`` gates the expensive
+    download + bake + pack step. Output filenames gain a
+    ``.shard-N-of-K`` suffix. The catalog write is skipped per shard
+    (the later ``merge-shards`` writes it once from the union)."""
     if source == "physicallybased":
+        # Scalar sources are one unit — sharding has no benefit.
         return bake_scalar_source(
             source,
             release_tag,
@@ -152,8 +162,9 @@ def bake_one(
     textures_dir = work_dir / "textures"
     baked_dir = work_dir / "baked"
     mtlx_dir = work_dir / "mtlx"
-    tar_path = work_dir / f"{source}-{tier}.tar"
-    rowmap_path = work_dir / f"{source}-{tier}-rowmap.json"
+    suffix = shard_suffix(*shard) if shard else ""
+    tar_path = work_dir / f"{source}-{tier}{suffix}.tar"
+    rowmap_path = work_dir / f"{source}-{tier}{suffix}-rowmap.json"
     catalog_path = work_dir / f"{source}.json"
 
     fetch = _get_fetcher(source)
@@ -189,6 +200,15 @@ def bake_one(
             if not batch:
                 break
 
+            # Shard filter: mark materials outside this shard as skipped
+            # so they don't count toward n_ok/n_failed. Upstream cursor
+            # still advances so other shards see the same iteration order.
+            if shard is not None:
+                shard_index, shard_total = shard
+                for rec in batch:
+                    if not material_in_shard(rec.id, shard_index, shard_total):
+                        rec.status = "skipped"
+
             for rec in batch:
                 if rec.status == "ok":
                     bake_material(rec, baked_dir, mtlx_dir, tier)
@@ -196,6 +216,9 @@ def bake_one(
                         hash_textures(rec)
 
             for rec in batch:
+                if rec.status == "skipped":
+                    # Not this shard's material — don't count as failure.
+                    continue
                 if rec.status != "ok":
                     n_failed += 1
                     continue
@@ -234,7 +257,7 @@ def bake_one(
         log.error("no successful materials — aborting push")
         return {"error": "no materials", "ok": 0, "failed": n_failed}
 
-    rowmap = {
+    rowmap: dict = {
         "version": 1,
         "release_tag": release_tag,
         "source": source,
@@ -242,30 +265,51 @@ def bake_one(
         "tar_file": tar_path.name,
         "materials": rowmap_materials,
     }
+    if shard is not None:
+        rowmap["shard_index"] = shard[0]
+        rowmap["shard_total"] = shard[1]
     rowmap_path.write_text(json.dumps(rowmap, indent=2) + "\n")
 
-    # Catalog: write it only if the source doesn't already have one on
-    # the remote. Two concurrent bakes of the SAME source would both
-    # write identical content (upstream metadata doesn't vary by tier),
-    # so the race is benign, but skipping the write when unnecessary
-    # keeps commits minimal.
-    remote_catalog = _download_json(
-        repo_id=repo_id, revision=release_tag, path=f"{source}.json", hf_token=hf_token
-    )
     files_to_push: list[tuple[Path, str]] = [
         (tar_path, tar_path.name),
         (rowmap_path, rowmap_path.name),
     ]
-    if remote_catalog is None:
-        index = build_index(all_records, source)
-        catalog_path.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n")
-        files_to_push.append((catalog_path, f"{source}.json"))
-        log.info("catalog: fresh write (no remote %s.json)", source)
+    if shard is None:
+        # Race-benign: two unsharded bakes of the same source would
+        # write identical content (upstream metadata doesn't vary by
+        # tier), so skipping the write when a remote exists keeps
+        # commits minimal.
+        remote_catalog = _download_json(
+            repo_id=repo_id, revision=release_tag, path=f"{source}.json", hf_token=hf_token
+        )
+        if remote_catalog is None:
+            index = build_index(all_records, source)
+            catalog_path.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n")
+            files_to_push.append((catalog_path, f"{source}.json"))
+            log.info("catalog: fresh write (no remote %s.json)", source)
+        else:
+            log.info(
+                "catalog: remote %s.json exists (%d entries), skipping write",
+                source,
+                len(remote_catalog),
+            )
     else:
+        # Sharded bake: write a partial catalog alongside the shard tar
+        # containing only the records this shard actually baked —
+        # skipped records belong to other shards and would bloat every
+        # shard's upload by ~K× if included (merge-shards dedupes
+        # regardless, but the extra bytes per push are pure waste).
+        # merge-shards unions all partials into <source>.json. No
+        # remote-catalog check — concurrent shards publish independently.
+        partial_catalog_name = f"{source}-{tier}{suffix}.catalog.json"
+        partial_catalog_path = work_dir / partial_catalog_name
+        this_shard_records = [r for r in all_records if r.status != "skipped"]
+        index = build_index(this_shard_records, source)
+        partial_catalog_path.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n")
+        files_to_push.append((partial_catalog_path, partial_catalog_name))
         log.info(
-            "catalog: remote %s.json exists (%d entries), skipping write",
-            source,
-            len(remote_catalog),
+            "catalog: shard partial written (%d entries); merge-shards will union",
+            len(index),
         )
 
     log.info(
@@ -290,11 +334,12 @@ def bake_one(
             "tar_bytes": tar_path.stat().st_size,
         }
 
+    shard_note = f" (shard {shard[0]}/{shard[1]})" if shard else ""
     sha = push_to_hf(
         repo_id=repo_id,
         files=files_to_push,
         revision=release_tag,
-        commit_message=f"feat(data): {release_tag} — bake {source} {tier}",
+        commit_message=f"feat(data): {release_tag} — bake {source} {tier}{shard_note}",
         token=hf_token,
     )
     return {
