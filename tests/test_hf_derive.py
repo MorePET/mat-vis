@@ -1,14 +1,6 @@
 """Unit tests for hf_derive (ADR-0007, issue #112).
 
-Covers the pure-Python core paths without touching HF:
-
-- `_patch_catalog_tiers`: tier-union semantics on `available_tiers`.
-- `_slice_channel`: offset/length → byte slice.
-- End-to-end resize path: TarWriter → slice → PIL resize → TarWriter.
-  Builds a tiny fake PNG tar in a tmp dir, runs `derive_smaller_tier`
-  with `dry_run=True` against a local-file-backed HF cache mock, and
-  verifies the output tar contains the expected material×channel
-  count and that a sliced PNG decodes at the target size.
+Covers the pure-Python core paths without touching HF.
 """
 
 from __future__ import annotations
@@ -21,11 +13,7 @@ from unittest.mock import patch
 import pytest
 from PIL import Image
 
-from mat_vis_baker.hf_derive import (
-    _patch_catalog_tiers,
-    _slice_channel,
-    derive_smaller_tier,
-)
+from mat_vis_baker.hf_derive import _slice_channel, derive_smaller_tier
 from mat_vis_baker.tar_writer import TarWriter
 
 
@@ -34,32 +22,6 @@ def _png_bytes(size: int, color: tuple[int, int, int] = (200, 100, 50)) -> bytes
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
-
-
-def test_patch_catalog_tiers_adds_and_sorts():
-    cat = [
-        {"id": "A", "available_tiers": ["1k"]},
-        {"id": "B", "available_tiers": ["1k", "2k"]},
-    ]
-    out = _patch_catalog_tiers(cat, {"A", "B"}, "512")
-    assert out[0]["available_tiers"] == ["1k", "512"]
-    assert out[1]["available_tiers"] == ["1k", "2k", "512"]
-
-
-def test_patch_catalog_tiers_skips_materials_not_in_set():
-    cat = [
-        {"id": "A", "available_tiers": ["1k"]},
-        {"id": "B", "available_tiers": ["1k"]},
-    ]
-    out = _patch_catalog_tiers(cat, {"A"}, "512")
-    assert out[0]["available_tiers"] == ["1k", "512"]
-    assert out[1]["available_tiers"] == ["1k"]
-
-
-def test_patch_catalog_tiers_does_not_mutate_input():
-    cat = [{"id": "A", "available_tiers": ["1k"]}]
-    _patch_catalog_tiers(cat, {"A"}, "512")
-    assert cat[0]["available_tiers"] == ["1k"]
 
 
 def test_slice_channel_roundtrips_exact_bytes(tmp_path: Path):
@@ -113,19 +75,16 @@ def test_derive_smaller_tier_end_to_end_dry_run(tmp_path: Path):
     ]
 
     work_dir = tmp_path / "work"
+    _ = fake_catalog  # retained just to document the pre-existing shape
 
     def fake_range_read(*, session, tar_url, spec, token):
         lo, length = int(spec["offset"]), int(spec["length"])
         return src_tar_bytes[lo : lo + length]
 
-    def fake_download_json(*, repo_id, revision, path, hf_token):
-        return fake_catalog if path == "polyhaven.json" else None
-
     with (
         patch("mat_vis_baker.hf_derive._pin_commit", return_value="deadbeefcafe"),
         patch("mat_vis_baker.hf_derive._fetch_rowmap", return_value=src_rowmap),
         patch("mat_vis_baker.hf_derive._range_read", side_effect=fake_range_read),
-        patch("mat_vis_baker.manifest._download_json", side_effect=fake_download_json),
     ):
         result = derive_smaller_tier(
             source="polyhaven",
@@ -141,8 +100,7 @@ def test_derive_smaller_tier_end_to_end_dry_run(tmp_path: Path):
     assert result["dry_run"] is True
     assert result["ok"] == 4  # 2 mats × 2 channels
 
-    # Check the produced tar has the right materials, and one sliced channel
-    # decodes as a 512×512 PNG.
+    # Output tar's sliced channels decode as 512×512 PNGs.
     out_tar = work_dir / "polyhaven-512.tar"
     out_rowmap = json.loads((work_dir / "polyhaven-512-rowmap.json").read_text())
     assert set(out_rowmap["materials"].keys()) == {"mat_a", "mat_b"}
@@ -153,12 +111,10 @@ def test_derive_smaller_tier_end_to_end_dry_run(tmp_path: Path):
             assert png[:4] == b"\x89PNG"
             assert Image.open(io.BytesIO(png)).size == (512, 512)
 
-    # Catalog + manifest got the new tier stamped.
-    cat = json.loads((work_dir / "polyhaven.json").read_text())
-    for entry in cat:
-        assert "512" in entry["available_tiers"]
-    manifest = json.loads((work_dir / "release-manifest.json").read_text())
-    assert "512" in manifest["sources"]["polyhaven"]["tiers"]
+    # Critical: no catalog and no manifest are written — derives no
+    # longer touch shared state (ADR-0007 race-free design).
+    assert not (work_dir / "polyhaven.json").exists()
+    assert not (work_dir / "release-manifest.json").exists()
 
 
 def test_derive_refuses_upscale(tmp_path: Path):
