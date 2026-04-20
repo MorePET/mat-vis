@@ -206,7 +206,9 @@ def cmd_merge_shards(args: argparse.Namespace) -> int:
         keep_shards=args.keep_shards,
     )
     log.info("merge-shards result: %s", result)
-    return 0 if "error" not in result else 1
+    # merge_shards never puts "error" in its result — it raises on any
+    # fault (incomplete shard set, range-read mismatch). Always return 0.
+    return 0
 
 
 def cmd_hf_bake(args: argparse.Namespace) -> int:
