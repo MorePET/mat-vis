@@ -77,6 +77,10 @@ raises `MatVisError` early with an upgrade hint, not silent empty results.
 - `sources(tier=None)` returns all sources when `tier` is omitted; with
   `tier`, restricts to sources that published that tier.
 - `categories()` derives from per-source catalogs, not filename parsing.
+- gpuopen `mat_vis.attribution.license_spdx` now reflects upstream
+  per-record `license` via `normalize_spdx`
+  (`"MIT Public Domain" → "MIT"`); unknown strings fall back to
+  `"NOASSERTION"` (#168).
 
 ### Removed
 
