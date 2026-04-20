@@ -15,6 +15,7 @@ from mat_vis_baker.common import (
     MatVisBlock,
     PBRBlock,
     PhysicalBlock,
+    UpstreamBlock,
 )
 from mat_vis_baker.index_builder import build_index
 
@@ -170,3 +171,67 @@ def test_available_tiers_present_when_populated() -> None:
     rec.available_tiers = ["1k", "2k"]
     entry = build_index([rec], source="ambientcg")[0]
     assert entry["available_tiers"] == ["1k", "2k"]
+
+
+# ── upstream mirror (Phase C, mat-vis#152) ──────────────────────
+
+
+def test_upstream_block_omitted_when_not_set() -> None:
+    """Records without an ``upstream`` block don't emit the key at all
+    (pre-v3 backfill stays valid). The contract is: when the key is
+    present, all four subkeys are present; when absent, callers know
+    to fall back."""
+    entry = build_index([_minimal_rec()], source="ambientcg")[0]
+    assert "upstream" not in entry
+
+
+def test_upstream_block_emitted_with_stable_key_set() -> None:
+    rec = _minimal_rec()
+    rec.upstream = UpstreamBlock(
+        source="ambientcg",
+        schema_version=1,
+        fetched_at="2026-04-20T16:00:00Z",
+        raw={"assetId": "Rock064", "displayName": "Rock 064"},
+    )
+    entry = build_index([rec], source="ambientcg")[0]
+    assert "upstream" in entry
+    upstream = entry["upstream"]
+    assert set(upstream.keys()) == {"source", "schema_version", "fetched_at", "raw"}
+    assert upstream["source"] == "ambientcg"
+    assert upstream["schema_version"] == 1
+    assert upstream["fetched_at"] == "2026-04-20T16:00:00Z"
+    assert upstream["raw"]["assetId"] == "Rock064"
+
+
+def test_upstream_block_empty_raw_emits_empty_dict() -> None:
+    """When the allowlist emptied everything, ``raw`` is ``{}`` (preferred
+    over ``None`` — stable downstream shape)."""
+    rec = _minimal_rec()
+    rec.upstream = UpstreamBlock(
+        source="ambientcg",
+        schema_version=1,
+        fetched_at="2026-04-20T16:00:00Z",
+        raw={},
+    )
+    entry = build_index([rec], source="ambientcg")[0]
+    assert entry["upstream"]["raw"] == {}
+
+
+def test_upstream_block_carries_through_failed_records() -> None:
+    """Schema-diff runs on failed records too (allowlist drift applies
+    regardless of download success)."""
+    rec = MaterialRecord(
+        id="Broken",
+        source="ambientcg",
+        mat_vis=MatVisBlock(name="Broken", upstream_id="Broken"),
+        upstream=UpstreamBlock(
+            source="ambientcg",
+            schema_version=1,
+            fetched_at="2026-04-20T16:00:00Z",
+            raw={"assetId": "Broken"},
+        ),
+        status="failed",
+    )
+    entry = build_index([rec], source="ambientcg")[0]
+    assert entry["status"] == "failed"
+    assert entry["upstream"]["raw"] == {"assetId": "Broken"}

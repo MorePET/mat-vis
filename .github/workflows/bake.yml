@@ -100,6 +100,18 @@ jobs:
             --batch-size=${{ inputs.batch-size }}
             ${{ inputs.dry-run == true && '--dry-run=true' || '' }}
 
+      # ADR-0011 / mat-vis#152 phase-c: lock the Layer-2 upstream mirror
+      # against silent schema drift. The baker just pushed the candidate
+      # <source>.json to HF at release-tag; fetch it and diff against the
+      # previous release. See scripts/check_upstream_schema_drift.py.
+      # Skipped on dry-run (nothing was pushed to HF).
+      - name: Upstream schema-drift gate (#152)
+        if: inputs.dry-run != true
+        run: |
+          uv run python scripts/check_upstream_schema_drift.py \
+            --source "${{ inputs.source }}" \
+            --candidate "https://huggingface.co/datasets/gerchowl/mat-vis/resolve/${{ inputs.release-tag }}/${{ inputs.source }}.json"
+
       - name: Notify on failure
         if: failure()
         uses: ./.github/actions/notify-on-failure
