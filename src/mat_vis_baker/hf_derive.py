@@ -1,20 +1,20 @@
 """Derive smaller / transcoded tiers from an existing HF tar (ADR-0007).
 
-Two pipelines live here — both atomic-commit to the same release:
+Streams each channel via HTTP Range reads against the source tar's
+HF resolve URL — never downloads the full tar to disk, never loads
+it into RAM. Transform + fetch is parallelised via a thread pool
+(I/O-bound for HTTP, CPU-bound for toktx; both benefit).
 
-- ``derive_smaller_tier(..., target_tier="512")`` — reads an existing
-  PNG tar at a source tier (typically 1k), resizes each channel to
-  the target resolution, writes a new ``<source>-<target>.tar`` +
-  rowmap. Used to bake 128/256/512 without re-fetching upstream.
-- ``derive_ktx2_tier(..., source_tier="1k")`` — same input tar,
-  transcodes each PNG → KTX2 via the ``toktx`` binary, writes a
-  ``ktx2/<source>-<source_tier>.tar``. Runner must have
-  KTX-Software installed (``toktx`` on PATH).
+Two pipelines:
 
-Both follow the same merge/push pattern as ``hf_bake.bake_one``:
-the catalog's ``available_tiers`` field is extended in place, the
-manifest's ``sources[<src>].tiers`` gains a new key, everything
-lands in one ``create_commit``.
+- ``derive_smaller_tier(..., target_tier="512")`` — PIL resize every
+  channel, pack into ``<source>-<target>.tar``.
+- ``derive_ktx2_tier(..., source_tier="1k")`` — ``toktx`` transcode,
+  pack into ``ktx2/<source>-<target>.tar``. Requires ``toktx`` on PATH.
+
+Both finish with an atomic HF commit carrying manifest + catalog +
+tar + rowmap; the catalog's ``available_tiers`` is extended in place
+and the manifest's per-source ``tiers`` map gains the new key.
 """
 
 from __future__ import annotations
@@ -22,12 +22,15 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Callable
 
-from huggingface_hub import hf_hub_download
+import requests
 from PIL import Image
 
 from mat_vis_baker.common import TIER_TO_PX
@@ -38,37 +41,65 @@ from mat_vis_baker.tar_writer import TarWriter
 log = logging.getLogger("mat-vis-baker.hf_derive")
 
 DEFAULT_REPO_ID = "gerchowl/mat-vis"
+HF_RESOLVE = "https://huggingface.co/datasets"
+
+# Workers for per-channel fetch+transform. Resize is I/O-heavy; ktx2
+# is toktx-bound (CPU). Both benefit from modest parallelism without
+# blowing up memory (only N in-flight channels resident at once).
+DEFAULT_RESIZE_WORKERS = int(os.environ.get("MAT_VIS_DERIVE_WORKERS", "8"))
+DEFAULT_KTX2_WORKERS = int(os.environ.get("MAT_VIS_KTX2_WORKERS", "4"))
 
 
-def _download_source_artifacts(
-    *, repo_id: str, release_tag: str, source: str, source_tier: str, hf_token: str | None
-) -> tuple[Path, dict]:
-    """Return (tar path on disk, rowmap dict)."""
-    tar_path = hf_hub_download(
-        repo_id=repo_id,
-        repo_type="dataset",
-        revision=release_tag,
-        filename=f"{source}-{source_tier}.tar",
-        token=hf_token,
+# ── HTTP-range streaming source ────────────────────────────────
+
+
+def _pin_commit(repo_id: str, revision: str, token: str | None) -> str:
+    """Pin the revision to a concrete commit SHA.
+
+    A branch tag can move during a long-running derive if another
+    bake commits. Resolving once to the current HEAD sha and range-
+    reading that sha's URL keeps the rowmap offsets consistent with
+    the bytes we actually fetch.
+    """
+    from huggingface_hub import HfApi
+
+    commits = HfApi(token=token).list_repo_commits(
+        repo_id=repo_id, repo_type="dataset", revision=revision
     )
-    rowmap_path = hf_hub_download(
-        repo_id=repo_id,
-        repo_type="dataset",
-        revision=release_tag,
-        filename=f"{source}-{source_tier}-rowmap.json",
-        token=hf_token,
+    return commits[0].commit_id
+
+
+def _auth_headers(token: str | None) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _fetch_rowmap(*, resolve_base: str, source: str, source_tier: str, token: str | None) -> dict:
+    r = requests.get(
+        f"{resolve_base}/{source}-{source_tier}-rowmap.json",
+        headers=_auth_headers(token),
+        timeout=60,
     )
-    return Path(tar_path), json.loads(Path(rowmap_path).read_text())
+    r.raise_for_status()
+    return r.json()
+
+
+def _range_read(*, session: requests.Session, tar_url: str, spec: dict, token: str | None) -> bytes:
+    lo = int(spec["offset"])
+    length = int(spec["length"])
+    headers = {"Range": f"bytes={lo}-{lo + length - 1}", **_auth_headers(token)}
+    r = session.get(tar_url, headers=headers, timeout=120)
+    r.raise_for_status()
+    data = r.content
+    if len(data) != length:
+        raise RuntimeError(f"range read short: asked {length} bytes, got {len(data)} @ {tar_url}")
+    return data
+
+
+# ── test shim: kept so existing unit tests that pass bytes still work ──
 
 
 def _slice_channel(tar_bytes_or_fh, spec: dict) -> bytes:
-    """Slice one channel out of the source tar.
-
-    Accepts either the full tar as bytes (handy for tests) or an
-    open ``BinaryIO`` — the production path streams from disk via
-    ``seek``/``read`` to avoid loading multi-GB tars into memory,
-    which was the root of the Phase-3e derive OOMs on 2k+ tars.
-    """
+    """Test helper — production path uses ``_range_read`` instead."""
     lo = int(spec["offset"])
     length = int(spec["length"])
     if isinstance(tar_bytes_or_fh, (bytes, bytearray, memoryview)):
@@ -92,6 +123,76 @@ def _patch_catalog_tiers(
     return out
 
 
+# ── parallel pipeline ─────────────────────────────────────────
+
+
+def _stream_transform_into_tar(
+    *,
+    materials: dict,
+    tar_url: str,
+    token: str | None,
+    transform: Callable[[bytes], bytes],
+    max_workers: int,
+    out_tar_path: Path,
+    label: str,
+) -> dict[str, dict[str, dict[str, int]]]:
+    """Fetch every channel via HTTP Range, run ``transform`` in a worker
+    pool, write sequentially into ``out_tar_path``. Returns the rowmap
+    materials dict produced by the writer."""
+    session = requests.Session()
+    work: list[tuple[str, str, dict]] = [
+        (mid, ch, spec) for mid, channels in materials.items() for ch, spec in channels.items()
+    ]
+    n_total = len(work)
+
+    def _one(item):
+        mid, ch, spec = item
+        raw = _range_read(session=session, tar_url=tar_url, spec=spec, token=token)
+        return mid, ch, transform(raw)
+
+    n_ok = 0
+    n_failed = 0
+    t_last = time.monotonic()
+    with ThreadPoolExecutor(max_workers=max_workers) as pool, TarWriter(out_tar_path) as tw:
+        futures = {pool.submit(_one, item): item for item in work}
+        for fut in as_completed(futures):
+            mid, ch, spec = futures[fut]
+            try:
+                r_mid, r_ch, out_bytes = fut.result()
+                tw.add_channel(r_mid, r_ch, out_bytes)
+                n_ok += 1
+            except Exception as e:  # pragma: no cover
+                log.warning("%s/%s: %s failed: %s", mid, ch, label, e)
+                n_failed += 1
+            if time.monotonic() - t_last > 30:
+                log.info(
+                    "%s progress: %d/%d ok, %d failed",
+                    label,
+                    n_ok,
+                    n_total,
+                    n_failed,
+                )
+                t_last = time.monotonic()
+        new_materials = tw.finalize()
+    log.info("%s done: %d ok / %d failed / %d total", label, n_ok, n_failed, n_total)
+    return new_materials, n_ok, n_failed
+
+
+# ── resize ────────────────────────────────────────────────────
+
+
+def _resize_transform(target_px: int) -> Callable[[bytes], bytes]:
+    def _t(raw: bytes) -> bytes:
+        img = Image.open(io.BytesIO(raw))
+        img.load()
+        resized = img.resize((target_px, target_px), Image.LANCZOS)
+        buf = io.BytesIO()
+        resized.save(buf, format="PNG", optimize=False)
+        return buf.getvalue()
+
+    return _t
+
+
 def derive_smaller_tier(
     source: str,
     target_tier: str,
@@ -102,9 +203,11 @@ def derive_smaller_tier(
     repo_id: str = DEFAULT_REPO_ID,
     hf_token: str | None = None,
     dry_run: bool = False,
+    workers: int = DEFAULT_RESIZE_WORKERS,
 ) -> dict:
-    """Resize every channel from ``<source>-<source_tier>.tar`` to
-    ``target_tier`` resolution; pack into a new tar; atomic-commit."""
+    """Stream-resize every channel from ``<source>-<source_tier>.tar``
+    to ``target_tier`` resolution. HTTP-range-reads the source tar; no
+    local full-tar download, no full-tar in RAM."""
     if target_tier not in TIER_TO_PX:
         raise ValueError(f"unknown target tier {target_tier!r}")
     if source_tier not in TIER_TO_PX:
@@ -126,46 +229,33 @@ def derive_smaller_tier(
 
     t0 = time.monotonic()
     log.info(
-        "=== hf-derive %s %s → %s @ %s ===",
+        "=== hf-derive %s %s → %s @ %s (streaming, workers=%d) ===",
         source,
         source_tier,
         target_tier,
         release_tag,
+        workers,
     )
 
-    src_tar_path, src_rowmap = _download_source_artifacts(
-        repo_id=repo_id,
-        release_tag=release_tag,
-        source=source,
-        source_tier=source_tier,
-        hf_token=hf_token,
+    sha = _pin_commit(repo_id, release_tag, hf_token)
+    resolve_base = f"{HF_RESOLVE}/{repo_id}/resolve/{sha}"
+    log.info("pinned %s@%s → %s", repo_id, release_tag, sha[:12])
+
+    src_rowmap = _fetch_rowmap(
+        resolve_base=resolve_base, source=source, source_tier=source_tier, token=hf_token
     )
     materials = src_rowmap.get("materials", {})
-    log.info(
-        "loaded source: %d materials, tar=%.1f MB (streaming seek+read)",
-        len(materials),
-        src_tar_path.stat().st_size / 1e6,
+    tar_url = f"{resolve_base}/{source}-{source_tier}.tar"
+
+    new_materials, n_ok, n_failed = _stream_transform_into_tar(
+        materials=materials,
+        tar_url=tar_url,
+        token=hf_token,
+        transform=_resize_transform(target_px),
+        max_workers=workers,
+        out_tar_path=out_tar_path,
+        label=f"resize→{target_tier}",
     )
-
-    n_ok = 0
-    n_failed = 0
-    with TarWriter(out_tar_path) as tw, src_tar_path.open("rb") as src_fh:
-        for mid, channels in materials.items():
-            for ch, spec in channels.items():
-                try:
-                    raw = _slice_channel(src_fh, spec)
-                    img = Image.open(io.BytesIO(raw))
-                    img.load()
-                    resized = img.resize((target_px, target_px), Image.LANCZOS)
-                    buf = io.BytesIO()
-                    resized.save(buf, format="PNG", optimize=False)
-                    tw.add_channel(mid, ch, buf.getvalue())
-                    n_ok += 1
-                except Exception as e:  # pragma: no cover
-                    log.warning("%s/%s: resize failed: %s", mid, ch, e)
-                    n_failed += 1
-        new_materials = tw.finalize()
-
     if n_ok == 0:
         return {"error": "no channels resized", "ok": 0, "failed": n_failed}
 
@@ -179,8 +269,6 @@ def derive_smaller_tier(
     }
     out_rowmap_path.write_text(json.dumps(rowmap, indent=2) + "\n")
 
-    # Patch catalog: add target_tier to `available_tiers` for every
-    # material we actually produced bytes for.
     from mat_vis_baker.manifest import _download_json
 
     remote_catalog = (
@@ -193,7 +281,6 @@ def derive_smaller_tier(
     patched_catalog = _patch_catalog_tiers(remote_catalog, produced, target_tier)
     catalog_path.write_text(json.dumps(patched_catalog, indent=2, ensure_ascii=False) + "\n")
 
-    # Merge manifest: add the new tier under this source's tiers map.
     manifest = merge_remote_manifest(
         repo_id=repo_id,
         revision=release_tag,
@@ -214,13 +301,12 @@ def derive_smaller_tier(
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
     log.info(
-        "PERF derive: %.1fs, %d ok / %d failed, tar=%.1f MB",
+        "PERF derive: %.1fs, %d ok / %d failed, out_tar=%.1f MB",
         time.monotonic() - t0,
         n_ok,
         n_failed,
         out_tar_path.stat().st_size / 1e6,
     )
-
     if dry_run:
         return {"dry_run": True, "ok": n_ok, "failed": n_failed}
 
@@ -244,6 +330,37 @@ def derive_smaller_tier(
     }
 
 
+# ── ktx2 transcode ────────────────────────────────────────────
+
+
+def _ktx2_transform_factory() -> Callable[[bytes], bytes]:
+    """Return a transform that writes PNG → tmp → runs toktx → reads
+    the KTX2 back. Each worker gets its own tmp files to avoid races."""
+
+    def _t(raw: bytes) -> bytes:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            png_in = tmp_dir / "in.png"
+            ktx_out = tmp_dir / "out.ktx2"
+            png_in.write_bytes(raw)
+            subprocess.run(
+                [
+                    "toktx",
+                    "--encode",
+                    "uastc",
+                    "--genmipmap",
+                    "--t2",
+                    str(ktx_out),
+                    str(png_in),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            return ktx_out.read_bytes()
+
+    return _t
+
+
 def derive_ktx2_tier(
     source: str,
     source_tier: str,
@@ -254,13 +371,12 @@ def derive_ktx2_tier(
     hf_token: str | None = None,
     dry_run: bool = False,
     target_tier: str | None = None,
+    workers: int = DEFAULT_KTX2_WORKERS,
 ) -> dict:
-    """Transcode every channel from a PNG tar → KTX2; pack into
-    ``ktx2/<source>-<target_tier>.tar``; atomic-commit. ``target_tier``
-    defaults to ``ktx2-<source_tier>``."""
+    """Stream-transcode every channel from ``<source>-<source_tier>.tar``
+    to KTX2. Requires ``toktx`` on PATH."""
     target_tier = target_tier or f"ktx2-{source_tier}"
 
-    # Verify toktx is available.
     try:
         subprocess.run(["toktx", "--version"], capture_output=True, check=True, text=True)
     except (FileNotFoundError, subprocess.CalledProcessError) as e:
@@ -283,59 +399,33 @@ def derive_ktx2_tier(
 
     t0 = time.monotonic()
     log.info(
-        "=== hf-derive-ktx2 %s %s → %s @ %s ===",
+        "=== hf-derive-ktx2 %s %s → %s @ %s (streaming, workers=%d) ===",
         source,
         source_tier,
         target_tier,
         release_tag,
+        workers,
     )
 
-    src_tar_path, src_rowmap = _download_source_artifacts(
-        repo_id=repo_id,
-        release_tag=release_tag,
-        source=source,
-        source_tier=source_tier,
-        hf_token=hf_token,
+    sha = _pin_commit(repo_id, release_tag, hf_token)
+    resolve_base = f"{HF_RESOLVE}/{repo_id}/resolve/{sha}"
+    log.info("pinned %s@%s → %s", repo_id, release_tag, sha[:12])
+
+    src_rowmap = _fetch_rowmap(
+        resolve_base=resolve_base, source=source, source_tier=source_tier, token=hf_token
     )
     materials = src_rowmap.get("materials", {})
+    tar_url = f"{resolve_base}/{source}-{source_tier}.tar"
 
-    n_ok = 0
-    n_failed = 0
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        with TarWriter(out_tar_path) as tw, src_tar_path.open("rb") as src_fh:
-            for mid, channels in materials.items():
-                for ch, spec in channels.items():
-                    try:
-                        raw = _slice_channel(src_fh, spec)
-                        png_in = tmp_dir / "in.png"
-                        ktx_out = tmp_dir / "out.ktx2"
-                        png_in.write_bytes(raw)
-                        if ktx_out.exists():
-                            ktx_out.unlink()
-                        # UASTC is the standard for lossy-but-good
-                        # texture compression; --genmipmap for
-                        # texture-sampling quality.
-                        subprocess.run(
-                            [
-                                "toktx",
-                                "--encode",
-                                "uastc",
-                                "--genmipmap",
-                                "--t2",
-                                str(ktx_out),
-                                str(png_in),
-                            ],
-                            check=True,
-                            capture_output=True,
-                        )
-                        tw.add_channel(mid, ch, ktx_out.read_bytes())
-                        n_ok += 1
-                    except Exception as e:  # pragma: no cover
-                        log.warning("%s/%s: ktx2 transcode failed: %s", mid, ch, e)
-                        n_failed += 1
-            new_materials = tw.finalize()
-
+    new_materials, n_ok, n_failed = _stream_transform_into_tar(
+        materials=materials,
+        tar_url=tar_url,
+        token=hf_token,
+        transform=_ktx2_transform_factory(),
+        max_workers=workers,
+        out_tar_path=out_tar_path,
+        label=f"ktx2→{target_tier}",
+    )
     if n_ok == 0:
         return {"error": "no channels transcoded", "ok": 0, "failed": n_failed}
 
@@ -384,13 +474,12 @@ def derive_ktx2_tier(
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
     log.info(
-        "PERF ktx2: %.1fs, %d ok / %d failed, tar=%.1f MB",
+        "PERF ktx2: %.1fs, %d ok / %d failed, out_tar=%.1f MB",
         time.monotonic() - t0,
         n_ok,
         n_failed,
         out_tar_path.stat().st_size / 1e6,
     )
-
     if dry_run:
         return {"dry_run": True, "ok": n_ok, "failed": n_failed}
 

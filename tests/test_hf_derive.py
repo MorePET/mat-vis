@@ -78,24 +78,24 @@ def test_slice_channel_roundtrips_exact_bytes(tmp_path: Path):
 
 
 def test_derive_smaller_tier_end_to_end_dry_run(tmp_path: Path):
-    """Fake an existing HF revision on local disk, run derive, verify output tar."""
-    # 1. Build a fake "1k" tar + rowmap on disk that the mock will hand to derive.
+    """HTTP-streaming path: mock _pin_commit + _fetch_rowmap + _range_read
+    so the pipeline runs without network. Verifies output tar's sliced
+    channels decode at the target size."""
     src_tar = tmp_path / "polyhaven-1k.tar"
-    src_rowmap_path = tmp_path / "polyhaven-1k-rowmap.json"
     with TarWriter(src_tar) as tw:
         for mid in ("mat_a", "mat_b"):
             tw.add_channel(mid, "color", _png_bytes(1024, (255, 0, 0)))
             tw.add_channel(mid, "normal", _png_bytes(1024, (0, 255, 0)))
-        new_materials = tw.finalize()
+        src_materials = tw.finalize()
+    src_tar_bytes = src_tar.read_bytes()
     src_rowmap = {
         "version": 1,
         "release_tag": "v0.0.0-test",
         "source": "polyhaven",
         "tier": "1k",
         "tar_file": "polyhaven-1k.tar",
-        "materials": new_materials,
+        "materials": src_materials,
     }
-    src_rowmap_path.write_text(json.dumps(src_rowmap))
 
     fake_catalog = [
         {
@@ -114,20 +114,17 @@ def test_derive_smaller_tier_end_to_end_dry_run(tmp_path: Path):
 
     work_dir = tmp_path / "work"
 
-    def fake_hf_hub_download(repo_id, repo_type, revision, filename, token):
-        if filename.endswith(".tar"):
-            return str(src_tar)
-        if filename.endswith("rowmap.json"):
-            return str(src_rowmap_path)
-        raise FileNotFoundError(filename)
+    def fake_range_read(*, session, tar_url, spec, token):
+        lo, length = int(spec["offset"]), int(spec["length"])
+        return src_tar_bytes[lo : lo + length]
 
     def fake_download_json(*, repo_id, revision, path, hf_token):
-        if path == "polyhaven.json":
-            return fake_catalog
-        return None
+        return fake_catalog if path == "polyhaven.json" else None
 
     with (
-        patch("mat_vis_baker.hf_derive.hf_hub_download", side_effect=fake_hf_hub_download),
+        patch("mat_vis_baker.hf_derive._pin_commit", return_value="deadbeefcafe"),
+        patch("mat_vis_baker.hf_derive._fetch_rowmap", return_value=src_rowmap),
+        patch("mat_vis_baker.hf_derive._range_read", side_effect=fake_range_read),
         patch("mat_vis_baker.manifest._download_json", side_effect=fake_download_json),
     ):
         result = derive_smaller_tier(
@@ -138,6 +135,7 @@ def test_derive_smaller_tier_end_to_end_dry_run(tmp_path: Path):
             work_dir=work_dir,
             hf_token="test",
             dry_run=True,
+            workers=2,
         )
 
     assert result["dry_run"] is True
