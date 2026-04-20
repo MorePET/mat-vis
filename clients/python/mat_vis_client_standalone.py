@@ -163,6 +163,37 @@ class MaterialNotFoundError(NotFoundError):
     kind = "material"
 
 
+class UnknownMaterialError(MaterialNotFoundError):
+    """``material_id`` is not present in ``client.index(source)``."""
+
+
+class MaterialNotStagedError(MatVisError):
+    """Material is in the index but the release asset isn't baked yet."""
+
+    def __init__(self, source: str, material_id: str, tier: str) -> None:
+        self.source = source
+        self.material_id = material_id
+        self.tier = tier
+        super().__init__(
+            f"material {material_id!r} exists in {source!r} index "
+            f"but is not staged for tier {tier!r}. Needs a re-bake."
+        )
+
+
+class AmbiguousMaterialError(MatVisError):
+    """A human-readable name resolves to >1 entries in ``source``."""
+
+    def __init__(self, source: str, name: str, candidates: list) -> None:
+        self.source = source
+        self.name = name
+        self.candidates = sorted(candidates)
+        bullets = "\n".join(f"  - {c}" for c in self.candidates)
+        super().__init__(
+            f"name {name!r} matches {len(self.candidates)} materials "
+            f"in source {source!r}:\n{bullets}\nPass the id directly to disambiguate."
+        )
+
+
 class SourceNotFoundError(NotFoundError):
     kind = "source"
 

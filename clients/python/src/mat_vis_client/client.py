@@ -1046,11 +1046,17 @@ class MatVisClient:
             idx = self.index(source)
         except MatVisError:
             idx = []
+        # Defend against tests / fallbacks where index() returns a non-list
+        # (e.g. a cached rowmap got wired in by accident) — treat as empty.
+        if not isinstance(idx, list):
+            idx = []
 
         norm_query = self._normalize_name(material_id)
         by_id: dict | None = None
         by_name: list[dict] = []
         for entry in idx:
+            if not isinstance(entry, dict):
+                continue
             if entry.get("id") == material_id:
                 by_id = entry
             entry_name = entry.get("name") or ""
