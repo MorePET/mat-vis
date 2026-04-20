@@ -193,6 +193,22 @@ def cmd_hf_derive_ktx2(args: argparse.Namespace) -> int:
     return 0 if "error" not in result else 1
 
 
+def cmd_merge_shards(args: argparse.Namespace) -> int:
+    from mat_vis_baker.merge_shards import merge_shards
+
+    result = merge_shards(
+        source=args.source,
+        tier=args.tier,
+        release_tag=args.release_tag,
+        work_dir=Path(args.work_dir),
+        repo_id=args.repo_id,
+        dry_run=args.dry_run,
+        keep_shards=args.keep_shards,
+    )
+    log.info("merge-shards result: %s", result)
+    return 0 if "error" not in result else 1
+
+
 def cmd_hf_bake(args: argparse.Namespace) -> int:
     """Bake (source, tier) → atomic HF push. The ADR-0007 replacement
     for ``cmd_all``'s parquet/GH-Releases path."""
@@ -400,6 +416,25 @@ def main() -> int:
         help="Total number of shards. Requires --shard-index.",
     )
 
+    p_merge = sub.add_parser(
+        "merge-shards",
+        help="Reassemble shard-N-of-K artifacts into one tar + rowmap (#134).",
+    )
+    p_merge.add_argument("source", choices=SOURCES)
+    p_merge.add_argument(
+        "tier",
+        help="Tier name (e.g. '1k', 'ktx2-1k'). KTX2 tiers land under ktx2/.",
+    )
+    p_merge.add_argument("work_dir")
+    p_merge.add_argument("--release-tag", required=True)
+    p_merge.add_argument("--repo-id", default="gerchowl/mat-vis")
+    p_merge.add_argument("--dry-run", action="store_true")
+    p_merge.add_argument(
+        "--keep-shards",
+        action="store_true",
+        help="Don't delete shard artifacts after merge (useful for debugging).",
+    )
+
     p_mtlx = sub.add_parser(
         "pack-mtlx",
         help="Pack original upstream .mtlx files into JSON map for release",
@@ -430,6 +465,8 @@ def main() -> int:
         return cmd_hf_derive(args)
     if args.command == "hf-derive-ktx2":
         return cmd_hf_derive_ktx2(args)
+    if args.command == "merge-shards":
+        return cmd_merge_shards(args)
 
     parser.print_help()
     return 1

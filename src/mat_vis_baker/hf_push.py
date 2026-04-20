@@ -28,6 +28,7 @@ def push_to_hf(
     *,
     token: str | None = None,
     create_branch_if_missing: bool = True,
+    delete_paths: list[str] | None = None,
 ) -> str:
     """Push a set of files to an HF dataset revision atomically.
 
@@ -40,16 +41,20 @@ def push_to_hf(
         token: HF access token. Falls back to the ``HF_TOKEN`` env var.
         create_branch_if_missing: if True and ``revision`` is not an
             existing branch, create it from ``main`` before committing.
+        delete_paths: repo paths to delete in the same atomic commit.
+            Used by ``merge-shards`` to drop shard artifacts once the
+            merged tar lands.
 
     Returns:
-        The commit SHA of the created commit, or ``""`` when ``files``
-        is empty (no-op, no API call).
+        The commit SHA of the created commit, or ``""`` when neither
+        ``files`` nor ``delete_paths`` has entries (no-op).
     """
-    if not files:
-        log.info("push_to_hf: no files, skipping")
+    delete_paths = delete_paths or []
+    if not files and not delete_paths:
+        log.info("push_to_hf: no files and no deletes, skipping")
         return ""
 
-    from huggingface_hub import CommitOperationAdd, HfApi
+    from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
     from huggingface_hub.errors import RevisionNotFoundError
 
     resolved_token = token if token is not None else os.environ.get("HF_TOKEN")
@@ -68,10 +73,11 @@ def push_to_hf(
                 exist_ok=True,
             )
 
-    operations = [
+    operations: list = [
         CommitOperationAdd(path_in_repo=path_in_repo, path_or_fileobj=str(local_path))
         for local_path, path_in_repo in files
     ]
+    operations.extend(CommitOperationDelete(path_in_repo=p) for p in delete_paths)
 
     commit_info = api.create_commit(
         repo_id=repo_id,
@@ -83,8 +89,9 @@ def push_to_hf(
 
     sha = getattr(commit_info, "oid", "") or getattr(commit_info, "commit_oid", "")
     log.info(
-        "push_to_hf: %d files → %s@%s (%s)",
+        "push_to_hf: %d adds + %d deletes → %s@%s (%s)",
         len(files),
+        len(delete_paths),
         repo_id,
         revision,
         sha[:12] if sha else "?",
