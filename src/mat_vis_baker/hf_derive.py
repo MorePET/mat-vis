@@ -36,6 +36,7 @@ from PIL import Image
 from mat_vis_baker.common import TIER_TO_PX
 from mat_vis_baker.hf_push import push_to_hf
 from mat_vis_baker.tar_writer import TarWriter
+from mat_vis_baker.telemetry import span
 
 log = logging.getLogger("mat-vis-baker.hf_derive")
 
@@ -160,47 +161,64 @@ def _stream_transform_into_tar(
     n_failed = 0
     first_error: str | None = None
     t_last = time.monotonic()
-    with ThreadPoolExecutor(max_workers=max_workers) as pool, TarWriter(out_tar_path) as tw:
-        futures = {pool.submit(_one, item): item for item in work}
-        for fut in as_completed(futures):
-            mid, ch, spec = futures[fut]
-            try:
-                r_mid, r_ch, out_bytes = fut.result()
-                tw.add_channel(r_mid, r_ch, out_bytes)
-                n_ok += 1
-                recent.append(False)
-            except Exception as e:
-                if first_error is None:
-                    first_error = f"{mid}/{ch}: {e}"
-                log.warning("%s/%s: %s failed: %s", mid, ch, label, e)
-                n_failed += 1
-                recent.append(True)
+    t_start = time.monotonic()
+    with span("stream.transform", label=label, n_total=n_total, max_workers=max_workers) as outer:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool, TarWriter(out_tar_path) as tw:
+            futures = {pool.submit(_one, item): item for item in work}
+            for fut in as_completed(futures):
+                mid, ch, spec = futures[fut]
+                try:
+                    r_mid, r_ch, out_bytes = fut.result()
+                    tw.add_channel(r_mid, r_ch, out_bytes)
+                    n_ok += 1
+                    recent.append(False)
+                except Exception as e:
+                    if first_error is None:
+                        first_error = f"{mid}/{ch}: {e}"
+                    log.warning("%s/%s: %s failed: %s", mid, ch, label, e)
+                    n_failed += 1
+                    recent.append(True)
 
-            completed = n_ok + n_failed
-            if (
-                completed >= MIN_SAMPLES
-                and len(recent) == WINDOW
-                and sum(recent) / WINDOW > FAIL_RATIO
-            ):
-                pool.shutdown(wait=False, cancel_futures=True)
-                raise RuntimeError(
-                    f"{label}: fail-fast — last {WINDOW} completions had "
-                    f"{sum(recent)} failures (>{int(FAIL_RATIO * 100)}%) "
-                    f"after {completed}/{n_total} total. "
-                    f"First error: {first_error}"
-                )
+                completed = n_ok + n_failed
+                if (
+                    completed >= MIN_SAMPLES
+                    and len(recent) == WINDOW
+                    and sum(recent) / WINDOW > FAIL_RATIO
+                ):
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    outer.set_attribute("outcome", "fail_fast")
+                    outer.set_attribute("n_ok", n_ok)
+                    outer.set_attribute("n_failed", n_failed)
+                    raise RuntimeError(
+                        f"{label}: fail-fast — last {WINDOW} completions had "
+                        f"{sum(recent)} failures (>{int(FAIL_RATIO * 100)}%) "
+                        f"after {completed}/{n_total} total. "
+                        f"First error: {first_error}"
+                    )
 
-            if time.monotonic() - t_last > 30:
-                log.info(
-                    "%s progress: %d/%d ok, %d failed (window=%d%%)",
-                    label,
-                    n_ok,
-                    n_total,
-                    n_failed,
-                    int(100 * sum(recent) / max(1, len(recent))),
-                )
-                t_last = time.monotonic()
-        new_materials = tw.finalize()
+                if time.monotonic() - t_last > 30:
+                    elapsed = time.monotonic() - t_start
+                    rate = completed / elapsed if elapsed else 0
+                    eta = (n_total - completed) / rate if rate > 0 else 0
+                    log.info(
+                        "%s progress: %d/%d ok, %d failed (window=%d%%, rate=%.1f/s, eta=%ds)",
+                        label,
+                        n_ok,
+                        n_total,
+                        n_failed,
+                        int(100 * sum(recent) / max(1, len(recent))),
+                        rate,
+                        int(eta),
+                    )
+                    outer.add_event(
+                        "progress",
+                        {"n_ok": n_ok, "n_failed": n_failed, "rate_per_s": rate},
+                    )
+                    t_last = time.monotonic()
+            new_materials = tw.finalize()
+        outer.set_attribute("outcome", "ok")
+        outer.set_attribute("n_ok", n_ok)
+        outer.set_attribute("n_failed", n_failed)
 
     # Terminal gate: refuse to ship a partial tar. A few dozen bad
     # textures in a 11k-channel bake is tolerable; sub-90% is not.
