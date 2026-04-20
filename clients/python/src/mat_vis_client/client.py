@@ -487,18 +487,83 @@ class MatVisClient:
 
     @property
     def manifest(self) -> dict:
-        """Fetch and cache the release manifest. Validates schema_version."""
+        """Return the v2 manifest for the pinned revision.
+
+        Derived from the HF dataset tree listing — zero cross-run
+        shared writable state on the baker side (ADR-0007). Cached
+        per-tag scope on disk.
+        """
         if self._manifest is None:
             cache_path = self._cache_scope / ".manifest.json"
             cached = self._cache_read_text(cache_path)
             if cached is not None:
                 self._manifest = json.loads(cached)
             else:
-                self._manifest = _get_json(self._manifest_url)
+                self._manifest = self._build_manifest_from_tree()
                 self._cache_write_text(cache_path, json.dumps(self._manifest, indent=2))
             self._check_schema_version(self._manifest)
             self._maybe_warn_updates()
         return self._manifest
+
+    def _build_manifest_from_tree(self) -> dict:
+        """Build the v2 manifest in memory from the HF tree listing.
+
+        Single HTTPS GET — no bake-time shared state to race on. The
+        filename conventions encoded here are the sole coupling to
+        the baker: ``<src>.json`` catalogs, ``<src>-<tier>.tar`` +
+        ``<src>-<tier>-rowmap.json`` at root, ``ktx2/<src>-<tier>.tar``
+        + ``ktx2/<src>-<tier>-rowmap.json`` under the ktx2 subtree.
+        """
+        import re
+
+        rev = self._tag or "main"
+        tree_url = f"https://huggingface.co/api/datasets/{HF_DATASET}/tree/{rev}?recursive=true"
+        tree = _get_json(tree_url)
+        paths = [e["path"] for e in tree if e.get("type") == "file"]
+
+        sources: dict[str, dict] = {}
+        top_tar_re = re.compile(r"^(?P<src>[a-z]+)-(?P<tier>[A-Za-z0-9-]+)\.tar$")
+        ktx2_tar_re = re.compile(r"^ktx2/(?P<src>[a-z]+)-(?P<tier>[A-Za-z0-9-]+)\.tar$")
+
+        for path in paths:
+            if (
+                path.endswith(".json")
+                and "-rowmap" not in path
+                and "/" not in path
+                and path != "release-manifest.json"
+            ):
+                src = path[:-5]
+                sources.setdefault(src, {"catalog": path, "tiers": {}})
+                continue
+
+            m = top_tar_re.match(path)
+            if m:
+                src = m.group("src")
+                tier = m.group("tier")
+                stem = path[:-4]
+                sources.setdefault(src, {"catalog": f"{src}.json", "tiers": {}})
+                sources[src]["tiers"][tier] = {
+                    "tar": path,
+                    "rowmap": f"{stem}-rowmap.json",
+                }
+                continue
+
+            m = ktx2_tar_re.match(path)
+            if m:
+                src = m.group("src")
+                tier = m.group("tier")
+                stem = path[len("ktx2/") : -4]
+                sources.setdefault(src, {"catalog": f"{src}.json", "tiers": {}})
+                sources[src]["tiers"][tier] = {
+                    "tar": path,
+                    "rowmap": f"ktx2/{stem}-rowmap.json",
+                }
+
+        return {
+            "schema_version": 2,
+            "release_tag": rev,
+            "sources": sources,
+        }
 
     # ── update checks ──────────────────────────────────────────
 
