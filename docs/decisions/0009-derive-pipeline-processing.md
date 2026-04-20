@@ -148,6 +148,16 @@ the log. Cheap (~200 B per run) and no-op outside GH Actions.
   every `fetch_texture`), but it would underperform against a
   rate-limiting origin.
 
+## Operator contract: bake → merge → derive ordering
+
+Derives MUST run against the already-merged `<source>-<tier>.tar` (+
+rowmap) for their source tier, not against `shard-N-of-K` bake
+artifacts. The code doesn't enforce this — `_fetch_rowmap` asks for
+`<source>-<source_tier>-rowmap.json` at a fixed path, so a missing
+merged rowmap yields a loud 404 rather than silent corruption, but
+workflow ordering is the operator's responsibility. CI's job graph
+gates derive jobs on the preceding `merge-shards` job for this reason.
+
 ## Upgrade triggers
 
 - HF CDN changes rate-limit semantics for range reads (currently
