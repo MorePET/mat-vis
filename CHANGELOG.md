@@ -22,6 +22,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## mat-vis-client 0.6.0
+
+Substrate migration. Data hosting moved from GitHub Releases + Parquet to
+Hugging Face Datasets + tar archives ([ADR-0007](docs/decisions/0007-substrate-move-to-hf-datasets-and-tar-container.md)).
+Structural fix for four recurring bug classes (#79, #82, #98, #99) via
+atomic multi-file commits + immutable revisions.
+
+### Added
+
+- Reads from Hugging Face Datasets (`gerchowl/mat-vis`) by default.
+  `MAT_VIS_HF_BASE` overrides the resolve URL for mirrors / tests.
+- `release-manifest.json` schema v2 (`docs/specs/release-manifest-schema-v2.json`):
+  per-source entries with `catalog` + `materials_count` + optional `tiers`
+  map keyed by tier to `{tar, rowmap}`. Scalar sources omit `tiers`.
+- First tagged release on the new substrate: `v2026.04.1` —
+  4 sources (ambientcg 1965, polyhaven 753, gpuopen 2254, physicallybased 86).
+
+### Changed
+
+- `fetch_texture(source, mid, channel, tier)` range-reads the tar directly.
+  Offsets point at the first byte past the 512-byte tar header; length is
+  the PNG/KTX2 payload size.
+- `sources()`, `tiers()`, `categories()`, `rowmap()`, `materials()`,
+  `channels()`, `index()`, `rowmap_entry()` rewritten against the v2 shape.
+  One rowmap per `(source, tier)`; no per-category partitioning (ADR-0007
+  drops that dimension — category lives on each catalog entry instead).
+- `tiers()` accepts an optional `source` to list just one source's tiers.
+- `sources(tier=None)` returns all sources when `tier` is omitted; with
+  `tier`, restricts to sources that published that tier.
+- `categories()` derives from per-source catalogs, not filename parsing.
+
+### Removed
+
+- `COMPATIBLE_SCHEMA_VERSIONS` drops `1`; only `2` is accepted. A cached
+  v1 manifest raises with an upgrade hint. Consumers on the frozen
+  `v2026.04.0` GitHub Release should stay on `mat-vis-client 0.5.x`.
+- GitHub-specific URL machinery: `GITHUB_RELEASES`, `GITHUB_RAW`,
+  `LATEST_MANIFEST_URL`, `_redirect_cache`, `_resolved_url`,
+  `_cache_resolved`, the signed-URL stale-retry branch, and the
+  `MAT_VIS_USE_HF` env flag (Phase 2 scaffolding).
+- `rowmap_entry()` returns `{offset, length, tar_file}` — the `parquet_file`
+  key is gone.
+
+### Upgrade notes
+
+```python
+# 0.5.x → 0.6.0: passing tag is now effectively required (no "latest"
+# alias on HF). Pin the data release explicitly.
+client = MatVisClient(tag="v2026.04.1")
+```
+
+The installable (`pip install mat-vis-client==0.6.0`) and the zero-deps
+standalone (`clients/python/mat_vis_client_standalone.py`) expose the
+same surface.
+
 ## mat-vis-client 0.4.1
 
 Hotfix from the post-0.4.0 code review. No API changes.
