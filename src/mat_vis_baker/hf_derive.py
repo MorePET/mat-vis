@@ -134,8 +134,16 @@ def _stream_transform_into_tar(
         raw = _range_read(session=session, tar_url=tar_url, spec=spec, token=token)
         return mid, ch, transform(raw)
 
+    # Fail-fast thresholds: if the first N completions show a failure
+    # rate above the cap, the whole transform is almost certainly broken
+    # (missing binary, bad auth, format mismatch) and we should abort
+    # before grinding through thousands of channels.
+    EARLY_WINDOW = 50
+    EARLY_FAIL_RATIO = 0.20
+
     n_ok = 0
     n_failed = 0
+    first_error: str | None = None
     t_last = time.monotonic()
     with ThreadPoolExecutor(max_workers=max_workers) as pool, TarWriter(out_tar_path) as tw:
         futures = {pool.submit(_one, item): item for item in work}
@@ -145,9 +153,26 @@ def _stream_transform_into_tar(
                 r_mid, r_ch, out_bytes = fut.result()
                 tw.add_channel(r_mid, r_ch, out_bytes)
                 n_ok += 1
-            except Exception as e:  # pragma: no cover
+            except Exception as e:
+                if first_error is None:
+                    first_error = f"{mid}/{ch}: {e}"
                 log.warning("%s/%s: %s failed: %s", mid, ch, label, e)
                 n_failed += 1
+
+            completed = n_ok + n_failed
+            if (
+                completed >= EARLY_WINDOW
+                and n_failed / completed > EARLY_FAIL_RATIO
+                and completed == n_failed + n_ok  # guard
+                and completed <= EARLY_WINDOW + max_workers  # only at window boundary
+            ):
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise RuntimeError(
+                    f"{label}: fail-fast — {n_failed}/{completed} channels failed "
+                    f"(>{int(EARLY_FAIL_RATIO * 100)}% threshold). "
+                    f"First error: {first_error}"
+                )
+
             if time.monotonic() - t_last > 30:
                 log.info(
                     "%s progress: %d/%d ok, %d failed",
@@ -159,7 +184,33 @@ def _stream_transform_into_tar(
                 t_last = time.monotonic()
         new_materials = tw.finalize()
     log.info("%s done: %d ok / %d failed / %d total", label, n_ok, n_failed, n_total)
+    _write_step_summary(label, n_ok, n_failed, n_total, first_error)
     return new_materials, n_ok, n_failed
+
+
+def _write_step_summary(
+    label: str, n_ok: int, n_failed: int, n_total: int, first_error: str | None
+) -> None:
+    """Append a markdown summary to $GITHUB_STEP_SUMMARY (no-op off-CI)."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    pct = 100 * n_ok / n_total if n_total else 0.0
+    status = "✅" if n_failed == 0 else ("⚠️" if n_ok > 0 else "❌")
+    lines = [
+        f"### {status} `{label}`",
+        "",
+        f"- **ok**: {n_ok} / {n_total} ({pct:.1f}%)",
+        f"- **failed**: {n_failed}",
+    ]
+    if first_error:
+        lines.append(f"- **first error**: `{first_error}`")
+    lines.append("")
+    try:
+        with open(path, "a") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
 
 
 # ── resize ────────────────────────────────────────────────────
@@ -286,16 +337,29 @@ def derive_smaller_tier(
 
 
 def _ktx2_transform_factory() -> Callable[[bytes], bytes]:
-    """Return a transform that writes PNG → tmp → runs toktx → reads
-    the KTX2 back. Each worker gets its own tmp files to avoid races."""
+    """Return a transform that writes PNG → tmp → toktx → reads KTX2 back.
+
+    Re-encodes the incoming PNG via PIL first, which strips ICC color
+    profiles and other metadata that ``toktx`` refuses (seen on
+    polyhaven: "It has an ICC profile. These are not supported.").
+    Pixel data is untouched — we never interpret color space here.
+
+    toktx stderr is captured and propagated into the exception so
+    real failures surface in logs instead of opaque exit-code-1.
+    """
 
     def _t(raw: bytes) -> bytes:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             png_in = tmp_dir / "in.png"
             ktx_out = tmp_dir / "out.ktx2"
-            png_in.write_bytes(raw)
-            subprocess.run(
+
+            # Strip ICC / EXIF / color metadata — keep pixels.
+            img = Image.open(io.BytesIO(raw))
+            img.load()
+            img.save(png_in, format="PNG", icc_profile=None)
+
+            result = subprocess.run(
                 [
                     "toktx",
                     "--encode",
@@ -305,9 +369,14 @@ def _ktx2_transform_factory() -> Callable[[bytes], bytes]:
                     str(ktx_out),
                     str(png_in),
                 ],
-                check=True,
                 capture_output=True,
+                text=True,
             )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"toktx exit {result.returncode}: "
+                    f"{(result.stderr or result.stdout or '').strip()[:500]}"
+                )
             return ktx_out.read_bytes()
 
     return _t
