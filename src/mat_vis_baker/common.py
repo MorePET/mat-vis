@@ -137,6 +137,8 @@ for _cat, _keywords in {
         "mortar",
         "pavement",
         "sidewalk",
+        "paving",
+        "terrazzo",
     ],
     "ceramic": ["ceramic", "porcelain", "tile", "terracotta", "clay", "brick", "pottery"],
     "glass": ["glass", "mirror", "crystal", "window", "translucent", "transparent"],
@@ -169,18 +171,105 @@ for _cat, _keywords in {
         _CATEGORY_MAP[kw] = _cat
 
 
+def _tokenize_category(first: str) -> list[str]:
+    """Split a lower-case first segment into candidate match tokens.
+
+    Handles dashes, underscores, spaces, and CamelCase run-ons like
+    "WoodFloor" / "PaintedPlaster" / "BaseMaterials" (which arrive as
+    "woodfloor" after .lower(), so we split on the original casing
+    before lower-casing — see normalize_category).
+    """
+    # split on any non-alphanumeric delimiter
+    tokens: list[str] = []
+    buf = ""
+    for ch in first:
+        if ch.isalnum():
+            buf += ch
+        else:
+            if buf:
+                tokens.append(buf)
+            buf = ""
+    if buf:
+        tokens.append(buf)
+    return tokens
+
+
+def _split_camel(token: str) -> list[str]:
+    """Split a CamelCase/PascalCase token into lower-case sub-words.
+
+    "WoodFloor" -> ["wood", "floor"]; "SciFi" -> ["sci", "fi"];
+    "PaintedPlaster" -> ["painted", "plaster"]; a token with no upper
+    transitions returns itself (lower-cased) as a single element.
+    """
+    if not token:
+        return []
+    parts: list[str] = []
+    start = 0
+    for i in range(1, len(token)):
+        if token[i].isupper() and token[i - 1].islower():
+            parts.append(token[start:i])
+            start = i
+    parts.append(token[start:])
+    return [p.lower() for p in parts if p]
+
+
+def _lookup_token(word: str) -> str | None:
+    """Look up a single lower-case word in _CATEGORY_MAP with plural fallback.
+
+    Tries the word as-is, then strips a trailing "s" (bricks -> brick,
+    rocks -> rock, tiles -> tile, fabrics -> fabric, leaves unchanged
+    if <=2 chars so we don't match empty strings or single letters).
+    Deterministic: no fuzzy matching.
+    """
+    if not word:
+        return None
+    if word in _CATEGORY_MAP:
+        return _CATEGORY_MAP[word]
+    if len(word) > 2 and word.endswith("s"):
+        stem = word[:-1]
+        if stem in _CATEGORY_MAP:
+            return _CATEGORY_MAP[stem]
+    return None
+
+
 def normalize_category(raw: str) -> str:
-    """Map a freeform upstream category to one of the 10 canonical categories."""
+    """Map a freeform upstream category to one of the 10 canonical categories.
+
+    Handles:
+      - Hierarchical paths ("Metal/Steel" -> first segment)
+      - Plurals ("Bricks" -> brick -> ceramic; "Rocks" -> rock -> stone)
+      - Multi-word display strings ("Brick Wall", "Interior Flooring")
+      - CamelCase run-ons ("WoodFloor", "PaintedPlaster", "BaseMaterials")
+      - dash / underscore separators
+
+    Deterministic only — no fuzzy / Levenshtein matching (see mat-vis#150).
+    Unmatched inputs fall through to "other".
+    """
     if not raw:
         return "other"
-    # ambientcg uses hierarchical like "Metal/Steel" — take first segment
-    first = raw.split("/")[0].strip().lower()
-    if first in _CATEGORY_MAP:
-        return _CATEGORY_MAP[first]
-    # try individual words
-    for word in first.split():
-        if word in _CATEGORY_MAP:
-            return _CATEGORY_MAP[word]
+    # ambientcg uses hierarchical like "Metal/Steel" — take first segment.
+    # Preserve original casing so we can split CamelCase afterwards.
+    first_cased = raw.split("/")[0].strip()
+    first = first_cased.lower()
+    # Fast path: whole-segment match (covers legacy behavior).
+    hit = _lookup_token(first)
+    if hit is not None:
+        return hit
+    # Split on delimiters, then CamelCase-split each token. Try each
+    # resulting sub-word against the keyword map (with plural fallback).
+    # Known fall-throughs that intentionally stay "other":
+    #   - "Liquid", "Manmade" (physicallybased): too broad / not a PBR class
+    #   - "Human" (physicallybased): skin/hair isn't "organic" vegetation
+    #   - "Atlas", "Decal", "Sign", "OnlyPBR" (ambientcg): meta/format tags
+    #   - "SciFi" (gpuopen): stylistic, not a material
+    #   - "Facade", "Roofing", "Wallpaper", "Interior Flooring",
+    #     "Base Materials" (gpuopen/ambientcg): multi-material contexts
+    #     with no single canonical home — mapping them would be wrong.
+    for delim_token in _tokenize_category(first_cased):
+        for sub in _split_camel(delim_token):
+            hit = _lookup_token(sub)
+            if hit is not None:
+                return hit
     return "other"
 
 
