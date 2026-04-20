@@ -13,7 +13,10 @@ import logging
 import requests
 
 from mat_vis_baker.common import (
+    AttributionBlock,
     MaterialRecord,
+    MatVisBlock,
+    PBRBlock,
     normalize_category,
     retry_request,
 )
@@ -23,14 +26,14 @@ log = logging.getLogger("mat-vis-baker.physicallybased")
 API_URL = "https://api.physicallybased.info/materials"
 
 
-def _rgb_to_hex(rgb: list[float] | None) -> str | None:
-    """Convert [r, g, b] floats (0-1) to #RRGGBB hex."""
-    if not rgb or len(rgb) < 3:
+def _color_rgb(rgb: object) -> list[float] | None:
+    """Extract a ``[r, g, b]`` float triple from upstream ``color`` if valid."""
+    if not isinstance(rgb, list) or len(rgb) < 3:
         return None
-    r, g, b = rgb[:3]
-    return "#{:02X}{:02X}{:02X}".format(
-        int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
-    )
+    try:
+        return [float(rgb[0]), float(rgb[1]), float(rgb[2])]
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_tags(raw: object) -> list[str]:
@@ -70,20 +73,27 @@ def fetch(*, session: requests.Session | None = None) -> list[MaterialRecord]:
         if isinstance(raw_cat, list):
             raw_cat = raw_cat[0] if raw_cat else ""
         cat = normalize_category(raw_cat)
-        color_hex = _rgb_to_hex(mat.get("color"))
+        mid = name.lower().replace(" ", "_")
 
         rec = MaterialRecord(
-            id=name.lower().replace(" ", "_"),
+            id=mid,
             source="physicallybased",
-            name=name,
-            category=cat,
-            tags=_normalize_tags(mat.get("tags")),
-            source_url="https://physicallybased.info",
-            source_license="CC0-1.0",
-            color_hex=color_hex,
-            roughness=mat.get("roughness"),
-            metalness=mat.get("metalness"),
-            ior=mat.get("ior"),
+            mat_vis=MatVisBlock(
+                name=name,
+                category=cat,
+                tags=_normalize_tags(mat.get("tags")),
+                upstream_id=mid,
+                pbr=PBRBlock(
+                    color_rgb=_color_rgb(mat.get("color")),
+                    roughness=mat.get("roughness"),
+                    metalness=mat.get("metalness"),
+                    ior=mat.get("ior"),
+                ),
+                attribution=AttributionBlock(
+                    license_spdx="CC0-1.0",
+                    source_url="https://physicallybased.info",
+                ),
+            ),
             available_tiers=[],
             maps=[],
         )

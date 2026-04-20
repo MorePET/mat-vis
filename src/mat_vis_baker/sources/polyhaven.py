@@ -13,7 +13,9 @@ from pathlib import Path
 import requests
 
 from mat_vis_baker.common import (
+    AttributionBlock,
     MaterialRecord,
+    MatVisBlock,
     normalize_category,
     normalize_channel,
     retry_request,
@@ -185,7 +187,17 @@ def _fetch_one(
 
         if not textures:
             return MaterialRecord(
-                id=slug, source="polyhaven", name=name, category="other", status="failed"
+                id=slug,
+                source="polyhaven",
+                mat_vis=MatVisBlock(
+                    name=name,
+                    upstream_id=slug,
+                    attribution=AttributionBlock(
+                        license_spdx="CC0-1.0",
+                        source_url=f"https://polyhaven.com/a/{slug}",
+                    ),
+                ),
+                status="failed",
             )
 
         raw_cats = meta.get("categories", [])
@@ -201,12 +213,16 @@ def _fetch_one(
         return MaterialRecord(
             id=slug,
             source="polyhaven",
-            name=name,
-            category=cat,
-            tags=tags,
-            source_url=f"https://polyhaven.com/a/{slug}",
-            source_license="CC0-1.0",
-            last_updated="",
+            mat_vis=MatVisBlock(
+                name=name,
+                category=cat,
+                tags=tags,
+                upstream_id=slug,
+                attribution=AttributionBlock(
+                    license_spdx="CC0-1.0",
+                    source_url=f"https://polyhaven.com/a/{slug}",
+                ),
+            ),
             available_tiers=[tier],
             maps=sorted(textures.keys()),
             texture_paths=textures,
@@ -214,7 +230,17 @@ def _fetch_one(
     except Exception:
         log.exception("%s: fetch failed", slug)
         return MaterialRecord(
-            id=slug, source="polyhaven", name=name, category="other", status="failed"
+            id=slug,
+            source="polyhaven",
+            mat_vis=MatVisBlock(
+                name=name,
+                upstream_id=slug,
+                attribution=AttributionBlock(
+                    license_spdx="CC0-1.0",
+                    source_url=f"https://polyhaven.com/a/{slug}",
+                ),
+            ),
+            status="failed",
         )
 
 

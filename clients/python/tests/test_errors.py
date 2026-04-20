@@ -233,7 +233,7 @@ def test_name_resolves_to_uuid_and_fetches_channels():
         rowmap_materials={
             "25b88a68": {"color": {"offset": 0, "length": 10, "tar_file": "gpuopen-1k.tar"}}
         },
-        index_entries=[{"id": "25b88a68", "name": "Aluminum Corrugated"}],
+        index_entries=[{"id": "25b88a68", "mat_vis": {"name": "Aluminum Corrugated"}}],
     )
     with patch.object(client, "fetch_texture", return_value=b"\x89PNG") as ft:
         out = client.fetch_all_textures("gpuopen", "Aluminum Corrugated", tier="1k")
@@ -247,7 +247,7 @@ def test_name_match_is_normalized_case_and_whitespace():
 
     client = _client_with_index(
         rowmap_materials={"abc": {"color": {"offset": 0, "length": 10}}},
-        index_entries=[{"id": "abc", "name": "Aluminum Corrugated"}],
+        index_entries=[{"id": "abc", "mat_vis": {"name": "Aluminum Corrugated"}}],
     )
     with patch.object(client, "fetch_texture", return_value=b""):
         client.fetch_all_textures("gpuopen", "  aluminum CORRUGATED  ", tier="1k")
@@ -263,8 +263,8 @@ def test_ambiguous_material_error_lists_candidates():
             "uuid-b": {"color": {"offset": 0, "length": 10}},
         },
         index_entries=[
-            {"id": "uuid-a", "name": "Brick Wall"},
-            {"id": "uuid-b", "name": "brick wall"},
+            {"id": "uuid-a", "mat_vis": {"name": "Brick Wall"}},
+            {"id": "uuid-b", "mat_vis": {"name": "brick wall"}},
         ],
     )
     with pytest.raises(AmbiguousMaterialError) as exc:

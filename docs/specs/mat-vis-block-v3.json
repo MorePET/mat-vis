@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MorePET/mat-vis/docs/specs/mat-vis-block-v3.json",
+  "title": "Layer-1 mat_vis curated block (v3)",
+  "description": "Stable, unified, cross-source-normalized semantic metadata. Keys are always present (nulls, not absent). ADR-0011 / mat-vis#152.",
+  "type": "object",
+  "required": [
+    "name",
+    "category",
+    "tags",
+    "description",
+    "physical",
+    "pbr",
+    "attribution",
+    "dates",
+    "upstream_id"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Human-readable display name."
+    },
+    "category": {
+      "type": "string",
+      "description": "Normalized material category.",
+      "enum": [
+        "metal",
+        "wood",
+        "stone",
+        "fabric",
+        "plastic",
+        "concrete",
+        "ceramic",
+        "glass",
+        "organic",
+        "other"
+      ]
+    },
+    "tags": {
+      "type": "array",
+      "description": "Freeform tags from the upstream source, lowercased.",
+      "items": {"type": "string"}
+    },
+    "description": {
+      "type": ["string", "null"],
+      "description": "Long-form description, if the upstream provides one."
+    },
+    "physical": {
+      "type": "object",
+      "required": ["dimensions_m", "max_resolution_px"],
+      "additionalProperties": false,
+      "properties": {
+        "dimensions_m": {
+          "type": ["array", "null"],
+          "description": "Physical dimensions [x, y] or [x, y, z] in metres.",
+          "items": {"type": ["number", "null"]},
+          "minItems": 2,
+          "maxItems": 3
+        },
+        "max_resolution_px": {
+          "type": ["array", "null"],
+          "description": "Maximum texture resolution [w, h] in pixels.",
+          "items": {"type": "integer", "minimum": 1},
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+    "pbr": {
+      "type": "object",
+      "required": [
+        "color_rgb",
+        "roughness",
+        "metalness",
+        "ior",
+        "specular_f0",
+        "transmission",
+        "complex_ior"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "color_rgb": {
+          "type": ["array", "null"],
+          "description": "Base colour as [r, g, b] floats in [0, 1].",
+          "items": {"type": "number"},
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "roughness": {"type": ["number", "null"], "minimum": 0.0, "maximum": 1.0},
+        "metalness": {"type": ["number", "null"], "minimum": 0.0, "maximum": 1.0},
+        "ior": {"type": ["number", "null"], "minimum": 0.0},
+        "specular_f0": {
+          "type": ["array", "null"],
+          "items": {"type": "number"},
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "transmission": {"type": ["number", "null"], "minimum": 0.0, "maximum": 1.0},
+        "complex_ior": {
+          "type": ["array", "null"],
+          "description": "Wavelength-resolved complex IOR (6 floats: n_r, n_g, n_b, k_r, k_g, k_b).",
+          "items": {"type": "number"},
+          "minItems": 6,
+          "maxItems": 6
+        }
+      }
+    },
+    "attribution": {
+      "type": "object",
+      "required": ["authors", "license_spdx", "source_url"],
+      "additionalProperties": false,
+      "properties": {
+        "authors": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "license_spdx": {
+          "type": "string",
+          "description": "SPDX license identifier.",
+          "minLength": 1
+        },
+        "source_url": {
+          "type": "string",
+          "description": "URL of the upstream material page."
+        }
+      }
+    },
+    "dates": {
+      "type": "object",
+      "required": ["published", "updated"],
+      "additionalProperties": false,
+      "properties": {
+        "published": {
+          "type": ["string", "null"],
+          "description": "ISO-8601 date (YYYY-MM-DD)."
+        },
+        "updated": {
+          "type": ["string", "null"],
+          "description": "ISO-8601 date (YYYY-MM-DD)."
+        }
+      }
+    },
+    "upstream_id": {
+      "type": "string",
+      "description": "Native id of the material in the upstream API."
+    }
+  }
+}

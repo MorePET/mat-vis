@@ -17,31 +17,42 @@ import pytest
 import mat_vis_client
 
 
+def _entry(mid: str, cat: str, r: float, m: float, tiers: list[str]) -> dict:
+    """Build a v3-shaped index entry (ADR-0011 / mat-vis#152)."""
+    return {
+        "material_id": mid,
+        "source": "ambientcg",
+        "mat_vis": {
+            "name": mid,
+            "category": cat,
+            "tags": [],
+            "description": None,
+            "physical": {"dimensions_m": None, "max_resolution_px": None},
+            "pbr": {
+                "color_rgb": None,
+                "roughness": r,
+                "metalness": m,
+                "ior": None,
+                "specular_f0": None,
+                "transmission": None,
+                "complex_ior": None,
+            },
+            "attribution": {
+                "authors": [],
+                "license_spdx": "CC0-1.0",
+                "source_url": "",
+            },
+            "dates": {"published": None, "updated": None},
+            "upstream_id": mid,
+        },
+        "available_tiers": tiers,
+    }
+
+
 MOCK_INDEX = [
-    {
-        "material_id": "Metal032",
-        "source": "ambientcg",
-        "category": "metal",
-        "roughness": 0.3,
-        "metalness": 1.0,
-        "available_tiers": ["1k", "2k"],
-    },
-    {
-        "material_id": "Metal050A",
-        "source": "ambientcg",
-        "category": "metal",
-        "roughness": 0.5,
-        "metalness": 1.0,
-        "available_tiers": ["1k"],
-    },
-    {
-        "material_id": "Wood002",
-        "source": "ambientcg",
-        "category": "wood",
-        "roughness": 0.7,
-        "metalness": 0.0,
-        "available_tiers": ["1k"],
-    },
+    _entry("Metal032", "metal", 0.3, 1.0, ["1k", "2k"]),
+    _entry("Metal050A", "metal", 0.5, 1.0, ["1k"]),
+    _entry("Wood002", "wood", 0.7, 0.0, ["1k"]),
 ]
 
 

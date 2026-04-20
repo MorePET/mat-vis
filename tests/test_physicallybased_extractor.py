@@ -80,10 +80,10 @@ def test_fetch_populates_tags_from_upstream() -> None:
         records = fetch()
 
     assert len(records) == 3
-    by_name = {r.name: r for r in records}
+    by_name = {r.mat_vis.name: r for r in records}
 
-    assert by_name["Aluminum"].tags == ["aluminium", "mirror"]
+    assert by_name["Aluminum"].mat_vis.tags == ["aluminium", "mirror"]
     # [""] collapses to [] — not a singleton-empty-string list
-    assert by_name["Banana"].tags == []
+    assert by_name["Banana"].mat_vis.tags == []
     # case-folded, de-duplicated, order preserved
-    assert by_name["Car Paint"].tags == ["acrylic", "coat", "car paint", "lacquer"]
+    assert by_name["Car Paint"].mat_vis.tags == ["acrylic", "coat", "car paint", "lacquer"]
