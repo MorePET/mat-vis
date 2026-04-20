@@ -157,7 +157,9 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
 def cmd_hf_derive(args: argparse.Namespace) -> int:
     from mat_vis_baker.hf_derive import derive_smaller_tier
+    from mat_vis_baker.shard_utils import validate_shard_args
 
+    shard = validate_shard_args(args.shard_index, args.shard_total)
     result = derive_smaller_tier(
         source=args.source,
         target_tier=args.target_tier,
@@ -166,6 +168,7 @@ def cmd_hf_derive(args: argparse.Namespace) -> int:
         work_dir=Path(args.work_dir),
         repo_id=args.repo_id,
         dry_run=args.dry_run,
+        shard=shard,
     )
     log.info("hf-derive result: %s", result)
     return 0 if "error" not in result else 1
@@ -173,7 +176,9 @@ def cmd_hf_derive(args: argparse.Namespace) -> int:
 
 def cmd_hf_derive_ktx2(args: argparse.Namespace) -> int:
     from mat_vis_baker.hf_derive import derive_ktx2_tier
+    from mat_vis_baker.shard_utils import validate_shard_args
 
+    shard = validate_shard_args(args.shard_index, args.shard_total)
     result = derive_ktx2_tier(
         source=args.source,
         source_tier=args.source_tier,
@@ -182,6 +187,7 @@ def cmd_hf_derive_ktx2(args: argparse.Namespace) -> int:
         repo_id=args.repo_id,
         dry_run=args.dry_run,
         target_tier=args.target_tier,
+        shard=shard,
     )
     log.info("hf-derive-ktx2 result: %s", result)
     return 0 if "error" not in result else 1
@@ -342,6 +348,18 @@ def main() -> int:
     p_hd.add_argument("--release-tag", required=True)
     p_hd.add_argument("--repo-id", default="gerchowl/mat-vis")
     p_hd.add_argument("--dry-run", action="store_true")
+    p_hd.add_argument(
+        "--shard-index",
+        type=int,
+        default=None,
+        help="0-based shard index. Requires --shard-total.",
+    )
+    p_hd.add_argument(
+        "--shard-total",
+        type=int,
+        default=None,
+        help="Total number of shards. Requires --shard-index.",
+    )
 
     p_hk = sub.add_parser(
         "hf-derive-ktx2",
@@ -354,6 +372,18 @@ def main() -> int:
     p_hk.add_argument("--release-tag", required=True)
     p_hk.add_argument("--repo-id", default="gerchowl/mat-vis")
     p_hk.add_argument("--dry-run", action="store_true")
+    p_hk.add_argument(
+        "--shard-index",
+        type=int,
+        default=None,
+        help="0-based shard index. Requires --shard-total.",
+    )
+    p_hk.add_argument(
+        "--shard-total",
+        type=int,
+        default=None,
+        help="Total number of shards. Requires --shard-index.",
+    )
 
     p_mtlx = sub.add_parser(
         "pack-mtlx",
