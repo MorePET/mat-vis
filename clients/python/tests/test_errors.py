@@ -166,6 +166,114 @@ def test_rate_limit_still_raises_rate_limit_error():
             _get("https://example.com/x")
 
 
+# ── Name-resolution errors (mat-vis #141, #143, #144) ─────────
+
+
+def _client_with_index(rowmap_materials: dict, index_entries: list[dict]):
+    """Build a MatVisClient with a baked rowmap + index, no network."""
+    from mat_vis_client import MatVisClient
+    import tempfile
+    from pathlib import Path
+
+    manifest = {
+        "schema_version": 2,
+        "release_tag": "v2026.04.0",
+        "sources": {
+            "gpuopen": {
+                "catalog": "gpuopen.json",
+                "tiers": {"1k": {"rowmap": "gpuopen-1k-rowmap.json", "tar": "gpuopen-1k.tar"}},
+            }
+        },
+    }
+    rowmap = {"materials": rowmap_materials, "tar_file": "gpuopen-1k.tar"}
+
+    tmp = Path(tempfile.mkdtemp(prefix="mat-vis-test-resolver-"))
+    client = MatVisClient(cache_dir=tmp)
+    client._manifest = manifest
+    client._rowmaps = {"gpuopen-1k": rowmap}
+    client._indexes = {"gpuopen": index_entries}
+    return client
+
+
+def test_unknown_material_error_raised_for_unknown_id():
+    """Not in rowmap, not in index → UnknownMaterialError."""
+    from mat_vis_client import UnknownMaterialError, MaterialNotFoundError
+
+    client = _client_with_index(
+        rowmap_materials={"25b88a68": {"color": {"offset": 0, "length": 10}}},
+        index_entries=[{"id": "25b88a68", "name": "Aluminum Corrugated"}],
+    )
+    with pytest.raises(UnknownMaterialError) as exc:
+        client.fetch_all_textures("gpuopen", "bogus-id", tier="1k")
+    assert exc.value.key == "bogus-id"
+    # Subclass of MaterialNotFoundError so legacy guards still fire
+    assert isinstance(exc.value, MaterialNotFoundError)
+
+
+def test_material_not_staged_error_when_id_in_index_but_not_rowmap():
+    """In index but not staged in rowmap → MaterialNotStagedError."""
+    from mat_vis_client import MaterialNotStagedError
+
+    client = _client_with_index(
+        rowmap_materials={},  # nothing baked yet
+        index_entries=[{"id": "25b88a68", "name": "Aluminum Corrugated"}],
+    )
+    with pytest.raises(MaterialNotStagedError) as exc:
+        client.fetch_all_textures("gpuopen", "25b88a68", tier="1k")
+    assert exc.value.source == "gpuopen"
+    assert exc.value.material_id == "25b88a68"
+    assert exc.value.tier == "1k"
+
+
+def test_name_resolves_to_uuid_and_fetches_channels():
+    """py-mat#90's 'Best option': fetch by name → resolves to UUID → works."""
+    from unittest.mock import patch
+
+    client = _client_with_index(
+        rowmap_materials={
+            "25b88a68": {"color": {"offset": 0, "length": 10, "tar_file": "gpuopen-1k.tar"}}
+        },
+        index_entries=[{"id": "25b88a68", "name": "Aluminum Corrugated"}],
+    )
+    with patch.object(client, "fetch_texture", return_value=b"\x89PNG") as ft:
+        out = client.fetch_all_textures("gpuopen", "Aluminum Corrugated", tier="1k")
+    assert out == {"color": b"\x89PNG"}
+    ft.assert_called_once_with("gpuopen", "25b88a68", "color", "1k")
+
+
+def test_name_match_is_normalized_case_and_whitespace():
+    """Name matching is NFKC + casefold + strip."""
+    from unittest.mock import patch
+
+    client = _client_with_index(
+        rowmap_materials={"abc": {"color": {"offset": 0, "length": 10}}},
+        index_entries=[{"id": "abc", "name": "Aluminum Corrugated"}],
+    )
+    with patch.object(client, "fetch_texture", return_value=b""):
+        client.fetch_all_textures("gpuopen", "  aluminum CORRUGATED  ", tier="1k")
+
+
+def test_ambiguous_material_error_lists_candidates():
+    """Two index entries share a normalized name → AmbiguousMaterialError."""
+    from mat_vis_client import AmbiguousMaterialError
+
+    client = _client_with_index(
+        rowmap_materials={
+            "uuid-a": {"color": {"offset": 0, "length": 10}},
+            "uuid-b": {"color": {"offset": 0, "length": 10}},
+        },
+        index_entries=[
+            {"id": "uuid-a", "name": "Brick Wall"},
+            {"id": "uuid-b", "name": "brick wall"},
+        ],
+    )
+    with pytest.raises(AmbiguousMaterialError) as exc:
+        client.fetch_all_textures("gpuopen", "Brick Wall", tier="1k")
+    assert exc.value.source == "gpuopen"
+    assert sorted(exc.value.candidates) == ["uuid-a", "uuid-b"]
+    assert "uuid-a" in str(exc.value) and "uuid-b" in str(exc.value)
+
+
 # ── fetch_texture surfaces typed errors ────────────────────────
 
 
