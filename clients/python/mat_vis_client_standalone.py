@@ -35,11 +35,17 @@ import urllib.request
 from pathlib import Path
 
 REPO = "MorePET/mat-vis"
-GITHUB_RELEASES = f"https://github.com/{REPO}/releases"
-GITHUB_API = f"https://api.github.com/repos/{REPO}"
-GITHUB_RAW = f"https://raw.githubusercontent.com/{REPO}"
-LATEST_MANIFEST_URL = f"{GITHUB_RELEASES}/latest/download/release-manifest.json"
+GITHUB_API = f"https://api.github.com/repos/{REPO}"  # update-check only
 PYPI_API = "https://pypi.org/pypi/mat-vis-client/json"
+
+# v0.6.0 (ADR-0007): HF Datasets is the canonical substrate. URLs are
+# built as ``{HF_BASE}/<tag>/<path>``. No "latest" alias on HF — tag
+# is effectively required. ``MAT_VIS_HF_BASE`` overrides the default.
+HF_DATASET = "gerchowl/mat-vis"
+HF_BASE = os.environ.get(
+    "MAT_VIS_HF_BASE",
+    f"https://huggingface.co/datasets/{HF_DATASET}/resolve",
+)
 DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" / "mat-vis"))
 # Version is kept in sync with clients/python/pyproject.toml by
 # scripts/sync-standalone-version.py (run via pre-commit). Do not
@@ -336,7 +342,7 @@ def _in_range(value: float | None, lo: float, hi: float) -> bool:
 # Schema versions this client understands. Manifest declares its own
 # schema_version field; if the manifest version is outside this set,
 # the client refuses to operate rather than silently misreading data.
-COMPATIBLE_SCHEMA_VERSIONS = frozenset([1])
+COMPATIBLE_SCHEMA_VERSIONS = frozenset([2])
 
 
 class MatVisClient:
@@ -377,19 +383,15 @@ class MatVisClient:
         self._rowmaps: dict[str, dict] = {}
         self._indexes: dict[str, list[dict]] = {}
         self._alt_clients: dict[str, "MatVisClient"] = {}
-        # In-memory cache of resolved redirect URLs (github.com -> signed CDN).
-        # GitHub's signed URLs expire ~5 min; we cache for 4 min to be safe.
-        # Avoids hitting the rate-limited github.com redirect on every
-        # range read to the same parquet.
-        self._redirect_cache: dict[str, tuple[str, float]] = {}
         self._tag = tag
 
         if manifest_url:
             self._manifest_url = manifest_url
-        elif tag:
-            self._manifest_url = f"{GITHUB_RELEASES}/download/{tag}/release-manifest.json"
         else:
-            self._manifest_url = LATEST_MANIFEST_URL
+            # v0.6.0: HF substrate only. No "latest" alias — tag
+            # effectively required; falls back to `main` for dev-time use.
+            rev = tag or "main"
+            self._manifest_url = f"{HF_BASE}/{rev}/release-manifest.json"
 
     @property
     def _cache_scope(self) -> Path:
@@ -582,91 +584,88 @@ class MatVisClient:
                 f"Upgrade with: pip install -U mat-vis-client"
             )
 
-    def sources(self, tier: str = "1k") -> list[str]:
-        """List available sources for a tier."""
-        tier_data = self.manifest.get("tiers", {}).get(tier, {})
-        return list(tier_data.get("sources", {}).keys())
+    def _revision(self) -> str:
+        """Pinned revision for HF resolve URLs (v0.6.0: tag required)."""
+        return self._tag or self.manifest.get("release_tag", "main")
 
-    def tiers(self) -> list[str]:
-        """List available tiers (discovered from the manifest)."""
-        return list(self.manifest.get("tiers", {}).keys())
+    def _hf_url(self, path: str) -> str:
+        return f"{HF_BASE}/{self._revision()}/{path}"
+
+    def sources(self, tier: str | None = None) -> list[str]:
+        """List sources. With ``tier`` set, restricts to sources that
+        actually published that tier in this revision."""
+        sources = self.manifest.get("sources", {})
+        if tier is None:
+            return sorted(sources.keys())
+        return sorted(name for name, entry in sources.items() if tier in (entry.get("tiers") or {}))
+
+    def tiers(self, source: str | None = None) -> list[str]:
+        """List tiers published in this revision. With ``source``, just that source's."""
+        sources = self.manifest.get("sources", {})
+        if source is not None:
+            src_entry = _lookup(sources, source, kind="source")
+            return sorted((src_entry.get("tiers") or {}).keys())
+        found: set[str] = set()
+        for entry in sources.values():
+            found.update((entry.get("tiers") or {}).keys())
+        return sorted(found)
 
     def categories(self) -> tuple[str, ...]:
-        """Discover material categories from the current release manifest.
+        """Discover material categories from per-source catalogs.
 
-        Derived from rowmap filenames (``{source}-{tier}-{category}-rowmap.json``).
-        Always reflects the actual release — no hardcoded list to drift.
+        ADR-0007 removed the per-category partitioning dimension, so
+        categories are read from ``entry.category`` in each catalog.
         """
-        import re
-
         global CATEGORIES
-        # Parse categories out of rowmap filenames across all tiers x sources.
-        # Single regex covers simple and chunked names: ...-{cat}[-N]-rowmap.json
-        pat = re.compile(r"-(?P<cat>[a-z]+)(?:-\d+)?-rowmap\.json$")
         found: set[str] = set()
-        for tier_data in self.manifest.get("tiers", {}).values():
-            for src_data in tier_data.get("sources", {}).values():
-                for rm in src_data.get("rowmap_files", []):
-                    m = pat.search(rm)
-                    if m:
-                        found.add(m.group("cat"))
-                single = src_data.get("rowmap_file")
-                if single:
-                    m = pat.search(single)
-                    if m:
-                        found.add(m.group("cat"))
+        for source in self.sources():
+            for entry in self.index(source):
+                cat = entry.get("category")
+                if cat:
+                    found.add(cat)
         result = tuple(sorted(found))
-        # Populate the module-level constant for back-compat
         CATEGORIES = frozenset(result)
         return result
 
     def rowmap(self, source: str, tier: str, category: str | None = None) -> dict:
-        """Fetch and cache rowmaps. Merges partitioned rowmaps into one."""
-        key = f"{source}-{tier}-{category or 'all'}"
-        if key not in self._rowmaps:
-            tiers = self.manifest.get("tiers", {})
-            tier_data = _lookup(tiers, tier, kind="tier")
-            base_url = tier_data["base_url"]
-            src_data = _lookup(
-                tier_data.get("sources", {}), source, kind="source", context=f"tier {tier!r}"
-            )
+        """Fetch and cache the rowmap for a (source, tier).
 
-            rowmap_files = src_data.get("rowmap_files", [])
-            if not rowmap_files:
-                rowmap_file = src_data.get("rowmap_file", f"{source}-{tier}-rowmap.json")
-                rowmap_files = [rowmap_file]
+        v0.6.0: one rowmap per (source, tier) — no per-category
+        partitioning. ``category`` is accepted for back-compat with
+        0.5.x callers but ignored.
+        """
+        del category
+        key = f"{source}-{tier}"
+        if key in self._rowmaps:
+            return self._rowmaps[key]
 
-            if category:
-                rowmap_files = [f for f in rowmap_files if category in f] or rowmap_files[:1]
+        sources = self.manifest.get("sources", {})
+        src_entry = _lookup(sources, source, kind="source")
+        tier_entry = _lookup(
+            src_entry.get("tiers") or {},
+            tier,
+            kind="tier",
+            context=f"source {source!r}",
+        )
+        rowmap_path = tier_entry["rowmap"]
 
-            # Fetch all partition rowmaps and merge materials
-            merged: dict = {"materials": {}}
-            for rmf in rowmap_files:
-                cache_path = self._cache_dir / ".rowmaps" / rmf
-                if cache_path.exists():
-                    rm = json.loads(cache_path.read_text())
-                else:
-                    url = base_url + rmf
-                    rm = _get_json(url)
-                    cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    cache_path.write_text(json.dumps(rm, indent=2))
+        cache_path = self._cache_dir / ".rowmaps" / rowmap_path.replace("/", "_")
+        if cache_path.exists():
+            rm = json.loads(cache_path.read_text())
+        else:
+            rm = _get_json(self._hf_url(rowmap_path))
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(rm, indent=2))
 
-                # Each partitioned rowmap has its own parquet_file
-                pq_file = rm.get("parquet_file", "")
-                for mid, channels in rm.get("materials", {}).items():
-                    # Tag each channel with its parquet file for range reads
-                    for ch_data in channels.values():
-                        ch_data["parquet_file"] = pq_file
-                    merged["materials"][mid] = channels
+        # Attach tar_file to every channel so fetch_texture can find
+        # the bytes without re-reading the manifest.
+        tar_path = tier_entry["tar"]
+        for channels in rm.get("materials", {}).values():
+            for ch_data in channels.values():
+                ch_data["tar_file"] = tar_path
 
-                # Keep metadata from last rowmap (they're all the same except materials)
-                for k in ("version", "release_tag", "source", "tier"):
-                    if k in rm:
-                        merged[k] = rm[k]
-
-            self._rowmaps[key] = merged
-
-        return self._rowmaps[key]
+        self._rowmaps[key] = rm
+        return rm
 
     def materials(self, source: str, tier: str) -> list[str]:
         """List material IDs available for a source × tier."""
@@ -682,38 +681,24 @@ class MatVisClient:
     # ── Index & search ──────────────────────────────────────────
 
     def _index_url(self, source: str) -> str:
-        """Build the URL for a source's index JSON."""
-        ref = self._tag or "main"
-        return f"{GITHUB_RAW}/{ref}/index/{source}.json"
+        """Build the URL for a source's catalog JSON on HF."""
+        try:
+            catalog = self.manifest["sources"][source]["catalog"]
+        except (KeyError, TypeError):
+            catalog = f"{source}.json"
+        return self._hf_url(catalog)
 
     def index(self, source: str) -> list[dict]:
-        """Fetch and cache the material index for a source.
-
-        Tries git (raw.githubusercontent.com) first, falls back to
-        release asset (some sources only ship the index on the release).
-        Returns a list of material entries per index-schema.json.
-        """
+        """Fetch and cache the per-source catalog JSON (v0.6.0: HF-only)."""
         if source not in self._indexes:
             cache_path = self._cache_dir / ".indexes" / f"{source}.json"
             if cache_path.exists():
                 self._indexes[source] = json.loads(cache_path.read_text())
             else:
-                # Try git first, then fall back to release asset
-                data = None
-                try:
-                    data = _get_json(self._index_url(source))
-                except Exception:
-                    tag = self.manifest.get("release_tag", self._tag or "")
-                    if tag:
-                        try:
-                            data = _get_json(f"{GITHUB_RELEASES}/download/{tag}/{source}.json")
-                        except Exception:
-                            pass
-                if data is None:
-                    raise FileNotFoundError(f"Index for {source!r} not found in git or release")
+                data = _get_json(self._index_url(source))
                 self._indexes[source] = data
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cache_path.write_text(json.dumps(self._indexes[source], indent=2))
+                cache_path.write_text(json.dumps(data, indent=2))
         return self._indexes[source]
 
     def search(
@@ -875,10 +860,12 @@ class MatVisClient:
         if not hasattr(self, "_mtlx_originals"):
             self._mtlx_originals: dict[str, dict[str, str]] = {}
         if source not in self._mtlx_originals:
-            tag = self.manifest.get("release_tag", self._tag or "")
-            url = f"{GITHUB_RELEASES}/download/{tag}/{source}-mtlx.json"
+            mtlx_path = (
+                self.manifest.get("sources", {}).get(source, {}).get("mtlx")
+                or f"{source}-mtlx.json"
+            )
             try:
-                self._mtlx_originals[source] = _get_json(url)
+                self._mtlx_originals[source] = _get_json(self._hf_url(mtlx_path))
             except Exception:
                 self._mtlx_originals[source] = {}
         return self._mtlx_originals[source]
@@ -891,7 +878,7 @@ class MatVisClient:
     ) -> dict[str, dict]:
         """Get raw rowmap offsets for a material (for DIY consumers).
 
-        Returns a dict of channel -> {offset, length, parquet_file}.
+        Returns a dict of channel -> {offset, length, tar_file}.
         """
         rm = self.rowmap(source, tier)
         mat = _lookup(
@@ -900,31 +887,15 @@ class MatVisClient:
             kind="material",
             context=f"{source}/{tier}",
         )
-        fallback_pq = rm.get("parquet_file", "")
+        tar_file = rm.get("tar_file", "")
         return {
             ch: {
                 "offset": info["offset"],
                 "length": info["length"],
-                "parquet_file": info.get("parquet_file", fallback_pq),
+                "tar_file": info.get("tar_file", tar_file),
             }
             for ch, info in mat.items()
         }
-
-    def _resolved_url(self, url: str) -> tuple[str, bool]:
-        """Return (url_to_use, is_cached). Resolves github.com releases URL to
-        its signed CDN URL and caches for 4 min. Used to amortize the
-        rate-limited redirect across many range reads on the same parquet.
-        """
-        now = time.time()
-        cached = self._redirect_cache.get(url)
-        if cached and cached[1] > now:
-            return cached[0], True
-        return url, False
-
-    def _cache_resolved(self, original_url: str, resolved_url: str) -> None:
-        """Store a resolved CDN URL with a 4-minute TTL."""
-        if resolved_url and resolved_url != original_url:
-            self._redirect_cache[original_url] = (resolved_url, time.time() + 240)
 
     def fetch_texture(
         self,
@@ -973,39 +944,22 @@ class MatVisClient:
                 "Raise MAT_VIS_MAX_FETCH_SIZE to override."
             )
 
-        # Find parquet URL (per-partition from merged rowmap)
-        tier_data = self.manifest["tiers"][tier]
-        base_url = tier_data["base_url"]
-        parquet_file = rng.get("parquet_file") or rm.get("parquet_file", "")
-        original_url = base_url + parquet_file
-
-        # Use cached resolved (signed CDN) URL if available — avoids the
-        # rate-limited github.com redirect on repeat range reads.
-        url, is_cached = self._resolved_url(original_url)
+        # Range-read the tar on HF. HF's resolve URL is stable (no
+        # expiring signed-URL dance), so one GET per channel is fine.
+        tar_file = rng.get("tar_file") or rm.get("tar_file", f"{source}-{tier}.tar")
+        url = self._hf_url(tar_file)
         range_header = f"bytes={offset}-{offset + length - 1}"
+        data = _get(url, headers={"Range": range_header})
 
-        try:
-            if is_cached:
-                data = _get(url, headers={"Range": range_header})
-            else:
-                data, resolved = _get(url, headers={"Range": range_header}, return_final_url=True)
-                self._cache_resolved(original_url, resolved)
-        except urllib.error.HTTPError as e:
-            # Signed URL may have expired between cache and use — retry once with fresh.
-            if is_cached and e.code in (403, 404):
-                self._redirect_cache.pop(original_url, None)
-                data, resolved = _get(
-                    original_url,
-                    headers={"Range": range_header},
-                    return_final_url=True,
-                )
-                self._cache_resolved(original_url, resolved)
-            else:
-                raise
-
-        # Verify PNG
-        if data[:4] != b"\x89PNG":
-            raise ValueError(f"Expected PNG, got {data[:4]!r}")
+        # Verify payload magic matches one of the formats we bake:
+        # PNG (\x89PNG\r\n\x1a\n) or KTX2 (\xabKTX 20\xbb\r\n\x1a\n).
+        _PNG = b"\x89PNG\r\n\x1a\n"
+        _KTX2 = b"\xabKTX 20\xbb\r\n\x1a\n"
+        if not (data.startswith(_PNG) or data.startswith(_KTX2)):
+            raise ValueError(
+                f"Expected PNG or KTX2 bytes, got {data[:12]!r} "
+                f"({source}/{material_id}/{channel} @ {tier})"
+            )
 
         # Cache
         cache_path.parent.mkdir(parents=True, exist_ok=True)
