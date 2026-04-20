@@ -78,6 +78,16 @@ raises `MatVisError` early with an upgrade hint, not silent empty results.
   `tier`, restricts to sources that published that tier.
 - `categories()` derives from per-source catalogs, not filename parsing.
 
+### Fixed
+
+- `client.search(source="physicallybased")` now returns scalar-only entries
+  regardless of the `tier` filter — previously returned `[]` because
+  physicallybased advertises no textures
+  ([#167](https://github.com/MorePET/mat-vis/issues/167)). The tier filter
+  treats missing/empty `available_tiers` as tier-independent; textured
+  sources are still gated to the requested tier. Behavioural change: any
+  caller that relied on the silent-empty behavior will now see results.
+
 ### Removed
 
 - `COMPATIBLE_SCHEMA_VERSIONS` drops `1`; only `2` is accepted. A cached
