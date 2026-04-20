@@ -61,10 +61,20 @@ def _download_source_artifacts(
     return Path(tar_path), json.loads(Path(rowmap_path).read_text())
 
 
-def _slice_channel(tar_bytes: bytes, spec: dict) -> bytes:
+def _slice_channel(tar_bytes_or_fh, spec: dict) -> bytes:
+    """Slice one channel out of the source tar.
+
+    Accepts either the full tar as bytes (handy for tests) or an
+    open ``BinaryIO`` — the production path streams from disk via
+    ``seek``/``read`` to avoid loading multi-GB tars into memory,
+    which was the root of the Phase-3e derive OOMs on 2k+ tars.
+    """
     lo = int(spec["offset"])
     length = int(spec["length"])
-    return tar_bytes[lo : lo + length]
+    if isinstance(tar_bytes_or_fh, (bytes, bytearray, memoryview)):
+        return bytes(tar_bytes_or_fh[lo : lo + length])
+    tar_bytes_or_fh.seek(lo)
+    return tar_bytes_or_fh.read(length)
 
 
 def _patch_catalog_tiers(
@@ -130,17 +140,20 @@ def derive_smaller_tier(
         source_tier=source_tier,
         hf_token=hf_token,
     )
-    tar_bytes = src_tar_path.read_bytes()
     materials = src_rowmap.get("materials", {})
-    log.info("loaded source: %d materials, tar=%.1f MB", len(materials), len(tar_bytes) / 1e6)
+    log.info(
+        "loaded source: %d materials, tar=%.1f MB (streaming seek+read)",
+        len(materials),
+        src_tar_path.stat().st_size / 1e6,
+    )
 
     n_ok = 0
     n_failed = 0
-    with TarWriter(out_tar_path) as tw:
+    with TarWriter(out_tar_path) as tw, src_tar_path.open("rb") as src_fh:
         for mid, channels in materials.items():
             for ch, spec in channels.items():
                 try:
-                    raw = _slice_channel(tar_bytes, spec)
+                    raw = _slice_channel(src_fh, spec)
                     img = Image.open(io.BytesIO(raw))
                     img.load()
                     resized = img.resize((target_px, target_px), Image.LANCZOS)
@@ -284,18 +297,17 @@ def derive_ktx2_tier(
         source_tier=source_tier,
         hf_token=hf_token,
     )
-    tar_bytes = src_tar_path.read_bytes()
     materials = src_rowmap.get("materials", {})
 
     n_ok = 0
     n_failed = 0
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        with TarWriter(out_tar_path) as tw:
+        with TarWriter(out_tar_path) as tw, src_tar_path.open("rb") as src_fh:
             for mid, channels in materials.items():
                 for ch, spec in channels.items():
                     try:
-                        raw = _slice_channel(tar_bytes, spec)
+                        raw = _slice_channel(src_fh, spec)
                         png_in = tmp_dir / "in.png"
                         ktx_out = tmp_dir / "out.ktx2"
                         png_in.write_bytes(raw)
