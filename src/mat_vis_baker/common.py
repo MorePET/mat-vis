@@ -6,6 +6,7 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -393,19 +394,79 @@ class MatVisBlock:
     upstream_id: str = ""
 
 
+# ── Layer 2: upstream verbatim mirror (ADR-0011 / mat-vis#152) ─
+#
+# Per-source, allowlisted passthrough of the upstream JSON response.
+# Explicitly NOT semver-stable: shape follows upstream and may shift.
+# Stripped from ``client.index()`` / ``client.search()`` results;
+# exposed only via ``client.upstream(source, material_id)``.
+
+
+@dataclass
+class UpstreamBlock:
+    """Verbatim upstream metadata, trimmed to a per-source allowlist.
+
+    ``source``: upstream identifier (``"ambientcg"`` / ``"polyhaven"`` / ...).
+    ``schema_version``: bumped when this block's CONTRACT (keys ``source`` /
+    ``fetched_at`` / ``raw``) changes, NOT when upstream adds a field.
+    ``fetched_at``: ISO-8601 UTC timestamp of the bake-time fetch, e.g.
+    ``"2026-04-20T16:00:00Z"``.
+    ``raw``: allowlisted subset of the upstream response. ``{}`` when the
+    allowlist emptied everything (preferred over ``None`` for a stable
+    downstream shape). ``None`` only when the record has no upstream
+    payload at all (should be rare).
+    """
+
+    source: str = ""
+    schema_version: int = 1
+    fetched_at: str | None = None
+    raw: dict | None = None
+
+
+def utc_now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 ``Z`` string.
+
+    Used as ``UpstreamBlock.fetched_at`` at bake time. Second precision is
+    plenty — the field is for downstream staleness diagnosis, not
+    sub-millisecond ordering.
+    """
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _filter_upstream(raw: dict, allowlist: frozenset[str]) -> dict:
+    """Return a shallow copy of ``raw`` keeping only keys in ``allowlist``.
+
+    Shallow by design: the allowlist is a single flat set of top-level keys.
+    Nested dicts (e.g. gpuopen's package metadata, ambientcg's
+    ``downloadFolders``) pass through verbatim when their top-level key is
+    allowed, or are dropped entirely when it isn't. Per-field pruning of
+    nested structures is a future concern — Phase C's goal is a blunt,
+    auditable filter, not a deep reshape.
+
+    Missing keys are not inserted (``None`` placeholders would bloat every
+    record with keys upstream has never had). Non-dict input returns ``{}``.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if k in allowlist}
+
+
 @dataclass
 class MaterialRecord:
     """Intermediate record passed between pipeline stages.
 
     Top-level carries bake-pipeline fields only (``id``, ``source``, tier /
-    channel / hash state). Everything semantic lives under ``mat_vis``. The
-    verbatim ``upstream`` block (Layer 2, ADR-0011) is added in Phase C
-    (mat-vis#152 phase-c).
+    channel / hash state). Semantic data splits between two layers:
+
+    - ``mat_vis`` (Layer 1): stable, unified, semver-stable across v0.6.x.
+    - ``upstream`` (Layer 2, ADR-0011): verbatim allowlisted mirror of the
+      upstream JSON. Shape follows upstream; NOT semver-stable.
     """
 
     id: str
     source: str
     mat_vis: MatVisBlock = field(default_factory=MatVisBlock)
+    upstream: UpstreamBlock | None = None
     available_tiers: list[str] = field(default_factory=list)
     maps: list[str] = field(default_factory=list)
     texture_paths: dict[str, Path] = field(default_factory=dict)

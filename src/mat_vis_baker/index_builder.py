@@ -6,6 +6,7 @@ Each entry is a v3 envelope (ADR-0011 / mat-vis#152):
       "id": ...,
       "source": ...,
       "mat_vis": { ... },          # Layer 1: stable curated contract
+      "upstream": { ... },          # Layer 2: allowlisted verbatim mirror
       "available_tiers": [...],
       "maps": [...],
       "texture_hashes": { ... },   # when present
@@ -20,8 +21,12 @@ record carries it (e.g. single-tier bakes) and omitted otherwise.
 Each source's catalog is written exactly once per bake. Concurrent
 bakes of different sources touch disjoint files, so no race is possible.
 
-Layer 2 (``upstream``) is added in Phase C of ADR-0011. It is NOT part
-of the v3 envelope emitted here — Phase A is the Layer-1 clean break.
+Layer 2 (``upstream``) is the per-source allowlisted mirror of the
+upstream JSON — added in Phase C of ADR-0011. When present, the key set
+is ``{source, schema_version, fetched_at, raw}``, always all four. Pre-v3
+records don't carry ``upstream`` at all; the client strips the key from
+``index()`` / ``search()`` results and exposes it only via
+``client.upstream(source, material_id)``.
 """
 
 from __future__ import annotations
@@ -42,6 +47,11 @@ def build_index(records: list[MaterialRecord], source: str) -> list[dict]:
     ``mat_vis`` is serialized via ``dataclasses.asdict`` so every nested
     key is present (with ``null`` where the extractor has no data). The
     stable key set is half of the Layer-1 contract.
+
+    ``upstream`` is serialized only when ``rec.upstream`` is set. When
+    present, the block's four keys (``source`` / ``schema_version`` /
+    ``fetched_at`` / ``raw``) are always all four so the stable-key-set
+    contract holds per-block.
     """
     entries: list[dict] = []
     for rec in records:
@@ -51,6 +61,8 @@ def build_index(records: list[MaterialRecord], source: str) -> list[dict]:
             "mat_vis": asdict(rec.mat_vis),
             "maps": rec.maps,
         }
+        if rec.upstream is not None:
+            entry["upstream"] = asdict(rec.upstream)
         if rec.available_tiers:
             entry["available_tiers"] = rec.available_tiers
         if rec.texture_hashes:

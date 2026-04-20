@@ -29,6 +29,12 @@ Hugging Face Datasets + tar archives ([ADR-0007](docs/decisions/0007-substrate-m
 Structural fix for four recurring bug classes (#79, #82, #98, #99) via
 atomic multi-file commits + immutable revisions.
 
+Also ships the **v3 index-schema** rollout — curated `mat_vis` block +
+verbatim `upstream` mirror per [ADR-0011](docs/decisions/0011-mat-vis-curated-plus-upstream-mirror.md)
+(mat-vis#152). Clean break: all semantic fields move under `mat_vis.*`;
+consumers must update accessor paths. A v3 client pointed at a v2 catalog
+raises `MatVisError` early with an upgrade hint, not silent empty results.
+
 ### Added
 
 - Reads from Hugging Face Datasets (`gerchowl/mat-vis`) by default.
@@ -38,6 +44,25 @@ atomic multi-file commits + immutable revisions.
   map keyed by tier to `{tar, rowmap}`. Scalar sources omit `tiers`.
 - First tagged release on the new substrate: `v2026.04.1` —
   4 sources (ambientcg 1965, polyhaven 753, gpuopen 2254, physicallybased 86).
+- **`mat_vis` curated block** on every catalog entry (ADR-0011 Layer 1):
+  `name`, `category`, `tags`, `description`, `physical.{dimensions_m, max_resolution_px}`,
+  `pbr.{color_rgb, roughness, metalness, ior, specular_f0, transmission, complex_ior}`,
+  `attribution.{authors, license_spdx, source_url}`, `dates.{published, updated}`,
+  `upstream_id`. Stable key set — missing upstream values are `null`, never absent.
+- **`upstream` verbatim mirror** per source (Layer 2): `{source, schema_version,
+  fetched_at, raw}`. `raw` is the allowlisted upstream response. Explicitly
+  **unstable** — not covered by semver. Stripped from every `index()` /
+  `search()` return value; access via `client.upstream(source, material_id)`
+  only.
+- `MatVisClient.upstream(source, material_id, tier="1k")` typed accessor.
+  Returns `{}` when the entry carries no upstream block (pre-rebake tags);
+  raises `UnknownMaterialError` on unknown ids; accepts name-lookup per
+  mat-vis#143.
+- CI schema-diff gate: `scripts/check_upstream_schema_drift.py` runs on
+  every bake, compares the candidate catalog's per-record key-set against
+  the previous HF release. New keys warn; removed canonical keys or
+  `mat_vis.*` presence regressions >5% fail the workflow.
+- `index-schema.json` bumped to v3 + `mat-vis-block-v3.json` sub-schema.
 
 ### Changed
 
@@ -72,6 +97,37 @@ atomic multi-file commits + immutable revisions.
 # alias on HF). Pin the data release explicitly.
 client = MatVisClient(tag="v2026.04.1")
 ```
+
+**Index schema v2 → v3 migration** (breaking; ADR-0011 / mat-vis#152):
+
+```python
+# Before (v2):
+entry["category"]           # "metal"
+entry["color_hex"]          # "#C0C0C0"
+entry["roughness"]          # 0.3
+entry["source_url"]         # "https://..."
+
+# After (v3):
+entry["mat_vis"]["category"]                 # "metal"
+entry["mat_vis"]["pbr"]["color_rgb"]         # [r, g, b] float, 0..1 (not hex)
+entry["mat_vis"]["pbr"]["roughness"]         # 0.3
+entry["mat_vis"]["attribution"]["source_url"] # "https://..."
+
+# New: verbatim upstream (unstable shape, explicit opt-in)
+raw = client.upstream("ambientcg", "Bricks097")
+raw["displayCategory"]      # upstream-shaped; source-specific; not semver-stable
+```
+
+Adapters (`to_threejs`, `to_gltf`, `export_mtlx`) still accept a flat
+`scalars` dict. If you were building that dict by hand from
+`entry["color_hex"]` / `entry["roughness"]`, rebuild it from the new
+`entry["mat_vis"]["pbr"]` shape (convert `color_rgb` → hex with
+`"#{:02X}{:02X}{:02X}".format(*[int(c*255) for c in rgb])`).
+
+**Pin `tag="v2026.04.1"` or newer.** The earlier `v2026.04.0` catalogs
+predate the v3 schema; running 0.6.0 against that tag raises with an
+upgrade hint rather than silently returning empty results. Consumers that
+cannot re-pin should stay on `mat-vis-client 0.5.x`.
 
 The installable (`pip install mat-vis-client==0.6.0`) and the zero-deps
 standalone (`clients/python/mat_vis_client_standalone.py`) expose the

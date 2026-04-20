@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mat_vis_client import MatVisClient
+from mat_vis_client import MatVisClient, UnknownMaterialError
 from mat_vis_client.client import _in_range
 from mat_vis_client.adapters import (
     to_threejs,
@@ -37,7 +37,7 @@ TINY_PNG = (
 
 
 MOCK_MANIFEST = {
-    "schema_version": 1,
+    "schema_version": 2,
     "version": 1,  # retained for tests asserting on the legacy field
     "release_tag": "v2026.04.0",
     "tiers": {
@@ -54,6 +54,29 @@ MOCK_MANIFEST = {
                 },
             },
         }
+    },
+    # v2 manifest-shape used by schema-validated paths (rowmap / upstream
+    # accessors). Tests in the tiers→sources nested-shape above still work
+    # for category/search filtering because search iterates per-source.
+    "sources": {
+        "ambientcg": {
+            "catalog": "ambientcg.json",
+            "tiers": {
+                "1k": {
+                    "tar": "ambientcg-1k.tar",
+                    "rowmap": "ambientcg-1k-rowmap.json",
+                },
+            },
+        },
+        "polyhaven": {
+            "catalog": "polyhaven.json",
+            "tiers": {
+                "1k": {
+                    "tar": "polyhaven-1k.tar",
+                    "rowmap": "polyhaven-1k-rowmap.json",
+                },
+            },
+        },
     },
 }
 
@@ -220,7 +243,7 @@ class TestInRange:
 class TestClientManifest:
     def test_manifest_loads_from_cache(self, mock_client):
         m = mock_client.manifest
-        assert m["schema_version"] == 1
+        assert m["schema_version"] == 2
         assert "tiers" in m
 
     def test_tiers(self, mock_client):
@@ -584,3 +607,121 @@ class TestLiveFetchTexture:
     def test_fetch_nonexistent_material_raises(self, live_client):
         with pytest.raises(KeyError):
             live_client.fetch_texture("ambientcg", "NONEXISTENT_XYZ", "color", "1k")
+
+
+# ── upstream accessor + strip (Phase C, mat-vis#152) ───────────
+
+
+def _index_with_upstream() -> list[dict]:
+    """Copy of MOCK_INDEX_AMBIENTCG with per-entry ``upstream`` blocks."""
+    out: list[dict] = []
+    for entry in MOCK_INDEX_AMBIENTCG:
+        enriched = dict(entry)
+        enriched["upstream"] = {
+            "source": "ambientcg",
+            "schema_version": 1,
+            "fetched_at": "2026-04-20T16:00:00Z",
+            "raw": {
+                "assetId": entry["id"],
+                "displayName": entry["mat_vis"]["name"],
+                "popularityScore": 0.5,
+            },
+        }
+        out.append(enriched)
+    return out
+
+
+class TestClientUpstreamAccessor:
+    @patch("mat_vis_client.client._get_json")
+    def test_index_strips_upstream_key(self, mock_get, mock_client):
+        """``client.index(source)`` never returns the ``upstream`` key —
+        it's explicitly not part of the stable query surface."""
+        mock_get.return_value = _index_with_upstream()
+        entries = mock_client.index("ambientcg")
+        assert len(entries) == 3
+        for e in entries:
+            assert "upstream" not in e
+            # mat_vis is still there — Layer-1 is the query surface.
+            assert "mat_vis" in e
+
+    @patch("mat_vis_client.client._get_json")
+    def test_index_strip_does_not_mutate_cache(self, mock_get, mock_client):
+        """Stripping returns a shallow copy — the cached index keeps
+        the ``upstream`` key so :meth:`upstream` can read it."""
+        mock_get.return_value = _index_with_upstream()
+        _ = mock_client.index("ambientcg")
+        # Internal cache kept verbatim
+        raw = mock_client._load_index_raw("ambientcg")
+        assert all("upstream" in e for e in raw)
+
+    @patch("mat_vis_client.client._get_json")
+    def test_search_strips_upstream_key(self, mock_get, mock_client):
+        mock_get.return_value = _index_with_upstream()
+        results = mock_client.search(source="ambientcg")
+        assert len(results) == 3
+        for r in results:
+            assert "upstream" not in r
+
+    @patch("mat_vis_client.client._get_json")
+    def test_upstream_returns_source_shaped_dict(self, mock_get, mock_client):
+        mock_get.side_effect = [MOCK_ROWMAP, _index_with_upstream()]
+        raw = mock_client.upstream("ambientcg", "Rock064", "1k")
+        assert raw["assetId"] == "Rock064"
+        assert raw["displayName"] == "Rough Granite"
+
+    @patch("mat_vis_client.client._get_json")
+    def test_upstream_unknown_material_raises(self, mock_get, mock_client):
+        mock_get.side_effect = [MOCK_ROWMAP, _index_with_upstream()]
+        with pytest.raises(UnknownMaterialError):
+            mock_client.upstream("ambientcg", "DEFINITELY_NOT_A_MATERIAL", "1k")
+
+    @patch("mat_vis_client.client._get_json")
+    def test_upstream_returns_empty_dict_when_missing(self, mock_get, mock_client):
+        """Pre-v3 catalog entries (no ``upstream`` block) yield ``{}``, not
+        an error — callers can check for truthiness rather than branching
+        on the dataset version."""
+        # Index without any upstream blocks (pre-v3 / Phase A envelope).
+        mock_get.side_effect = [MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG]
+        raw = mock_client.upstream("ambientcg", "Rock064", "1k")
+        assert raw == {}
+
+
+class TestV2CatalogGuard:
+    """Cross-stack review fix: a v3 client pointed at a v2 catalog must
+    fail loudly with an upgrade hint, not silently return empty from
+    ``search()`` / ``categories()`` because every ``mat_vis`` lookup misses.
+    """
+
+    @patch("mat_vis_client.client._get_json")
+    def test_v2_shaped_catalog_raises_loudly(self, mock_get, mock_client):
+        from mat_vis_client import MatVisError
+
+        # v2 shape: top-level category + color_hex, no mat_vis block.
+        v2_catalog = [
+            {"id": "Rock064", "source": "ambientcg", "category": "stone", "color_hex": "#888"},
+            {"id": "Metal032", "source": "ambientcg", "category": "metal", "roughness": 0.3},
+        ]
+        mock_get.return_value = v2_catalog
+        with pytest.raises(MatVisError, match="predates ADR-0011"):
+            mock_client.index("ambientcg")
+
+    @patch("mat_vis_client.client._get_json")
+    def test_v3_shaped_catalog_passes(self, mock_get, mock_client):
+        """v3 entries carrying a ``mat_vis`` block are accepted without noise."""
+        v3_catalog = [
+            {
+                "id": "Rock064",
+                "source": "ambientcg",
+                "mat_vis": {"name": "Rough Granite", "category": "stone"},
+            }
+        ]
+        mock_get.return_value = v3_catalog
+        entries = mock_client.index("ambientcg")
+        assert entries[0]["mat_vis"]["category"] == "stone"
+
+    @patch("mat_vis_client.client._get_json")
+    def test_empty_catalog_is_allowed(self, mock_get, mock_client):
+        """Empty list is ambiguous but harmless — no silent failure surface."""
+        mock_get.return_value = []
+        entries = mock_client.index("ambientcg")
+        assert entries == []
