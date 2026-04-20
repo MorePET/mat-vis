@@ -7,6 +7,7 @@ Usage:
     dagger call test                 # pytest
     dagger call smoke                # verify pyarrow import (slim)
     dagger call smoke-materialx      # verify MaterialX import (heavy)
+    dagger call smoke-baker          # verify hf-tar baker container (#135)
     dagger call probe-sources        # verify upstream API connectivity
     dagger call test-all             # lint + test + smoke + probe
     dagger call test-client-python   # pytest on Python reference client
@@ -434,39 +435,103 @@ class MatVisCi:
     # ── bake pipeline ─────────────────────────────────────────────
 
     def _baker_container(
-        self, context: dagger.Directory, with_ktx2: bool = False
+        self,
+        context: dagger.Directory,
+        with_ktx2: bool = False,
+        hf_token: dagger.Secret | None = None,
     ) -> dagger.Container:
-        """Baker container with code + gh CLI + git. Optionally with toktx for KTX2."""
-        pip_cache = dag.cache_volume("pip-cache")
+        """Baker container for hf-bake / hf-derive / hf-derive-ktx2 (#135).
+
+        Parity target: ``.github/workflows/derive.yml`` — Linux x86_64,
+        Python 3.12, ``uv sync --all-extras`` on the repo, and (when
+        ``with_ktx2=True``) KTX-Software 4.4.0 ``.deb`` installed so
+        ``toktx`` is on ``PATH``.
+
+        Env:
+          - ``PYTHONUNBUFFERED=1`` — heartbeat / OTLP logs flush live
+            (matches #148 workflow fix).
+          - ``HF_TOKEN`` — injected from a Dagger secret when provided;
+            never inlined. Bake / derive steps in #136 / #137 read this
+            to push atomic commits to the HF dataset.
+
+        Reuse: #136 (port ``hf-bake``) and #137 (port ``hf-derive`` and
+        ``hf-derive-ktx2``) both call this helper. Pass ``with_ktx2=True``
+        for the KTX2 derive leg; ``False`` otherwise.
+        """
+        uv_cache = dag.cache_volume("uv-cache")
+        apt_cache = dag.cache_volume("apt-cache")
+
         ctr = (
             dag.container()
             .from_("python:3.12-slim")
+            .with_env_variable("DEBIAN_FRONTEND", "noninteractive")
+            .with_mounted_cache("/var/cache/apt", apt_cache)
             .with_exec(["apt-get", "update", "-qq"])
-            .with_exec(["apt-get", "install", "-y", "-qq", "git", "curl"])
+            .with_exec(["apt-get", "install", "-y", "-qq", "git", "curl", "ca-certificates"])
+            # Install uv via the astral-sh standalone installer — matches
+            # the ``astral-sh/setup-uv@v5`` action used in derive.yml.
             .with_exec(
                 [
                     "sh",
                     "-c",
-                    "curl -fsSL https://github.com/cli/cli/releases/download/v2.74.1/gh_2.74.1_linux_amd64.tar.gz | tar xz --strip-components=2 -C /usr/local/bin gh_2.74.1_linux_amd64/bin/gh",
+                    "curl -LsSf https://astral.sh/uv/install.sh | sh && "
+                    "install -m 0755 /root/.local/bin/uv /usr/local/bin/uv",
                 ]
             )
         )
+
         if with_ktx2:
-            # Install toktx from KTX-Software .deb (Khronos)
+            # Khronos KTX-Software 4.4.0 .deb — byte-for-byte the URL
+            # derive.yml uses, so toktx output is identical to CI.
             ctr = ctr.with_exec(
                 [
                     "sh",
                     "-c",
-                    "apt-get install -y -qq libgomp1 ca-certificates && "
-                    "curl -fsSL -o /tmp/ktx.deb https://github.com/KhronosGroup/KTX-Software/releases/download/v4.4.0/KTX-Software-4.4.0-Linux-x86_64.deb && "
-                    "dpkg -i /tmp/ktx.deb && rm /tmp/ktx.deb",
+                    "apt-get install -y -qq libgomp1 && "
+                    "curl -fsSL -o /tmp/ktx.deb "
+                    "https://github.com/KhronosGroup/KTX-Software/releases/download/"
+                    "v4.4.0/KTX-Software-4.4.0-Linux-x86_64.deb && "
+                    "dpkg -i /tmp/ktx.deb && rm /tmp/ktx.deb && "
+                    "toktx --version",
                 ]
             )
-        return (
-            ctr.with_mounted_cache("/root/.cache/pip", pip_cache)
+
+        ctr = (
+            ctr.with_env_variable("PYTHONUNBUFFERED", "1")
+            .with_mounted_cache("/root/.cache/uv", uv_cache)
             .with_mounted_directory("/app", context)
             .with_workdir("/app")
-            .with_exec(["pip", "install", "--quiet", "-e", ".[baker]"])
+            .with_exec(["uv", "sync", "--all-extras"])
+        )
+
+        if hf_token is not None:
+            ctr = ctr.with_secret_variable("HF_TOKEN", hf_token)
+
+        return ctr
+
+    @function
+    async def smoke_baker(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+    ) -> str:
+        """Smoke-test the baker container (#135).
+
+        Builds ``_baker_container(with_ktx2=True)`` and runs
+        ``mat-vis-baker --help`` plus ``mat-vis-baker merge-shards --help``
+        under ``uv run``. Exits 0 iff the apt + KTX deb + ``uv sync`` all
+        succeed and the CLI (including the shard reassembly subcommand
+        added in #134) is importable. No network side effects — nothing
+        touches HF.
+        """
+        context = src or dag.host().directory(".")
+        ctr = self._baker_container(context, with_ktx2=True)
+        top = await ctr.with_exec(["uv", "run", "mat-vis-baker", "--help"]).stdout()
+        merge = await ctr.with_exec(
+            ["uv", "run", "mat-vis-baker", "merge-shards", "--help"]
+        ).stdout()
+        return (
+            f"=== mat-vis-baker --help ===\n{top}\n"
+            f"=== mat-vis-baker merge-shards --help ===\n{merge}"
         )
 
     @function
