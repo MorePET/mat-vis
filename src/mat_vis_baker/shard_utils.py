@@ -39,6 +39,16 @@ def channel_in_shard(material_id: str, channel: str, shard_index: int, shard_tot
     return channel_shard(material_id, channel, shard_total) == shard_index
 
 
+def material_in_shard(material_id: str, shard_index: int, shard_total: int) -> bool:
+    """True iff ``material_id`` belongs to shard ``shard_index``.
+
+    Used by ``hf-bake`` where the unit of work is a material (all of
+    its channels are processed together). Channel-level sharding
+    doesn't make sense mid-bake because the fetcher doesn't know the
+    channel list until after it downloads the material."""
+    return channel_in_shard(material_id, "", shard_index, shard_total)
+
+
 def validate_shard_args(shard_index: int | None, shard_total: int | None) -> tuple[int, int] | None:
     """Normalise CLI shard args. Returns ``None`` when unsharded, else
     ``(index, total)``. Rejects partial specs (only one flag provided)."""

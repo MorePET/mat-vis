@@ -197,6 +197,7 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
     """Bake (source, tier) → atomic HF push. The ADR-0007 replacement
     for ``cmd_all``'s parquet/GH-Releases path."""
     from mat_vis_baker.hf_bake import bake_one
+    from mat_vis_baker.shard_utils import validate_shard_args
 
     tier = args.tier
     if args.source == "physicallybased" or tier == "scalar":
@@ -204,6 +205,7 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
         # passed here is a user error.
         tier = "scalar"
 
+    shard = validate_shard_args(args.shard_index, args.shard_total)
     result = bake_one(
         source=args.source,
         tier=tier,
@@ -214,6 +216,7 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
         offset=args.offset,
         batch_size=args.batch_size,
         dry_run=args.dry_run,
+        shard=shard,
     )
     log.info("hf-bake result: %s", result)
     if "error" in result:
@@ -335,6 +338,18 @@ def main() -> int:
         "--dry-run",
         action="store_true",
         help="Build tar + manifest locally; skip the HF push.",
+    )
+    p_hf.add_argument(
+        "--shard-index",
+        type=int,
+        default=None,
+        help="0-based shard index. Requires --shard-total.",
+    )
+    p_hf.add_argument(
+        "--shard-total",
+        type=int,
+        default=None,
+        help="Total number of shards. Requires --shard-index.",
     )
 
     p_hd = sub.add_parser(
