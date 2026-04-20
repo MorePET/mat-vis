@@ -175,6 +175,52 @@ class MaterialNotFoundError(NotFoundError):
     kind = "material"
 
 
+class UnknownMaterialError(MaterialNotFoundError):
+    """``material_id`` is not present in ``client.index(source)``.
+
+    Distinct from :class:`MaterialNotStagedError`: the name/id is wrong or the
+    material was never mirrored, not just unbaked. Subclasses
+    :class:`MaterialNotFoundError` so existing ``except MaterialNotFoundError``
+    guards still fire.
+    """
+
+
+class MaterialNotStagedError(MatVisError):
+    """The material exists in the source's index but no release asset was baked.
+
+    Typical when a new index entry has landed upstream but the ``bake`` / ``derive``
+    pipeline hasn't re-run yet. Caller should wait for or request a re-bake rather
+    than treating this as a lookup failure.
+    """
+
+    def __init__(self, source: str, material_id: str, tier: str) -> None:
+        self.source = source
+        self.material_id = material_id
+        self.tier = tier
+        super().__init__(
+            f"material {material_id!r} exists in {source!r} index "
+            f"but is not staged for tier {tier!r}. Needs a re-bake."
+        )
+
+
+class AmbiguousMaterialError(MatVisError):
+    """A human-readable name resolves to more than one index entry in ``source``.
+
+    Raised by the name-resolution path in :meth:`fetch_all_textures` /
+    :meth:`fetch_texture`; pass the canonical ``id`` instead to disambiguate.
+    """
+
+    def __init__(self, source: str, name: str, candidates: list[str]) -> None:
+        self.source = source
+        self.name = name
+        self.candidates = sorted(candidates)
+        bullets = "\n".join(f"  - {c}" for c in self.candidates)
+        super().__init__(
+            f"name {name!r} matches {len(self.candidates)} materials "
+            f"in source {source!r}:\n{bullets}\nPass the id directly to disambiguate."
+        )
+
+
 class SourceNotFoundError(NotFoundError):
     kind = "source"
 
@@ -969,6 +1015,76 @@ class MatVisClient:
 
     # ── Bulk operations ─────────────────────────────────────────
 
+    @staticmethod
+    def _normalize_name(s: str) -> str:
+        """Case/whitespace-fold a name for index lookup. NFKC + casefold."""
+        import unicodedata
+
+        return unicodedata.normalize("NFKC", s).strip().casefold()
+
+    def _resolve_material_id(self, source: str, material_id: str, tier: str) -> str:
+        """Resolve ``material_id`` to its canonical rowmap key.
+
+        Resolution order, for the UX described in mat-vis#143:
+
+        1. Direct rowmap hit → ``material_id`` is already a canonical id.
+        2. Exact ``id`` match in the per-source index but not in the rowmap
+           → :class:`MaterialNotStagedError` (needs a re-bake).
+        3. Normalized-name match against the index
+           (:meth:`_normalize_name`) — resolve to that entry's ``id``:
+           a. >1 match → :class:`AmbiguousMaterialError` (mat-vis#144).
+           b. 1 match, id in rowmap → return it.
+           c. 1 match, id missing from rowmap → :class:`MaterialNotStagedError`.
+        4. Nothing matches → :class:`UnknownMaterialError`.
+        """
+        rm = self.rowmap(source, tier)
+        materials = rm.get("materials", {})
+        if material_id in materials:
+            return material_id
+
+        try:
+            idx = self.index(source)
+        except MatVisError:
+            idx = []
+        # Defend against tests / fallbacks where index() returns a non-list
+        # (e.g. a cached rowmap got wired in by accident) — treat as empty.
+        if not isinstance(idx, list):
+            idx = []
+
+        norm_query = self._normalize_name(material_id)
+        by_id: dict | None = None
+        by_name: list[dict] = []
+        for entry in idx:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("id") == material_id:
+                by_id = entry
+            entry_name = entry.get("name") or ""
+            if entry_name and self._normalize_name(entry_name) == norm_query:
+                by_name.append(entry)
+
+        if by_id is not None:
+            raise MaterialNotStagedError(source=source, material_id=material_id, tier=tier)
+
+        if len(by_name) > 1:
+            raise AmbiguousMaterialError(
+                source=source,
+                name=material_id,
+                candidates=[e.get("id", "") for e in by_name if e.get("id")],
+            )
+
+        if len(by_name) == 1:
+            resolved = by_name[0].get("id", "")
+            if resolved in materials:
+                return resolved
+            raise MaterialNotStagedError(source=source, material_id=resolved, tier=tier)
+
+        raise UnknownMaterialError(
+            key=material_id,
+            available=sorted(materials.keys()),
+            context=f"{source}/{tier}",
+        )
+
     def fetch_all_textures(
         self,
         source: str,
@@ -979,12 +1095,19 @@ class MatVisClient:
     ) -> dict[str, bytes]:
         """Fetch all texture channels for a material.
 
+        ``material_id`` may be the canonical id (UUID/slug used as the rowmap
+        key) or a human-readable name from the source's index; the latter is
+        resolved via :meth:`_resolve_material_id` (mat-vis#143). Unknown ids,
+        un-staged materials, and ambiguous names raise typed errors rather
+        than returning ``{}`` silently (mat-vis#141 / #144).
+
         Returns a dict mapping channel name to PNG bytes.
         """
         if tag is not None and tag != self._tag:
             return self.at(tag).fetch_all_textures(source, material_id, tier)
-        chs = self.channels(source, material_id, tier)
-        return {ch: self.fetch_texture(source, material_id, ch, tier) for ch in chs}
+        resolved = self._resolve_material_id(source, material_id, tier)
+        chs = self.channels(source, resolved, tier)
+        return {ch: self.fetch_texture(source, resolved, ch, tier) for ch in chs}
 
     def prefetch(
         self,
@@ -1113,15 +1236,14 @@ class MatVisClient:
     ) -> dict[str, dict]:
         """Get raw rowmap offsets for a material (for DIY consumers).
 
+        ``material_id`` may be a canonical id or a human-readable name
+        (see :meth:`_resolve_material_id`).
+
         Returns a dict of channel -> {offset, length, tar_file}.
         """
+        resolved = self._resolve_material_id(source, material_id, tier)
         rm = self.rowmap(source, tier)
-        mat = _lookup(
-            rm.get("materials", {}),
-            material_id,
-            kind="material",
-            context=f"{source}/{tier}",
-        )
+        mat = rm["materials"][resolved]
         tar_file = rm.get("tar_file", "")
         return {
             ch: {
@@ -1152,25 +1274,21 @@ class MatVisClient:
         """
         if tag is not None and tag != self._tag:
             return self.at(tag).fetch_texture(source, material_id, channel, tier)
+        resolved = self._resolve_material_id(source, material_id, tier)
         # Check cache first (tag-scoped)
-        cache_path = self._cache_scope / source / tier / material_id / f"{channel}.png"
+        cache_path = self._cache_scope / source / tier / resolved / f"{channel}.png"
         cached = self._cache_read_bytes(cache_path)
         if cached is not None:
             return cached
 
-        # Find in rowmap
+        # Find in rowmap (resolver guarantees membership)
         rm = self.rowmap(source, tier)
-        mat = _lookup(
-            rm.get("materials", {}),
-            material_id,
-            kind="material",
-            context=f"{source}/{tier}",
-        )
+        mat = rm["materials"][resolved]
         rng = _lookup(
             mat,
             channel,
             kind="channel",
-            context=f"{source}/{tier}/{material_id}",
+            context=f"{source}/{tier}/{resolved}",
         )
         offset = rng["offset"]
         length = rng["length"]
@@ -1180,11 +1298,11 @@ class MatVisClient:
         # and OOM the client; see 0.3.1 security review.
         if not isinstance(length, int) or length <= 0:
             raise MatVisError(
-                f"invalid rowmap entry for {source}/{material_id}/{channel}: length={length!r}"
+                f"invalid rowmap entry for {source}/{resolved}/{channel}: length={length!r}"
             )
         if length > DEFAULT_MAX_FETCH_BYTES:
             raise MatVisError(
-                f"rowmap claims {_fmt_size(length)} for {source}/{material_id}/{channel}, "
+                f"rowmap claims {_fmt_size(length)} for {source}/{resolved}/{channel}, "
                 f"over the {_fmt_size(DEFAULT_MAX_FETCH_BYTES)} safety cap. "
                 "Raise MAT_VIS_MAX_FETCH_SIZE to override."
             )
@@ -1203,7 +1321,7 @@ class MatVisClient:
         if not (data.startswith(_PNG) or data.startswith(_KTX2)):
             raise ValueError(
                 f"Expected PNG or KTX2 bytes, got {data[:12]!r} "
-                f"({source}/{material_id}/{channel} @ {tier})"
+                f"({source}/{resolved}/{channel} @ {tier})"
             )
 
         # Cache (tag-scoped; no-op if cache=False)

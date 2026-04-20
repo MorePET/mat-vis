@@ -1,8 +1,22 @@
 """GPUOpen MaterialX Library fetcher.
 
-API: https://api.matlib.gpuopen.com/api/packages/?limit=100&offset=0
+API: https://api.matlib.gpuopen.com/api
 License: MIT (©2022 AMD; verified via matlib.gpuopen.com per-material display)
 Format: ZIP with .mtlx + textures. Some materials have layered graphs.
+
+The gpuopen API is two-level:
+
+- ``/materials/`` — 454 material records with semantic ``title`` / ``tags`` /
+  ``category`` (the last two are UUIDs pointing at ``/categories/`` and
+  ``/tags/`` lookup tables).
+- ``/packages/`` — 2254 tier/bit-depth variants. Each material has several
+  packages (``"1k 8b"``, ``"1k 16b"``, ``"2k 8b"``, ...); the package is
+  what we download, but the material is what the gpuopen website links to
+  and what users identify by UUID (mat-vis#142).
+
+Prior to mat-vis#142 this fetcher iterated ``/packages/`` directly and used
+each package as a material — which produced 2254 index entries with
+``name="1k 8b"`` / ``category="other"`` / ``tags=[]``.
 """
 
 from __future__ import annotations
@@ -33,27 +47,79 @@ MAX_WORKERS = 10
 # ── discovery ───────────────────────────────────────────────────
 
 
-def discover(*, session: requests.Session | None = None) -> list[dict]:
-    """Paginate the gpuopen packages API."""
-    s = session or requests.Session()
-    all_packages: list[dict] = []
+def _paginate(path: str, session: requests.Session) -> list[dict]:
+    """Walk a DRF-paginated endpoint and collect every ``results`` entry."""
+    out: list[dict] = []
     offset = 0
-
     while True:
-        url = f"{API_BASE}/packages/?limit={PAGE_SIZE}&offset={offset}"
-        resp = retry_request(url, session=s)
+        url = f"{API_BASE}{path}?limit={PAGE_SIZE}&offset={offset}"
+        resp = retry_request(url, session=session)
         data = resp.json()
         results = data.get("results", [])
         if not results:
             break
-        all_packages.extend(results)
-        log.info("discovered %d packages (offset=%d)", len(all_packages), offset)
+        out.extend(results)
         if len(results) < PAGE_SIZE:
             break
         offset += PAGE_SIZE
+    return out
 
-    log.info("total: %d packages", len(all_packages))
-    return all_packages
+
+def discover(*, session: requests.Session | None = None) -> list[dict]:
+    """Return gpuopen materials enriched with resolved category/tag titles
+    and the full package dict for each variant.
+
+    Each entry carries:
+
+    - Everything the ``/materials/`` endpoint returns (``id``, ``title``,
+      ``packages`` as UUIDs, ``category`` as UUID, ``tags`` as UUIDs, ...).
+    - ``_category_title``: category title resolved via ``/categories/``.
+    - ``_tag_titles``: list of tag titles resolved via ``/tags/``.
+    - ``_packages_detail``: list of package dicts (``{id, label, file_url, ...}``)
+      for this material, looked up from ``/packages/``.
+
+    Underscore-prefixed keys are fetcher-internal; they are not written into
+    the index JSON.
+    """
+    s = session or requests.Session()
+
+    materials = _paginate("/materials/", s)
+    packages = {p["id"]: p for p in _paginate("/packages/", s) if p.get("id")}
+    categories = {c["id"]: c.get("title", "") for c in _paginate("/categories/", s) if c.get("id")}
+    tags = {t["id"]: t.get("title", "") for t in _paginate("/tags/", s) if t.get("id")}
+
+    log.info(
+        "discovered: %d materials, %d packages, %d categories, %d tags",
+        len(materials),
+        len(packages),
+        len(categories),
+        len(tags),
+    )
+
+    for m in materials:
+        m["_category_title"] = categories.get(m.get("category", ""), "")
+        m["_tag_titles"] = [tags[t] for t in m.get("tags") or [] if t in tags and tags[t]]
+        m["_packages_detail"] = [
+            packages[pid] for pid in m.get("packages") or [] if pid in packages
+        ]
+
+    return materials
+
+
+def _pick_package_for_tier(mat: dict, tier: str) -> dict | None:
+    """Pick the best package for the requested tier.
+
+    gpuopen package labels are ``"<tier> <bit-depth>"`` (``"1k 8b"``, ``"2k 16b"``, ...).
+    Prefer 8-bit (smaller, matches the mat-vis PBR PNG pipeline) over 16-bit.
+    """
+    prefix = f"{tier} "
+    candidates = [
+        p for p in mat.get("_packages_detail", []) if p.get("label", "").startswith(prefix)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: ("16b" in p.get("label", ""), p.get("label", "")))
+    return candidates[0]
 
 
 # ── download + extract ──────────────────────────────────────────
@@ -138,22 +204,42 @@ def _extract_from_zip(
 
 
 def _fetch_one(
-    pkg: dict,
+    mat: dict,
     tier: str,
     output_dir: Path,
     mtlx_dir: Path | None,
 ) -> MaterialRecord:
-    """Download and extract a single gpuopen package. Called from thread pool."""
-    mid = pkg.get("id", "")
-    name = pkg.get("label", mid)
+    """Download + extract a single gpuopen material for the given tier.
+
+    Works from the enriched material dict produced by :func:`discover`:
+    picks the package whose ``label`` matches the tier, downloads it, then
+    writes textures under ``output_dir / material_id``. Called from the
+    thread pool in :func:`fetch`.
+    """
+    mid = mat.get("id", "")
+    name = mat.get("title") or mid
+    category = normalize_category(mat.get("_category_title", ""))
+    tags = list(mat.get("_tag_titles", []))
+
+    failed = lambda: MaterialRecord(  # noqa: E731 — local shorthand
+        id=mid,
+        source="gpuopen",
+        name=name,
+        category=category,
+        tags=tags,
+        status="failed",
+    )
+
+    pkg = _pick_package_for_tier(mat, tier)
+    if pkg is None:
+        log.warning("%s (%s): no package matching tier %s", mid, name, tier)
+        return failed()
 
     try:
         dl_url = pkg.get("file_url")
         if not dl_url:
-            log.warning("%s: no file_url", mid)
-            return MaterialRecord(
-                id=mid, source="gpuopen", name=name, category="other", status="failed"
-            )
+            log.warning("%s: package %s has no file_url", mid, pkg.get("id"))
+            return failed()
 
         resp = retry_request(dl_url)
         mtlx_path, textures = _extract_from_zip(resp.content, mid, output_dir, mtlx_dir=mtlx_dir)
@@ -163,14 +249,7 @@ def _fetch_one(
 
         if not textures and not mtlx_path:
             log.warning("%s: no textures or mtlx in ZIP", mid)
-            return MaterialRecord(
-                id=mid, source="gpuopen", name=name, category="other", status="failed"
-            )
-
-        cat = normalize_category(pkg.get("category", ""))
-        tags = pkg.get("tags", [])
-        if isinstance(tags, str):
-            tags = [t.strip() for t in tags.split(",") if t.strip()]
+            return failed()
 
         texture_paths = dict(textures)
         if mtlx_path:
@@ -180,11 +259,11 @@ def _fetch_one(
             id=mid,
             source="gpuopen",
             name=name,
-            category=cat,
+            category=category,
             tags=tags,
             source_url=f"https://matlib.gpuopen.com/main/materials/all?material={mid}",
             source_license="MIT",
-            last_updated=pkg.get("updated_date", ""),
+            last_updated=mat.get("updated_date", ""),
             available_tiers=[tier] if textures else [],
             maps=sorted(textures.keys()),
             texture_paths=texture_paths,
@@ -193,9 +272,7 @@ def _fetch_one(
 
     except Exception:
         log.exception("%s: fetch failed", mid)
-        return MaterialRecord(
-            id=mid, source="gpuopen", name=name, category="other", status="failed"
-        )
+        return failed()
 
 
 # ── main fetch ──────────────────────────────────────────────────
@@ -214,11 +291,11 @@ def fetch(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     s = session or requests.Session()
-    packages = discover(session=s)
+    materials = discover(session=s)
     if offset:
-        packages = packages[offset:]
+        materials = materials[offset:]
     if limit:
-        packages = packages[:limit]
+        materials = materials[:limit]
 
     output_dir.mkdir(parents=True, exist_ok=True)
     records: list[MaterialRecord] = []
@@ -227,7 +304,7 @@ def fetch(
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = {
-            pool.submit(_fetch_one, pkg, tier, output_dir, mtlx_dir): pkg for pkg in packages
+            pool.submit(_fetch_one, mat, tier, output_dir, mtlx_dir): mat for mat in materials
         }
         for i, future in enumerate(as_completed(futures), 1):
             rec = future.result()
@@ -235,10 +312,10 @@ def fetch(
             if rec.status == "failed":
                 failed += 1
             elif rec.needs_mtlx_bake:
-                log.info("%s: mtlx only (needs bake) [%d/%d]", rec.id, i, len(packages))
+                log.info("%s: mtlx only (needs bake) [%d/%d]", rec.id, i, len(materials))
             else:
                 ok += 1
-                log.info("%s: ok (%d textures) [%d/%d]", rec.id, len(rec.maps), i, len(packages))
+                log.info("%s: ok (%d textures) [%d/%d]", rec.id, len(rec.maps), i, len(materials))
 
-    log.info("gpuopen: %d ok, %d failed / %d total", ok, failed, len(packages))
+    log.info("gpuopen: %d ok, %d failed / %d total", ok, failed, len(materials))
     return records
