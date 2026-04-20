@@ -35,7 +35,6 @@ from PIL import Image
 
 from mat_vis_baker.common import TIER_TO_PX
 from mat_vis_baker.hf_push import push_to_hf
-from mat_vis_baker.manifest import merge_remote_manifest
 from mat_vis_baker.tar_writer import TarWriter
 
 log = logging.getLogger("mat-vis-baker.hf_derive")
@@ -106,21 +105,6 @@ def _slice_channel(tar_bytes_or_fh, spec: dict) -> bytes:
         return bytes(tar_bytes_or_fh[lo : lo + length])
     tar_bytes_or_fh.seek(lo)
     return tar_bytes_or_fh.read(length)
-
-
-def _patch_catalog_tiers(
-    catalog: list[dict], material_ids: set[str], added_tier: str
-) -> list[dict]:
-    """Add ``added_tier`` to ``available_tiers`` for every entry whose id
-    is in ``material_ids``. Returns a new list; does not mutate input."""
-    out = []
-    for entry in catalog:
-        new_entry = dict(entry)
-        if new_entry.get("id") in material_ids:
-            tiers = sorted(set(new_entry.get("available_tiers") or []) | {added_tier})
-            new_entry["available_tiers"] = tiers
-        out.append(new_entry)
-    return out
 
 
 # ── parallel pipeline ─────────────────────────────────────────
@@ -224,8 +208,6 @@ def derive_smaller_tier(
     out_rowmap_name = f"{source}-{target_tier}-rowmap.json"
     out_tar_path = work_dir / out_tar_name
     out_rowmap_path = work_dir / out_rowmap_name
-    catalog_path = work_dir / f"{source}.json"
-    manifest_path = work_dir / "release-manifest.json"
 
     t0 = time.monotonic()
     log.info(
@@ -269,37 +251,6 @@ def derive_smaller_tier(
     }
     out_rowmap_path.write_text(json.dumps(rowmap, indent=2) + "\n")
 
-    from mat_vis_baker.manifest import _download_json
-
-    remote_catalog = (
-        _download_json(
-            repo_id=repo_id, revision=release_tag, path=f"{source}.json", hf_token=hf_token
-        )
-        or []
-    )
-    produced = set(new_materials.keys())
-    patched_catalog = _patch_catalog_tiers(remote_catalog, produced, target_tier)
-    catalog_path.write_text(json.dumps(patched_catalog, indent=2, ensure_ascii=False) + "\n")
-
-    manifest = merge_remote_manifest(
-        repo_id=repo_id,
-        revision=release_tag,
-        release_tag=release_tag,
-        patch={
-            "sources": {
-                source: {
-                    "catalog": f"{source}.json",
-                    "materials_count": len(patched_catalog),
-                    "tiers": {
-                        target_tier: {"tar": out_tar_name, "rowmap": out_rowmap_name},
-                    },
-                }
-            }
-        },
-        hf_token=hf_token,
-    )
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-
     log.info(
         "PERF derive: %.1fs, %d ok / %d failed, out_tar=%.1f MB",
         time.monotonic() - t0,
@@ -310,11 +261,12 @@ def derive_smaller_tier(
     if dry_run:
         return {"dry_run": True, "ok": n_ok, "failed": n_failed}
 
+    # Only push the tar + its rowmap. No catalog/manifest touch —
+    # tier presence is discovered from the tree listing by clients
+    # (removes the merge-race class that bit the earlier matrix).
     sha = push_to_hf(
         repo_id=repo_id,
         files=[
-            (manifest_path, "release-manifest.json"),
-            (catalog_path, f"{source}.json"),
             (out_tar_path, out_tar_name),
             (out_rowmap_path, out_rowmap_name),
         ],
@@ -394,8 +346,6 @@ def derive_ktx2_tier(
     (work_dir / out_subdir_name).mkdir(exist_ok=True)
     out_tar_path = work_dir / out_subdir_name / out_tar_name
     out_rowmap_path = work_dir / out_subdir_name / out_rowmap_name
-    catalog_path = work_dir / f"{source}.json"
-    manifest_path = work_dir / "release-manifest.json"
 
     t0 = time.monotonic()
     log.info(
@@ -439,40 +389,6 @@ def derive_ktx2_tier(
     }
     out_rowmap_path.write_text(json.dumps(rowmap, indent=2) + "\n")
 
-    from mat_vis_baker.manifest import _download_json
-
-    remote_catalog = (
-        _download_json(
-            repo_id=repo_id, revision=release_tag, path=f"{source}.json", hf_token=hf_token
-        )
-        or []
-    )
-    produced = set(new_materials.keys())
-    patched_catalog = _patch_catalog_tiers(remote_catalog, produced, target_tier)
-    catalog_path.write_text(json.dumps(patched_catalog, indent=2, ensure_ascii=False) + "\n")
-
-    manifest = merge_remote_manifest(
-        repo_id=repo_id,
-        revision=release_tag,
-        release_tag=release_tag,
-        patch={
-            "sources": {
-                source: {
-                    "catalog": f"{source}.json",
-                    "materials_count": len(patched_catalog),
-                    "tiers": {
-                        target_tier: {
-                            "tar": out_tar_in_repo,
-                            "rowmap": out_rowmap_in_repo,
-                        },
-                    },
-                }
-            }
-        },
-        hf_token=hf_token,
-    )
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-
     log.info(
         "PERF ktx2: %.1fs, %d ok / %d failed, out_tar=%.1f MB",
         time.monotonic() - t0,
@@ -483,11 +399,11 @@ def derive_ktx2_tier(
     if dry_run:
         return {"dry_run": True, "ok": n_ok, "failed": n_failed}
 
+    # Only push the tar + rowmap. Tier presence is discovered by
+    # clients from the tree listing (ADR-0007 race-free design).
     sha = push_to_hf(
         repo_id=repo_id,
         files=[
-            (manifest_path, "release-manifest.json"),
-            (catalog_path, f"{source}.json"),
             (out_tar_path, out_tar_in_repo),
             (out_rowmap_path, out_rowmap_in_repo),
         ],

@@ -38,8 +38,8 @@ from mat_vis_baker.common import (
     hash_textures,
 )
 from mat_vis_baker.hf_push import push_to_hf
-from mat_vis_baker.index_builder import build_index, merge_remote_index
-from mat_vis_baker.manifest import merge_remote_manifest
+from mat_vis_baker.index_builder import build_index
+from mat_vis_baker.manifest import _download_json
 from mat_vis_baker.tar_writer import TarWriter
 
 log = logging.getLogger("mat-vis-baker.hf_bake")
@@ -83,55 +83,33 @@ def bake_scalar_source(
     hf_token: str | None = None,
     dry_run: bool = False,
 ) -> dict:
-    """Bake a scalar-only source (physicallybased): catalog + manifest, no tar."""
+    """Bake a scalar-only source (physicallybased): write catalog, no tar.
+
+    The catalog is overwritten wholesale — a scalar source is baked
+    as one unit. No manifest write; clients derive the manifest from
+    the dataset tree.
+    """
     work_dir.mkdir(parents=True, exist_ok=True)
     fetch = _get_fetcher(source)
     records = fetch()
     log.info("%s: %d records", source, len(records))
 
     index = build_index(records, source)
-    merged_index = merge_remote_index(
-        repo_id=repo_id,
-        revision=release_tag,
-        source=source,
-        local_entries=index,
-        hf_token=hf_token,
-    )
     catalog_path = work_dir / f"{source}.json"
-    catalog_path.write_text(json.dumps(merged_index, indent=2, ensure_ascii=False) + "\n")
-
-    manifest = merge_remote_manifest(
-        repo_id=repo_id,
-        revision=release_tag,
-        release_tag=release_tag,
-        patch={
-            "sources": {
-                source: {
-                    "catalog": f"{source}.json",
-                    "materials_count": len(merged_index),
-                }
-            }
-        },
-        hf_token=hf_token,
-    )
-    manifest_path = work_dir / "release-manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    catalog_path.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n")
 
     if dry_run:
-        log.info("dry-run: would push 2 files to %s@%s", repo_id, release_tag)
-        return {"dry_run": True, "materials": len(merged_index)}
+        log.info("dry-run: would push 1 file (%s.json) to %s@%s", source, repo_id, release_tag)
+        return {"dry_run": True, "materials": len(index)}
 
     sha = push_to_hf(
         repo_id=repo_id,
-        files=[
-            (manifest_path, "release-manifest.json"),
-            (catalog_path, f"{source}.json"),
-        ],
+        files=[(catalog_path, f"{source}.json")],
         revision=release_tag,
         commit_message=f"feat(data): {release_tag} — bake {source} (scalar)",
         token=hf_token,
     )
-    return {"commit": sha, "materials": len(merged_index)}
+    return {"commit": sha, "materials": len(index)}
 
 
 def bake_one(
@@ -177,7 +155,6 @@ def bake_one(
     tar_path = work_dir / f"{source}-{tier}.tar"
     rowmap_path = work_dir / f"{source}-{tier}-rowmap.json"
     catalog_path = work_dir / f"{source}.json"
-    manifest_path = work_dir / "release-manifest.json"
 
     fetch = _get_fetcher(source)
 
@@ -267,37 +244,29 @@ def bake_one(
     }
     rowmap_path.write_text(json.dumps(rowmap, indent=2) + "\n")
 
-    index = build_index(all_records, source)
-    merged_index = merge_remote_index(
-        repo_id=repo_id,
-        revision=release_tag,
-        source=source,
-        local_entries=index,
-        hf_token=hf_token,
+    # Catalog: write it only if the source doesn't already have one on
+    # the remote. Two concurrent bakes of the SAME source would both
+    # write identical content (upstream metadata doesn't vary by tier),
+    # so the race is benign, but skipping the write when unnecessary
+    # keeps commits minimal.
+    remote_catalog = _download_json(
+        repo_id=repo_id, revision=release_tag, path=f"{source}.json", hf_token=hf_token
     )
-    catalog_path.write_text(json.dumps(merged_index, indent=2, ensure_ascii=False) + "\n")
-
-    manifest = merge_remote_manifest(
-        repo_id=repo_id,
-        revision=release_tag,
-        release_tag=release_tag,
-        patch={
-            "sources": {
-                source: {
-                    "catalog": f"{source}.json",
-                    "materials_count": len(merged_index),
-                    "tiers": {
-                        tier: {
-                            "tar": tar_path.name,
-                            "rowmap": rowmap_path.name,
-                        }
-                    },
-                }
-            }
-        },
-        hf_token=hf_token,
-    )
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    files_to_push: list[tuple[Path, str]] = [
+        (tar_path, tar_path.name),
+        (rowmap_path, rowmap_path.name),
+    ]
+    if remote_catalog is None:
+        index = build_index(all_records, source)
+        catalog_path.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n")
+        files_to_push.append((catalog_path, f"{source}.json"))
+        log.info("catalog: fresh write (no remote %s.json)", source)
+    else:
+        log.info(
+            "catalog: remote %s.json exists (%d entries), skipping write",
+            source,
+            len(remote_catalog),
+        )
 
     log.info(
         "PERF hf-bake: %.1fs total, %d ok / %d failed, tar=%.1f MB",
@@ -309,7 +278,8 @@ def bake_one(
 
     if dry_run:
         log.info(
-            "dry-run: would push 4 files to %s@%s (manifest, catalog, tar, rowmap)",
+            "dry-run: would push %d files to %s@%s",
+            len(files_to_push),
             repo_id,
             release_tag,
         )
@@ -322,12 +292,7 @@ def bake_one(
 
     sha = push_to_hf(
         repo_id=repo_id,
-        files=[
-            (manifest_path, "release-manifest.json"),
-            (catalog_path, f"{source}.json"),
-            (tar_path, tar_path.name),
-            (rowmap_path, rowmap_path.name),
-        ],
+        files=files_to_push,
         revision=release_tag,
         commit_message=f"feat(data): {release_tag} — bake {source} {tier}",
         token=hf_token,
