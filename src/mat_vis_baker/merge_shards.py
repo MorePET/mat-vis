@@ -154,7 +154,7 @@ def merge_shards(
     out_rowmap_in_repo = f"{subdir}{out_rowmap_name}"
     # Merged files must be staged locally under the same relative path
     # that they land in the repo — HF push takes (local, repo_path) pairs.
-    out_local_parent = work_dir / subdir.rstrip("/") if is_ktx2 else work_dir
+    out_local_parent = (work_dir / subdir.rstrip("/")) if is_ktx2 else work_dir
     out_local_parent.mkdir(parents=True, exist_ok=True)
     out_tar_path = out_local_parent / out_tar_name
     out_rowmap_path = out_local_parent / out_rowmap_name
@@ -171,6 +171,12 @@ def merge_shards(
     shards = _discover_shards(tree, source, tier, is_ktx2)
     shard_total = _validate_shards(shards)
     log.info("found %d shards (complete set)", shard_total)
+
+    # Build one set of all tree paths up front — the per-shard catalog
+    # existence check was O(len(tree)) per shard, O(K·len(tree)) total.
+    # K ≤ 16 today so the saving is tiny, but `in` against a set is
+    # both clearer and fixes the asymptotic wart called out in review.
+    tree_paths: set[str] = {e["path"] for e in tree if e.get("type") == "file"}
 
     session = requests.Session()
     resolve_base = f"{HF_RESOLVE}/{repo_id}/resolve/{release_tag}"
@@ -209,7 +215,7 @@ def merge_shards(
 
             # Partial catalog (bake shards only — derive shards don't write one).
             partial_catalog_repo_path = f"{source}-{tier}.shard-{idx}-of-{total}.catalog.json"
-            if any(e.get("path") == partial_catalog_repo_path for e in tree):
+            if partial_catalog_repo_path in tree_paths:
                 cat = _fetch_json(f"{resolve_base}/{partial_catalog_repo_path}", hf_token)
                 if isinstance(cat, list):
                     partial_catalog_data.append(cat)
