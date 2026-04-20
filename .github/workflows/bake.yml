@@ -1,5 +1,10 @@
 ---
 # Bake workflow — atomic HF push per (source, tier) per ADR-0007.
+#
+# Invokes the Dagger `bake` function (#136) which wraps
+# mat-vis-baker hf-bake in a python:3.12-slim container. Container
+# bootstraps inside Dagger — no separate install steps here.
+# Reproduce locally with: dagger call bake --source=... --tier=1k ...
 
 name: Bake
 
@@ -72,35 +77,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install baker
-        run: uv sync --all-extras
+      - name: Dagger shell-safety lint (#61)
+        run: python3 scripts/check-dagger-shell-safety.py
 
       - name: hf-bake
-        run: |
-          set -euxo pipefail
-          limit_flag=""
-          if [ "${{ inputs.limit }}" != "0" ]; then
-            limit_flag="--limit ${{ inputs.limit }}"
-          fi
-          offset_flag=""
-          if [ "${{ inputs.offset }}" != "0" ]; then
-            offset_flag="--offset ${{ inputs.offset }}"
-          fi
-          dry_flag=""
-          if [ "${{ inputs.dry-run }}" = "true" ]; then
-            dry_flag="--dry-run"
-          fi
-          uv run mat-vis-baker hf-bake \
-            "${{ inputs.source }}" \
-            "${{ inputs.tier }}" \
-            /tmp/bake \
-            --release-tag "${{ inputs.release-tag }}" \
-            --batch-size "${{ inputs.batch-size }}" \
-            $limit_flag $offset_flag $dry_flag
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          verb: call
+          module: .dagger
+          # Dagger fn sentinels: limit=0 (no cap), offset=0 (no skip),
+          # shard-index/total=-1 (unsharded). The baker CLI adopts the
+          # same sentinel convention so re-plumbing is a pure rename.
+          args: >-
+            bake
+            --context=.
+            --source=${{ inputs.source }}
+            --tier=${{ inputs.tier }}
+            --release-tag=${{ inputs.release-tag }}
+            --hf-token=env:HF_TOKEN
+            --limit=${{ inputs.limit }}
+            --offset=${{ inputs.offset }}
+            --batch-size=${{ inputs.batch-size }}
+            ${{ inputs.dry-run == true && '--dry-run=true' || '' }}
 
       - name: Notify on failure
         if: failure()
