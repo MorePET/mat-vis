@@ -8,6 +8,8 @@ Usage:
     dagger call smoke                # verify pyarrow import (slim)
     dagger call smoke-materialx      # verify MaterialX import (heavy)
     dagger call smoke-baker          # verify hf-tar baker container (#135)
+    dagger call bake                 # port of hf-bake → atomic HF commit (#136)
+    dagger call smoke-bake           # dry-run bake against gerchowl/mat-vis-tst (#136)
     dagger call probe-sources        # verify upstream API connectivity
     dagger call test-all             # lint + test + smoke + probe
     dagger call test-client-python   # pytest on Python reference client
@@ -508,6 +510,97 @@ class MatVisCi:
             ctr = ctr.with_secret_variable("HF_TOKEN", hf_token)
 
         return ctr
+
+    @function
+    async def bake(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        source: Annotated[str, Doc("Upstream source: ambientcg|polyhaven|gpuopen|physicallybased")],
+        tier: Annotated[
+            str, Doc("Resolution tier (e.g. 1k, 2k, 4k); 'scalar' for physicallybased")
+        ],
+        release_tag: Annotated[str, Doc("Calver data release tag, e.g. v2026.04.1")],
+        hf_token: Annotated[dagger.Secret, Doc("HF write token for the atomic push")],
+        repo_id: Annotated[str, Doc("Target HF dataset repo")] = "gerchowl/mat-vis",
+        limit: Annotated[int, Doc("Max materials (0 = no limit)")] = 0,
+        offset: Annotated[int, Doc("Skip first N materials")] = 0,
+        batch_size: Annotated[int, Doc("Materials per streaming batch")] = 50,
+        dry_run: Annotated[bool, Doc("Build tar locally; skip HF push")] = False,
+        shard_index: Annotated[int, Doc("0-based shard index (-1 = no sharding)")] = -1,
+        shard_total: Annotated[int, Doc("Total shards (-1 = no sharding)")] = -1,
+    ) -> str:
+        """Bake one (source, tier) into an atomic HF commit (#136).
+
+        Wraps ``mat-vis-baker hf-bake`` in the shared ``_baker_container``
+        (#135). Returns the CLI stdout — the final line is the commit SHA
+        when ``--dry-run`` is not set. Parity target: the ``hf-bake`` step
+        in ``.github/workflows/bake.yml`` (pre-#138).
+
+        Sentinels: ``limit=0`` drops ``--limit``; ``shard_index=-1`` and
+        ``shard_total=-1`` drop both shard flags. Pass both to shard.
+        """
+        ctr = self._baker_container(context, with_ktx2=False, hf_token=hf_token)
+
+        argv: list[str] = [
+            "uv",
+            "run",
+            "mat-vis-baker",
+            "hf-bake",
+            source,
+            tier,
+            "/tmp/bake",
+            "--release-tag",
+            release_tag,
+            "--repo-id",
+            repo_id,
+            "--offset",
+            str(offset),
+            "--batch-size",
+            str(batch_size),
+        ]
+        if limit > 0:
+            argv += ["--limit", str(limit)]
+        if dry_run:
+            argv.append("--dry-run")
+        if shard_index >= 0 and shard_total >= 0:
+            argv += [
+                "--shard-index",
+                str(shard_index),
+                "--shard-total",
+                str(shard_total),
+            ]
+
+        return await ctr.with_exec(argv).stdout()
+
+    @function
+    async def smoke_bake(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+    ) -> str:
+        """Smoke-test the bake Dagger op end-to-end (#136).
+
+        Dispatches against ``gerchowl/mat-vis-tst`` at ``v0.0.1-smoke``
+        with ``--dry-run --limit 1`` to prove the wrapper's plumbing
+        (argv construction, container mount, uv sync, CLI import) without
+        an actual HF push. Should finish well under 60s. Requires an
+        ``HF_TOKEN`` secret because the CLI signature demands it, but
+        ``--dry-run`` means the token is never consumed.
+        """
+        context = src or dag.host().directory(".")
+        # Dry-run path never exercises the secret, but the Dagger
+        # signature requires a non-None ``dagger.Secret``. Pull from the
+        # host env so local invocations work with ``HF_TOKEN`` exported.
+        hf_token = dag.set_secret("HF_TOKEN", "dry-run-placeholder")
+        return await self.bake(
+            context=context,
+            source="polyhaven",
+            tier="1k",
+            release_tag="v0.0.1-smoke",
+            hf_token=hf_token,
+            repo_id="gerchowl/mat-vis-tst",
+            limit=1,
+            dry_run=True,
+        )
 
     @function
     async def smoke_baker(
