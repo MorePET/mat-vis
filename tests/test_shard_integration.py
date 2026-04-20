@@ -158,11 +158,14 @@ def test_empty_shard_is_noop_not_error(tmp_path: Path) -> None:
 
 
 def test_shard_deterministic_bytes(tmp_path: Path) -> None:
-    """Same input + same shard index → identical output bytes (re-runnable)."""
-    src_tar, src_rowmap = _build_src(tmp_path, n_materials=8)
+    """Same input + same shard index → identical output bytes, even with
+    multiple workers. /spike 148 flagged that the old as_completed →
+    tw.add_channel path produced completion-order tars
+    (non-deterministic); the fix buffers + sorts before writing."""
+    src_tar, src_rowmap = _build_src(tmp_path, n_materials=16)
     src_bytes = src_tar.read_bytes()
 
-    def run(dest: Path) -> bytes:
+    def run(dest: Path, workers: int) -> bytes:
         with (
             patch("mat_vis_baker.hf_derive._pin_commit", return_value="deadbeef"),
             patch("mat_vis_baker.hf_derive._fetch_rowmap", return_value=src_rowmap),
@@ -176,14 +179,21 @@ def test_shard_deterministic_bytes(tmp_path: Path) -> None:
                 work_dir=dest,
                 hf_token="t",
                 dry_run=True,
-                workers=1,  # serial so tar member order is deterministic
+                workers=workers,
                 shard=(1, 4),
             )
         return (dest / "polyhaven-512.shard-1-of-4.tar").read_bytes()
 
-    a = run(tmp_path / "a")
-    b = run(tmp_path / "b")
+    # Two workers=8 runs — where completion order used to vary. Buffer +
+    # sort before write makes the tars byte-identical.
+    a = run(tmp_path / "a", workers=8)
+    b = run(tmp_path / "b", workers=8)
     assert a == b
+
+    # A serial run produces the same bytes — sort is the canonical
+    # order, not a concurrent-specific coincidence.
+    c = run(tmp_path / "c", workers=1)
+    assert a == c
 
 
 def test_validate_shards_happy_path() -> None:

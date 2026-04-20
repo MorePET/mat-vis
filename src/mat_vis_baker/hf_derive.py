@@ -194,6 +194,15 @@ def _stream_transform_into_tar(
     if shard is not None:
         span_attrs["shard_index"] = shard[0]
         span_attrs["shard_total"] = shard[1]
+    # Buffer transformed bytes by (mid, ch) and flush to the tar in
+    # *sorted* order after the worker pool drains. Without this,
+    # ``as_completed`` yields in completion-arrival order → tar member
+    # offsets depend on worker scheduling → re-running the same shard
+    # produces different bytes. The buffer costs ~N × mean-channel-size
+    # of RAM per shard (for ktx2-2k at shard-total=8 that's ≤~600 MB,
+    # well under the 16 GB runner limit).
+    pending: dict[tuple[str, str], bytes] = {}
+
     with span("stream.transform", **span_attrs) as outer:
         with ThreadPoolExecutor(max_workers=max_workers) as pool, TarWriter(out_tar_path) as tw:
             futures = {pool.submit(_one, item): item for item in work}
@@ -201,7 +210,7 @@ def _stream_transform_into_tar(
                 mid, ch, spec = futures[fut]
                 try:
                     r_mid, r_ch, out_bytes = fut.result()
-                    tw.add_channel(r_mid, r_ch, out_bytes)
+                    pending[(r_mid, r_ch)] = out_bytes
                     n_ok += 1
                     recent.append(False)
                 except Exception as e:
@@ -247,6 +256,14 @@ def _stream_transform_into_tar(
                         {"n_ok": n_ok, "n_failed": n_failed, "rate_per_s": rate},
                     )
                     t_last = time.monotonic()
+
+            # Flush buffered results to the tar in deterministic order.
+            # Sorting by (mid, ch) guarantees that two runs of the same
+            # shard against the same source produce byte-identical tars.
+            for key in sorted(pending):
+                mid, ch = key
+                tw.add_channel(mid, ch, pending[key])
+            pending.clear()  # release peak memory before finalize
             new_materials = tw.finalize()
         outer.set_attribute("outcome", "ok")
         outer.set_attribute("n_ok", n_ok)
