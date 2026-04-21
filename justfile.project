@@ -250,3 +250,28 @@ gap-one source tier category tag:
     just gap-bake {{ source }} {{ tier }} {{ category }} {{ tag }}
     just gap-verify {{ source }} {{ tier }} {{ category }} {{ tag }}
     @echo "--- cell {{ source }}/{{ tier }}/{{ category }} filled. Next: gap-manifest + gap-validate at the end."
+
+# -------------------------------------------------------------------------------
+# OBSERVABILITY (self-hosted OTLP + Grafana on tailnet, #139)
+# -------------------------------------------------------------------------------
+
+# Bring up the OTLP collector + Grafana UI on the tailnet as tag:observability.
+# Reads the Tailscale auth-key from the macOS login Keychain (item
+# tailscale-observability / TS_OBS_AUTHKEY). Any Docker/Podman host works.
+[group('observability')]
+observability-up:
+    TS_OBS_AUTHKEY="$(security find-generic-password -a tailscale-observability -s TS_OBS_AUTHKEY -w)" \
+      docker compose -f docs/observability/docker-compose.yml up -d
+    @echo ""
+    @echo "Grafana UI    : http://mat-vis-otel.$(tailscale status --json | jq -r '.MagicDNSSuffix'):3000"
+    @echo "OTLP endpoint : http://mat-vis-otel.$(tailscale status --json | jq -r '.MagicDNSSuffix'):4318"
+
+# Stop the observability stack + deregister the ephemeral tailnet node.
+[group('observability')]
+observability-down:
+    docker compose -f docs/observability/docker-compose.yml down
+
+# Tail the OTLP collector logs (Grafana/Tempo/Loki/Mimir in one image).
+[group('observability')]
+observability-logs:
+    docker compose -f docs/observability/docker-compose.yml logs -f otel-lgtm
