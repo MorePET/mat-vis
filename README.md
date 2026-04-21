@@ -223,6 +223,21 @@ Architecture is captured in [`docs/decisions/`](docs/decisions/):
    — Lazy local cache at `~/.cache/mat-vis/` as default;
    prefetch and no-cache modes opt-in.
 
+Newer ADRs (0007–0011) reshape the substrate around the Hugging Face
+dataset + sharded Dagger pipeline + the two-layer index record.
+See the [ADR index](docs/decisions/README.md) for the full ordering.
+
+## Upstream metadata vocabulary
+
+The baker normalizes four upstream vocabularies (ambientcg,
+polyhaven, gpuopen, physicallybased) onto 10 canonical categories.
+The captured vocabulary — every category title and top-100 tag
+per source, with counts — is committed as
+[`docs/sources/metadata-vocabulary.md`](docs/sources/metadata-vocabulary.md)
+(and the machine-readable sidecar `metadata-vocabulary.json`).
+Regenerate with `uv run python scripts/probe-metadata-vocab.py`
+when an upstream schema shifts.
+
 ## Relationship to mat
 
 mat-vis is the **data factory**. [MorePET/mat][mat] is the

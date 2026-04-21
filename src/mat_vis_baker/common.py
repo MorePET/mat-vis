@@ -83,6 +83,8 @@ for _cat, _keywords in {
         "bamboo",
         "cork",
         "parquet",
+        "plank",  # covers ambientcg's "Planks" category (59 records) via
+        # the plural→singular fallback in _lookup_token
     ],
     "stone": [
         "stone",
@@ -233,7 +235,7 @@ def _lookup_token(word: str) -> str | None:
     return None
 
 
-def normalize_category(raw: str) -> str:
+def normalize_category(raw: str, tags: list[str] | None = None) -> str:
     """Map a freeform upstream category to one of the 10 canonical categories.
 
     Handles:
@@ -243,35 +245,72 @@ def normalize_category(raw: str) -> str:
       - CamelCase run-ons ("WoodFloor", "PaintedPlaster", "BaseMaterials")
       - dash / underscore separators
 
+    When the primary path doesn't find a hit and ``tags`` is supplied,
+    falls back to looking up each tag against ``_CATEGORY_MAP`` (with
+    the same plural handling). This rescues sources whose top-level
+    category is context-only (polyhaven's ``[outdoor, natural, floor]``
+    with a material token hidden in ``tags=[rocks, stones, dirt]``)
+    or whose category is a multi-material bucket whose individual
+    records are tagged with the actual material (ambientcg's
+    ``"Planks"`` records tagged ``["wood", "planks"]``).
+
+    Known fall-throughs that intentionally stay "other" even with tag
+    fallback, because their tags are stylistic / color / format only:
+      - "Liquid", "Manmade", "Human" (physicallybased)
+      - "Atlas", "Decal", "Sign", "OnlyPBR" (ambientcg)
+      - "SciFi", "Wallpaper" (gpuopen)
+      - "Facade", "Roofing", "Interior/Exterior Flooring",
+        "Base Materials" (multi-material buckets)
+
     Deterministic only — no fuzzy / Levenshtein matching (see mat-vis#150).
     Unmatched inputs fall through to "other".
     """
-    if not raw:
+    if not raw and not tags:
         return "other"
-    # ambientcg uses hierarchical like "Metal/Steel" — take first segment.
-    # Preserve original casing so we can split CamelCase afterwards.
-    first_cased = raw.split("/")[0].strip()
-    first = first_cased.lower()
-    # Fast path: whole-segment match (covers legacy behavior).
-    hit = _lookup_token(first)
-    if hit is not None:
-        return hit
-    # Split on delimiters, then CamelCase-split each token. Try each
-    # resulting sub-word against the keyword map (with plural fallback).
-    # Known fall-throughs that intentionally stay "other":
-    #   - "Liquid", "Manmade" (physicallybased): too broad / not a PBR class
-    #   - "Human" (physicallybased): skin/hair isn't "organic" vegetation
-    #   - "Atlas", "Decal", "Sign", "OnlyPBR" (ambientcg): meta/format tags
-    #   - "SciFi" (gpuopen): stylistic, not a material
-    #   - "Facade", "Roofing", "Wallpaper", "Interior Flooring",
-    #     "Base Materials" (gpuopen/ambientcg): multi-material contexts
-    #     with no single canonical home — mapping them would be wrong.
-    for delim_token in _tokenize_category(first_cased):
-        for sub in _split_camel(delim_token):
-            hit = _lookup_token(sub)
+    if raw:
+        # ambientcg uses hierarchical like "Metal/Steel" — take first segment.
+        # Preserve original casing so we can split CamelCase afterwards.
+        first_cased = raw.split("/")[0].strip()
+        first = first_cased.lower()
+        # Fast path: whole-segment match (covers legacy behavior).
+        hit = _lookup_token(first)
+        if hit is not None:
+            return hit
+        # Split on delimiters, then CamelCase-split each token.
+        for delim_token in _tokenize_category(first_cased):
+            for sub in _split_camel(delim_token):
+                hit = _lookup_token(sub)
+                if hit is not None:
+                    return hit
+    # Tag fallback — only reached when category failed (or was empty).
+    # Tags are curated by upstream authors, so exact matching against
+    # _CATEGORY_MAP is sufficient; we don't split / camel-case them.
+    #
+    # A few metal-alias keywords ("gold", "silver", "copper", "brass",
+    # "bronze", "chrome") double as English color words on stylistic
+    # items (a "gold"-colored wallpaper, a "copper"-tone fabric). Those
+    # would produce false-positive `metal` classifications if they
+    # appear as tags. The exclusion set only applies in the tag path —
+    # when the UPSTREAM CATEGORY says "Gold", we still correctly map
+    # to metal because the primary branch above already returned.
+    if tags:
+        for tag in tags:
+            if not isinstance(tag, str):
+                continue
+            token = tag.strip().lower()
+            if token in _TAG_AMBIGUOUS_COLOR:
+                continue
+            hit = _lookup_token(token)
             if hit is not None:
                 return hit
     return "other"
+
+
+# Metal aliases that double as color words on stylistic items. Skipped
+# in the tag-fallback path only — primary category matches still work.
+_TAG_AMBIGUOUS_COLOR: frozenset[str] = frozenset(
+    {"gold", "silver", "copper", "brass", "bronze", "chrome"}
+)
 
 
 # ── SPDX license normalization ──────────────────────────────────
