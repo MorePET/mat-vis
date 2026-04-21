@@ -142,6 +142,21 @@ def bake_one(
     download + bake + pack step. Output filenames gain a
     ``.shard-N-of-K`` suffix. The catalog write is skipped per shard
     (the later ``merge-shards`` writes it once from the union)."""
+    # Pre-flight: refuse (source, tier) combos with no upstream data.
+    # Earlier code let these proceed, then produced 454-materials-failed
+    # bake artifacts when every fetch returned no matching package.
+    # The manifest in mat_vis_baker.source_tiers names the combos the
+    # upstream actually serves; everything else routes via hf-derive.
+    from mat_vis_baker.source_tiers import (
+        is_supported as _tier_is_supported,
+    )
+    from mat_vis_baker.source_tiers import (
+        unsupported_tier_message as _tier_unsupported_msg,
+    )
+
+    if not _tier_is_supported(source, tier):
+        raise ValueError(_tier_unsupported_msg(source, tier))
+
     if source == "physicallybased":
         # Scalar sources are one unit — sharding has no benefit.
         return bake_scalar_source(
