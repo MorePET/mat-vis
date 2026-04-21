@@ -72,6 +72,30 @@ UPSTREAM_ALLOWLIST: frozenset[str] = frozenset(
 
 
 # ── discovery ───────────────────────────────────────────────────
+#
+# Module-level memoization cache for discover(). ``bake_one`` calls
+# fetch() once per batch (batch_size=50, 1993 ambientcg records = 40
+# calls per bake); without this cache each call re-paginates the full
+# upstream catalog (~20 pages × 100 records). See tests/test_fetcher_
+# discover_memoize.py for the regression guard.
+_DISCOVER_CACHE: list[dict] | None = None
+
+
+def _reset_discover_cache() -> None:
+    """Forget the cached catalog so the next fetch re-paginates.
+
+    Intended for tests and long-running processes where upstream
+    drift is a concern; the bake loop doesn't need to call this."""
+    global _DISCOVER_CACHE
+    _DISCOVER_CACHE = None
+
+
+def _cached_entries(session: requests.Session | None = None) -> list[dict]:
+    """Return the discovered entries, paginating once per process."""
+    global _DISCOVER_CACHE
+    if _DISCOVER_CACHE is None:
+        _DISCOVER_CACHE = discover(session=session)
+    return _DISCOVER_CACHE
 
 
 def discover(*, session: requests.Session | None = None) -> list[dict]:
@@ -356,7 +380,7 @@ def fetch(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     s = session or requests.Session()
-    entries = discover(session=s)
+    entries = _cached_entries(s)
 
     entries = _filter_with_downloads(entries, tier)
     log.info("%d materials have downloads for tier %s", len(entries), tier)
