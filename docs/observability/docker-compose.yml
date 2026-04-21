@@ -19,7 +19,7 @@
 #     -s TS_OBS_AUTHKEY -w
 #
 # Bring-up: `just observability-up` (reads keychain → env → compose up).
-# Runs on any Docker/Podman host — laptop, anvil, VPS, whatever.
+# Runs on any Docker/Podman host — laptop, a home server, a VPS.
 
 services:
   tailscale:
