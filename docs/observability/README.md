@@ -1,8 +1,8 @@
 # Self-hosted OTLP + Grafana on a tailnet
 
 One-command bring-up of an observability stack for the mat-vis baker.
-Runs on any Docker/Podman host — laptop, `anvil`, a VPS — and joins
-the operator's tailnet as `mat-vis-otel` with `tag:observability`.
+Runs on any Docker/Podman host — laptop, a home server, a VPS — and
+joins the operator's tailnet as `mat-vis-otel` with `tag:observability`.
 
 ## One-time setup
 
@@ -74,16 +74,17 @@ it deregisters automatically — no stale peer entries.
 
 ## Moving the stack to another host
 
-The compose is host-agnostic. To move from your laptop to `anvil`:
+The compose is host-agnostic. To move from your laptop to a
+persistent dev host (`<your-remote-host>`):
 
 ```bash
 # laptop
 just observability-down
 
-# anvil
-ssh anvil 'security find-generic-password ... # or pull from Bitwarden'
-scp docs/observability/docker-compose.yml anvil:/srv/otel/
-ssh anvil 'cd /srv/otel && docker compose up -d'
+# any Linux host with docker/podman that's on your tailnet
+ssh <your-remote-host> 'security find-generic-password ... # or pull from your vault'
+scp docs/observability/docker-compose.yml <your-remote-host>:/srv/otel/
+ssh <your-remote-host> 'cd /srv/otel && docker compose up -d'
 ```
 
 No state persists between hosts by design — the `otel-lgtm-data`

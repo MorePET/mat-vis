@@ -303,13 +303,19 @@ def _fetch_one(
 
         raw_cats = meta.get("categories", [])
         if isinstance(raw_cats, dict):
-            cat_str = next(iter(raw_cats.keys()), "")
-        elif isinstance(raw_cats, list) and raw_cats:
-            cat_str = raw_cats[0]
+            cat_list = list(raw_cats.keys())
+        elif isinstance(raw_cats, list):
+            cat_list = raw_cats
         else:
-            cat_str = ""
-        cat = normalize_category(cat_str)
-        tags = meta.get("tags", [])
+            cat_list = []
+        cat_str = cat_list[0] if cat_list else ""
+        tags = meta.get("tags", []) or []
+        # Polyhaven's ``categories`` is a list of tokens (many of which
+        # are context like "outdoor"/"floor" rather than materials). Feed
+        # the whole list plus upstream tags as fallback candidates so the
+        # material token (if any) gets picked up even when categories[0]
+        # is a context label.
+        cat = normalize_category(cat_str, [*cat_list[1:], *tags])
         description = meta.get("description") or None
 
         return MaterialRecord(

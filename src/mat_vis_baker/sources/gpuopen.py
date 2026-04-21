@@ -300,8 +300,8 @@ def _fetch_one(
     """
     mid = mat.get("id", "")
     name = mat.get("title") or mid
-    category = normalize_category(mat.get("_category_title", ""))
     tags = list(mat.get("_tag_titles", []))
+    category = normalize_category(mat.get("_category_title", ""), tags)
     description = mat.get("description") or None
     source_url = f"https://matlib.gpuopen.com/main/materials/all?material={mid}"
     upstream = UpstreamBlock(

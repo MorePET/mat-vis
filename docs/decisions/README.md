@@ -15,6 +15,7 @@ rejected, and what would trigger revisiting.
 8. [0008 — Dataset tree is the source of truth; `release-manifest.json` is an optional convenience snapshot](0008-dataset-tree-as-source-of-truth.md) — partly supersedes 0007
 9. [0009 — Derive pipeline: HTTP-range streaming, parallel workers, ICC-strip, fail-fast](0009-derive-pipeline-processing.md)
 10. [0010 — Sharded derive pipeline via GH Actions matrix](0010-sharded-pipeline-via-gh-matrix.md) — partly supersedes 0009
+11. [0011 — mat_vis curated + upstream.raw mirror (hybrid index)](0011-mat-vis-curated-plus-upstream-mirror.md) — partly reshapes 0001's record surface
 
 ## Template
 
