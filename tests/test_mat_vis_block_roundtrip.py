@@ -29,10 +29,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 REPO = "gerchowl/mat-vis-tst"
-# Dedicated revision for ADR-0011-shape records. v0.0.1-smoke predates
-# the mat_vis block and cannot be overwritten in place because hf-bake
-# writes catalogs once (skip-if-remote-exists, ADR-0008 race-benign).
-TAG = "v0.0.2-smoke-adr0011"
+# Dedicated revision for ADR-0011-shape records. Bumped past v0.0.1-smoke
+# (pre-ADR-0011) because hf-bake writes catalogs once per revision
+# (skip-if-remote-exists, ADR-0008 race-benign). Bumped past
+# v0.0.2-smoke-adr0011 because that slice got 3-material samples which
+# for gpuopen turned out to be all Wallpapers (intentionally 'other',
+# per normalize_category), failing test_category_not_universally_other.
+# v0.0.3 bakes 30 materials per source for variety.
+TAG = "v0.0.3-smoke-adr0011"
 RESOLVE_BASE = f"https://huggingface.co/datasets/{REPO}/resolve/{TAG}"
 TREE_URL = f"https://huggingface.co/api/datasets/{REPO}/tree/{TAG}?recursive=true"
 
