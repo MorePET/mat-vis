@@ -12,20 +12,43 @@ and the 20-slot org concurrency budget by simply running locally.
 # From your laptop, inside your tailnet.
 ssh anvil-dev
 
-# (Inside anvil-dev) install dagger to ~/.local/bin — avoids the
-# multi-user nix daemon wedge that sometimes trips `nix develop` on
-# this VM. Revisit once the system nix is fixed (follow-up issue TBD).
-curl -fsSL https://dl.dagger.io/dagger/install.sh \
-  | BIN_DIR="$HOME/.local/bin" sh
-
 # Enable the rootless podman socket so Dagger has a daemon to talk to.
 systemctl --user enable --now podman.socket
 
 # Clone the repo.
 git clone git@github.com:MorePET/mat-vis.git
 cd mat-vis
+```
 
-# Point Dagger at podman's rootless socket.
+### Get `dagger` on PATH — preferred: nix flake devShell
+
+`flake.nix` provides `dagger` (plus `podman`, `uv`, `ruff`, …) as a
+devShell package. When the multi-user nix daemon is healthy, this
+is the canonical path — same pinned version as CI, no out-of-band
+installs:
+
+```bash
+nix develop --extra-experimental-features "nix-command flakes"
+# dagger, uv, podman, ruff all on PATH for the duration of the shell
+```
+
+### Fallback: direct binary install
+
+If `nix develop` trips on this VM's multi-user daemon (symptom:
+`error: opening lock file "/nix/var/nix/db/big-lock": Permission
+denied`), fall back to the official Dagger installer. It pulls a
+signed binary over HTTPS from `dl.dagger.io` — same artifact a
+`nix` fetch would resolve to, just without the flake's pinning.
+
+```bash
+curl -fsSL https://dl.dagger.io/dagger/install.sh \
+  | BIN_DIR="$HOME/.local/bin" sh
+# ~/.local/bin/dagger --version
+```
+
+Either way, point Dagger at podman's rootless socket once:
+
+```bash
 echo 'export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock' \
   >> ~/.bashrc
 exec bash

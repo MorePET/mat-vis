@@ -19,7 +19,10 @@ re-committed so future-us can diff before-vs-after.
 Re-probe with:
 
 ```bash
-uv run python scripts/probe-metadata-vocab.py > docs/sources/metadata-vocabulary.json
+uv run python scripts/probe-metadata-vocab.py
+# rewrites docs/sources/metadata-vocabulary.json in place; progress logs
+# go to stderr. Do NOT redirect stdout — the script writes the file
+# itself and stdout stays empty.
 ```
 
 ## Counts

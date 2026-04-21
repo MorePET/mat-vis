@@ -450,16 +450,25 @@ class MatVisCi:
         smoke-test dispatches from accidentally landing in the public
         catalog. The flag is never persisted — it has to be supplied on
         every invocation that touches prod.
+
+        Scratch namespace check is namespace-scoped (``.../mat-vis-tst``
+        or ``.../mat-vis-<suffix>-tst``) rather than plain ``endswith("-tst")``
+        so a fork named ``evil/mat-vis-tst`` still counts as opt-in
+        scratch, but a generic ``somebody/tst`` does not sneak through
+        the default.
         """
-        if repo_id.endswith("-tst"):
-            return
+        if "/" in repo_id:
+            _owner, name = repo_id.rsplit("/", 1)
+            if name == "mat-vis-tst" or name.endswith("-tst") and name.startswith("mat-vis"):
+                return
         if allow_prod:
             return
         raise ValueError(
             f"Refusing to write to non-scratch repo {repo_id!r} without "
-            "--allow-prod=true. The *-tst repos are the default scratch "
-            "target; pass --allow-prod=true explicitly to target any "
-            "other dataset (e.g. gerchowl/mat-vis)."
+            "--allow-prod=true. Scratch repos are named .../mat-vis-tst "
+            "(or .../mat-vis-*-tst); anything else requires an explicit "
+            "--allow-prod=true. Example: pass --allow-prod=true to target "
+            "gerchowl/mat-vis for a real data release."
         )
 
     def _baker_container(

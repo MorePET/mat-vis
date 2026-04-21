@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.request
 
 import pytest
@@ -83,14 +84,33 @@ def _list_catalogs() -> list[str]:
 
 @pytest.fixture(scope="module")
 def catalogs() -> dict[str, list[dict]]:
-    """Map source → list of records, fetched once per test module."""
+    """Map source → list of records, fetched once per test module.
+
+    Skips gracefully when the fixture revision isn't populated — keeps
+    CI green for contributors who flipped HF_INTEGRATION=1 without
+    first running the ``dagger call bake`` smoke from
+    ``docs/development/running-on-anvil-dev.md``. The tag 404s as HTTP
+    error, empty tree surfaces as empty list; both land here."""
+    try:
+        cat_paths = _list_catalogs()
+    except urllib.error.HTTPError as e:
+        pytest.skip(
+            f"{REPO}@{TAG} not reachable ({e.code}); re-bake the smoke "
+            f"slice before flipping HF_INTEGRATION=1. See "
+            f"docs/development/running-on-anvil-dev.md"
+        )
+    if not cat_paths:
+        pytest.skip(
+            f"{REPO}@{TAG} tree has no per-source catalogs yet; "
+            f"re-bake the smoke slice. See "
+            f"docs/development/running-on-anvil-dev.md"
+        )
     result = {}
-    for cat_path in _list_catalogs():
+    for cat_path in cat_paths:
         source = cat_path.replace(".json", "")
         records = _fetch_json(f"{RESOLVE_BASE}/{cat_path}")
         assert isinstance(records, list)
         result[source] = records
-    assert result, f"no per-source catalogs on {REPO}@{TAG}"
     return result
 
 
