@@ -1,0 +1,64 @@
+# mat-vis self-hosted OTLP + Grafana stack (#139 follow-up).
+#
+# Runs two containers sharing a network namespace:
+#
+#   tailscale   — joins the operator's tailnet with tag:observability.
+#                 The node name is `mat-vis-otel`, so tailnet peers
+#                 reach Grafana at mat-vis-otel.<tailnet>.ts.net:3000
+#                 and the OTLP receiver at :4318 directly. No `tailscale
+#                 serve` layer — tailnet traffic is WireGuard-encrypted
+#                 end to end so HTTP is fine here.
+#   otel-lgtm   — Grafana + Tempo + Loki + Mimir in one image. Shares
+#                 the tailscale sidecar's network namespace, so
+#                 listening on localhost:{3000,4318} is enough.
+#
+# Authentication: Tailscale OAuth client secret (tskey-client-…) or a
+# reusable auth-key (tskey-auth-…). Stored in the macOS login Keychain:
+#
+#   security find-generic-password -a tailscale-observability \
+#     -s TS_OBS_AUTHKEY -w
+#
+# Bring-up: `just observability-up` (reads keychain → env → compose up).
+# Runs on any Docker/Podman host — laptop, anvil, VPS, whatever.
+
+services:
+  tailscale:
+    image: tailscale/tailscale:stable
+    hostname: mat-vis-otel
+    environment:
+      # Plain auth-key (tskey-auth-…): the ephemeral/reusable/tagged
+      # properties are baked in at key generation time. OAuth client
+      # secrets (tskey-client-…) also work and the sidecar mints its
+      # own ephemeral key at startup.
+      TS_AUTHKEY: "${TS_OBS_AUTHKEY:?set via just observability-up or keychain}"
+      # TS_EXTRA_ARGS: "--advertise-tags=tag:observability"
+      # ^ Intentionally commented out. Tagged auth-keys kept failing
+      # validation despite correct tagOwners — see issue #176.
+      # Workaround: join untagged, then apply tag:observability via
+      # Machines → mat-vis-otel → Edit machine tags in the admin UI.
+      # That uses a different validation path and succeeds cleanly.
+      # Revisit once #176 is resolved (likely via OAuth-minted keys).
+      TS_STATE_DIR: /var/lib/tailscale
+      # Userspace networking keeps this portable across Docker Desktop,
+      # Podman Machine, and Linux hosts. A native-kernel TUN would be
+      # faster, but for OTLP span rates this is immaterial (kB/s peak).
+      TS_USERSPACE: "true"
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    restart: unless-stopped
+
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    # Shared netns: otel-lgtm binds localhost:{3000,4318} which are the
+    # tailscale sidecar's tailnet IPs. Nothing else on the host sees
+    # these ports.
+    network_mode: service:tailscale
+    volumes:
+      - otel-lgtm-data:/data
+    depends_on:
+      - tailscale
+    restart: unless-stopped
+
+volumes:
+  tailscale-state:
+  otel-lgtm-data:
