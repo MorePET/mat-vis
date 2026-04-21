@@ -104,6 +104,26 @@ def _paginate(path: str, session: requests.Session) -> list[dict]:
     return out
 
 
+# Module-level memoization cache for discover(). Rationale: same as
+# the other fetchers — ``bake_one`` calls ``fetch()`` per batch and
+# without this cache each call re-paginates /materials /packages
+# /categories /tags (four paginated endpoints).
+_DISCOVER_CACHE: list[dict] | None = None
+
+
+def _reset_discover_cache() -> None:
+    """Forget the cached material list; next fetch re-paginates."""
+    global _DISCOVER_CACHE
+    _DISCOVER_CACHE = None
+
+
+def _cached_materials(session: requests.Session | None = None) -> list[dict]:
+    global _DISCOVER_CACHE
+    if _DISCOVER_CACHE is None:
+        _DISCOVER_CACHE = discover(session=session)
+    return _DISCOVER_CACHE
+
+
 def discover(*, session: requests.Session | None = None) -> list[dict]:
     """Return gpuopen materials enriched with resolved category/tag titles
     and the full package dict for each variant.
@@ -401,7 +421,7 @@ def fetch(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     s = session or requests.Session()
-    materials = discover(session=s)
+    materials = _cached_materials(s)
     if offset:
         materials = materials[offset:]
     if limit:

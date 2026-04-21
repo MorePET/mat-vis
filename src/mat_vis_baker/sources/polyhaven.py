@@ -66,6 +66,24 @@ _TIER_KEYS = {
 
 
 # ── discovery ───────────────────────────────────────────────────
+#
+# Module-level memoization cache for discover(). Same rationale as
+# ambientcg — ``bake_one`` calls ``fetch()`` per batch; without the
+# cache each call re-hits the /assets endpoint.
+_DISCOVER_CACHE: dict | None = None
+
+
+def _reset_discover_cache() -> None:
+    """Forget the cached asset map; next fetch re-hits /assets."""
+    global _DISCOVER_CACHE
+    _DISCOVER_CACHE = None
+
+
+def _cached_assets(session: requests.Session | None = None) -> dict:
+    global _DISCOVER_CACHE
+    if _DISCOVER_CACHE is None:
+        _DISCOVER_CACHE = discover(session=session)
+    return _DISCOVER_CACHE
 
 
 def discover(*, session: requests.Session | None = None) -> dict:
@@ -374,7 +392,7 @@ def fetch(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     s = session or requests.Session()
-    assets = discover(session=s)
+    assets = _cached_assets(s)
 
     slugs = list(assets.keys())
     if offset:
