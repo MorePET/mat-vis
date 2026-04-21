@@ -440,6 +440,28 @@ class MatVisCi:
 
     # ── bake pipeline ─────────────────────────────────────────────
 
+    def _guard_prod_target(self, repo_id: str, allow_prod: bool) -> None:
+        """Refuse writes to the canonical production repo without opt-in.
+
+        The default target for every bake/derive/merge fn is the scratch
+        dataset ``gerchowl/mat-vis-tst``. Any other target (production
+        ``gerchowl/mat-vis`` or a third-party fork) requires
+        ``--allow-prod=true`` at call time. Prevents feature-branch /
+        smoke-test dispatches from accidentally landing in the public
+        catalog. The flag is never persisted — it has to be supplied on
+        every invocation that touches prod.
+        """
+        if repo_id.endswith("-tst"):
+            return
+        if allow_prod:
+            return
+        raise ValueError(
+            f"Refusing to write to non-scratch repo {repo_id!r} without "
+            "--allow-prod=true. The *-tst repos are the default scratch "
+            "target; pass --allow-prod=true explicitly to target any "
+            "other dataset (e.g. gerchowl/mat-vis)."
+        )
+
     def _baker_container(
         self,
         context: dagger.Directory,
@@ -525,7 +547,10 @@ class MatVisCi:
         ],
         release_tag: Annotated[str, Doc("Calver data release tag, e.g. v2026.04.1")],
         hf_token: Annotated[dagger.Secret, Doc("HF write token for the atomic push")],
-        repo_id: Annotated[str, Doc("Target HF dataset repo")] = "gerchowl/mat-vis",
+        repo_id: Annotated[str, Doc("Target HF dataset repo")] = "gerchowl/mat-vis-tst",
+        allow_prod: Annotated[
+            bool, Doc("Opt-in flag required to target any non-*-tst repo (e.g. gerchowl/mat-vis)")
+        ] = False,
         limit: Annotated[int, Doc("Max materials (0 = no limit)")] = 0,
         offset: Annotated[int, Doc("Skip first N materials")] = 0,
         batch_size: Annotated[int, Doc("Materials per streaming batch")] = 50,
@@ -542,7 +567,11 @@ class MatVisCi:
 
         Sentinels: ``limit=0`` drops ``--limit``; ``shard_index=-1`` and
         ``shard_total=-1`` drop both shard flags. Pass both to shard.
+
+        Safety: defaults to ``gerchowl/mat-vis-tst`` (scratch). Any other
+        target requires ``--allow-prod=true`` — see ``_guard_prod_target``.
         """
+        self._guard_prod_target(repo_id, allow_prod)
         ctr = self._baker_container(context, with_ktx2=False, hf_token=hf_token)
 
         argv: list[str] = [
@@ -642,7 +671,10 @@ class MatVisCi:
         source_tier: Annotated[str, Doc("Existing PNG tar tier to resize from")],
         release_tag: Annotated[str, Doc("Calver release tag, e.g. v2026.04.1")],
         hf_token: Annotated[dagger.Secret, Doc("HF API token for atomic commits")],
-        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis",
+        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis-tst",
+        allow_prod: Annotated[
+            bool, Doc("Opt-in flag required to target any non-*-tst repo")
+        ] = False,
         dry_run: Annotated[bool, Doc("Skip the HF push; build locally")] = False,
         shard_index: Annotated[int, Doc("0-based shard index; -1 disables")] = -1,
         shard_total: Annotated[int, Doc("Total shards; -1 disables")] = -1,
@@ -655,7 +687,11 @@ class MatVisCi:
         Sharding (#134 / PR #146): pass ``shard_index`` + ``shard_total``
         both >= 0 to split the work. ``-1``/``-1`` means no sharding
         (single-runner derive).
+
+        Safety: defaults to ``gerchowl/mat-vis-tst``; any other target
+        requires ``--allow-prod=true``.
         """
+        self._guard_prod_target(repo_id, allow_prod)
         ctr = self._baker_container(context, with_ktx2=False, hf_token=hf_token)
         cmd = [
             "uv",
@@ -691,7 +727,10 @@ class MatVisCi:
         source_tier: Annotated[str, Doc("Existing PNG tar tier to transcode")],
         release_tag: Annotated[str, Doc("Calver release tag")],
         hf_token: Annotated[dagger.Secret, Doc("HF API token for atomic commits")],
-        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis",
+        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis-tst",
+        allow_prod: Annotated[
+            bool, Doc("Opt-in flag required to target any non-*-tst repo")
+        ] = False,
         target_tier: Annotated[
             str, Doc("KTX2 target tier; empty = default ktx2-<source-tier>")
         ] = "",
@@ -709,7 +748,11 @@ class MatVisCi:
         we use ``target_tier=""`` as a sentinel that means "use the CLI
         default" and only pass ``--target-tier`` when the operator
         supplied a non-empty value.
+
+        Safety: defaults to ``gerchowl/mat-vis-tst``; any other target
+        requires ``--allow-prod=true``.
         """
+        self._guard_prod_target(repo_id, allow_prod)
         ctr = self._baker_container(context, with_ktx2=True, hf_token=hf_token)
         cmd = [
             "uv",
@@ -746,17 +789,24 @@ class MatVisCi:
         tier: Annotated[str, Doc("Tier name (e.g. '1k', 'ktx2-1k')")],
         release_tag: Annotated[str, Doc("Calver release tag")],
         hf_token: Annotated[dagger.Secret, Doc("HF API token for atomic commits")],
-        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis",
+        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis-tst",
+        allow_prod: Annotated[
+            bool, Doc("Opt-in flag required to target any non-*-tst repo")
+        ] = False,
         dry_run: Annotated[bool, Doc("Skip the HF push; merge locally")] = False,
         keep_shards: Annotated[bool, Doc("Don't delete shard artifacts after merge")] = False,
     ) -> str:
         """Port of ``mat-vis-baker merge-shards`` (#137).
+
+        Safety: defaults to ``gerchowl/mat-vis-tst``; any other target
+        requires ``--allow-prod=true``.
 
         Reassembles shard-N-of-K artifacts into one tar + rowmap. Works
         uniformly for PNG tiers and KTX2 tiers — the CLI range-reads +
         re-packs without transcoding, so no ``toktx`` needed;
         ``_baker_container(with_ktx2=False)``.
         """
+        self._guard_prod_target(repo_id, allow_prod)
         ctr = self._baker_container(context, with_ktx2=False, hf_token=hf_token)
         cmd = [
             "uv",
