@@ -293,8 +293,11 @@ def _fetch_one(entry: dict, tier: str, output_dir: Path, mtlx_dir: Path | None) 
                 status="failed",
             )
 
-        cat = normalize_category(entry.get("displayCategory", entry.get("category", "")))
         tags = entry.get("tags", [])
+        cat = normalize_category(
+            entry.get("displayCategory", entry.get("category", "")),
+            tags,
+        )
         release_date = (entry.get("releaseDate") or "")[:10] or None
         description = entry.get("description") or None
 

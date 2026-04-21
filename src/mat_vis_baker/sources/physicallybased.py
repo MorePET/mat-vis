@@ -161,7 +161,8 @@ def fetch(*, session: requests.Session | None = None) -> list[MaterialRecord]:
         raw_cat = mat.get("category", "")
         if isinstance(raw_cat, list):
             raw_cat = raw_cat[0] if raw_cat else ""
-        cat = normalize_category(raw_cat)
+        pb_tags = _normalize_tags(mat.get("tags"))
+        cat = normalize_category(raw_cat, pb_tags)
         mid = name.lower().replace(" ", "_")
 
         rec = MaterialRecord(

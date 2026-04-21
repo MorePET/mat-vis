@@ -33,6 +33,101 @@ class TestNormalizeCategory:
     def test_organic_soil(self):
         assert normalize_category("Soil") == "organic"
 
+    def test_planks_now_maps_to_wood(self):
+        # mat-vis#178: ambientcg 'Planks' category, 59 records
+        assert normalize_category("Planks") == "wood"
+
+    # ── tag fallback (#178) ───────────────────────────────────────
+
+    def test_tag_fallback_rescues_ambientcg_diamond_plate(self):
+        # ambientcg 'Diamond Plate' category has no direct keyword hit,
+        # but its tags carry material tokens (metal, steel, plate).
+        assert (
+            normalize_category(
+                "Diamond Plate",
+                tags=["9", "diamond", "floor", "metal", "plate", "steel"],
+            )
+            == "metal"
+        )
+
+    def test_tag_fallback_rescues_polyhaven_context_only_categories(self):
+        # polyhaven 'Anti Skid Tiles' style: categories=[floor, man made]
+        # (all context), tags contain "tiles" -> ceramic.
+        assert (
+            normalize_category(
+                "floor",
+                tags=["antislip", "tiles", "patio", "nonslip"],
+            )
+            == "ceramic"
+        )
+
+    def test_tag_fallback_is_first_hit_wins(self):
+        # Documented behaviour: when multiple tags match different
+        # categories, tag-list order decides (upstream-authored order).
+        # Acceptable trade-off vs voting/weighting because real catalogs
+        # tend to lead with the primary material in the tag list.
+        # "Aerial Ground Rock" style — mud comes before rocks so organic
+        # wins over stone. Both are legitimate readings of the texture.
+        assert (
+            normalize_category(
+                "aerial",
+                tags=["mud", "rocks", "stones", "dirt"],
+            )
+            == "organic"
+        )
+
+    def test_tag_fallback_skips_ambiguous_color_metals(self):
+        # "gold", "silver", "copper", "brass", "bronze", "chrome" double
+        # as color words on stylistic items (gold-coloured wallpaper,
+        # bronze fabric). Skipped in the tag path so a wallpaper tagged
+        # [gold, floral] doesn't get misclassified as metal.
+        assert (
+            normalize_category(
+                "Wallpaper",
+                tags=["art-deco", "gold", "floral", "bronze"],
+            )
+            == "other"
+        )
+        # Primary path is unaffected — "Gold" as a category still maps.
+        assert normalize_category("Gold") == "metal"
+
+    def test_tag_fallback_does_not_override_primary_hit(self):
+        # When the primary category already resolves, tags are not
+        # consulted — caller's category choice wins.
+        assert normalize_category("Metal", tags=["wood"]) == "metal"
+
+    def test_tag_fallback_wallpaper_stays_other(self):
+        # gpuopen 'Wallpaper' — tags are stylistic, no material token.
+        # Should legitimately stay 'other'.
+        assert (
+            normalize_category(
+                "Wallpaper",
+                tags=["art-deco", "blue", "floral", "gold", "pattern"],
+            )
+            == "other"
+        )
+
+    def test_tag_fallback_empty_category_uses_tags(self):
+        # Sources whose category field is empty fall straight through
+        # to the tag scan.
+        assert normalize_category("", tags=["carpet", "red"]) == "fabric"
+
+    def test_tag_fallback_plural_handled(self):
+        # 'Planks' category is now mapped directly (via 'plank' kw),
+        # but tags like 'Tiles' should also work via plural fallback.
+        assert normalize_category("Something", tags=["Tiles"]) == "ceramic"
+
+    def test_tag_fallback_skips_non_string_tags(self):
+        # Upstream payloads occasionally carry ints or dicts in tag
+        # arrays; those must not crash the normalizer.
+        assert (
+            normalize_category(
+                "Unknown",
+                tags=[42, None, {"x": 1}, "wood"],
+            )
+            == "wood"
+        )
+
 
 class TestNormalizeChannel:
     def test_ambientcg_color(self):
