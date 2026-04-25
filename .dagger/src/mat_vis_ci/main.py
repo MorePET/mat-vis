@@ -31,6 +31,8 @@ from typing import Annotated
 import dagger
 from dagger import Doc, dag, function, object_type
 
+from mat_vis_ci._bake_cli import bake_argv as _bake_argv
+
 IMAGE = "ghcr.io/morepet/mat-vis-baker"
 TARGET_PLATFORM = dagger.Platform("linux/amd64")
 
@@ -569,55 +571,55 @@ class MatVisCi:
         limit: Annotated[int, Doc("Max materials (0 = no limit)")] = 0,
         offset: Annotated[int, Doc("Skip first N materials")] = 0,
         batch_size: Annotated[int, Doc("Materials per streaming batch")] = 50,
-        dry_run: Annotated[bool, Doc("Build tar locally; skip HF push")] = False,
+        dry_run: Annotated[bool, Doc("Build locally; skip HF push")] = False,
         shard_index: Annotated[int, Doc("0-based shard index (-1 = no sharding)")] = -1,
         shard_total: Annotated[int, Doc("Total shards (-1 = no sharding)")] = -1,
+        legacy_tar: Annotated[
+            bool,
+            Doc(
+                "Use the pre-ADR-0012 tar+rowmap substrate. One-cycle escape hatch retired by #189."
+            ),
+        ] = False,
     ) -> str:
-        """Bake one (source, tier) into an atomic HF commit (#136).
+        """Bake one (source, tier) into an HF commit (#136 / ADR-0012).
 
         Wraps ``mat-vis-baker hf-bake`` in the shared ``_baker_container``
         (#135). Returns the CLI stdout — the final line is the commit SHA
-        when ``--dry-run`` is not set. Parity target: the ``hf-bake`` step
-        in ``.github/workflows/bake.yml`` (pre-#138).
+        when ``--dry-run`` is not set.
+
+        Default substrate: per-file (ADR-0012, #184). Each material ×
+        channel lands as one file under ``<source>/<tier>/<mid>/<channel>``.
+        Pre-flight tree scan + batch commits (size ``batch_size``) make
+        bakes resumable across crashes. Pass ``legacy_tar=true`` to fall
+        back to the tar+rowmap path for one transition cycle.
 
         Sentinels: ``limit=0`` drops ``--limit``; ``shard_index=-1`` and
-        ``shard_total=-1`` drop both shard flags. Pass both to shard.
+        ``shard_total=-1`` drop both shard flags. Sharding is a no-op
+        under per-file (#184) — kept for ``legacy_tar`` callers only.
 
         Safety: defaults to ``gerchowl/mat-vis-tst`` (scratch). Any other
-        target requires ``--allow-prod=true`` — see ``_guard_prod_target``.
+        target requires ``allow_prod=true``. Both Dagger-level
+        (``_guard_prod_target``) and baker-level (per-file
+        ``_guard_prod_target``) checks fire; redundant by design so the
+        rail still holds when callers reach the baker without going
+        through Dagger.
         """
         self._guard_prod_target(repo_id, allow_prod)
         ctr = self._baker_container(context, with_ktx2=False, hf_token=hf_token)
-
-        argv: list[str] = [
-            "uv",
-            "run",
-            "mat-vis-baker",
-            "hf-bake",
-            source,
-            tier,
-            "/tmp/bake",
-            "--release-tag",
-            release_tag,
-            "--repo-id",
-            repo_id,
-            "--offset",
-            str(offset),
-            "--batch-size",
-            str(batch_size),
-        ]
-        if limit > 0:
-            argv += ["--limit", str(limit)]
-        if dry_run:
-            argv.append("--dry-run")
-        if shard_index >= 0 and shard_total >= 0:
-            argv += [
-                "--shard-index",
-                str(shard_index),
-                "--shard-total",
-                str(shard_total),
-            ]
-
+        argv = _bake_argv(
+            source=source,
+            tier=tier,
+            release_tag=release_tag,
+            repo_id=repo_id,
+            offset=offset,
+            batch_size=batch_size,
+            limit=limit,
+            dry_run=dry_run,
+            allow_prod=allow_prod,
+            legacy_tar=legacy_tar,
+            shard_index=shard_index,
+            shard_total=shard_total,
+        )
         return await ctr.with_exec(argv).stdout()
 
     @function
