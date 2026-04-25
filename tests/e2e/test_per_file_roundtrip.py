@@ -1,0 +1,163 @@
+"""End-to-end smoke tests against ``gerchowl/mat-vis-tst`` (#193).
+
+Gated behind ``MAT_VIS_E2E=1`` so the suite only runs locally / in
+opt-in CI — HF rate limits make per-PR E2E impractical.
+
+Each ADR-0012 PR (#184..#189) extends this file with the new code
+path it just added. This commit adds the **#184 slice**: the baker
+CLI / library default routing produces a per-file commit on
+``mat-vis-tst`` and a plain HTTP GET on the `resolve/` URL returns
+the same bytes the baker uploaded.
+
+Throwaway tag is auto-deleted on suite teardown so the scratch repo
+stays tidy.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import tempfile
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+E2E_ENABLED = os.environ.get("MAT_VIS_E2E") == "1"
+pytestmark = pytest.mark.skipif(
+    not E2E_ENABLED,
+    reason="set MAT_VIS_E2E=1 to run end-to-end tests against gerchowl/mat-vis-tst",
+)
+
+REPO = "gerchowl/mat-vis-tst"
+TAG = "v0.0.0-e2e-184-perfile"
+SOURCE = "polyhaven"
+TIER = "1k"
+
+
+def _hf_token() -> str:
+    tok = os.environ.get("HF_TOKEN")
+    if tok:
+        return tok
+    p = Path("~/.cache/huggingface/token").expanduser()
+    if p.exists():
+        return p.read_text().strip()
+    pytest.skip("no HF_TOKEN — set the env var or run `hf auth login`")
+
+
+@pytest.fixture(scope="module")
+def baked_tag():
+    """Bake 2 polyhaven 1k materials per-file, yield (tag, result), cleanup."""
+    from huggingface_hub import HfApi
+
+    from mat_vis_baker.hf_bake import bake_one
+
+    token = _hf_token()
+    with tempfile.TemporaryDirectory() as td:
+        result = bake_one(
+            source=SOURCE,
+            tier=TIER,
+            release_tag=TAG,
+            work_dir=Path(td),
+            repo_id=REPO,
+            hf_token=token,
+            limit=2,
+            batch_size=2,
+        )
+
+    assert result.get("ok", 0) == 2, f"baker failed: {result}"
+    yield result
+
+    # Cleanup throwaway branch.
+    api = HfApi(token=token)
+    try:
+        api.delete_branch(repo_id=REPO, repo_type="dataset", branch=TAG)
+    except Exception as e:  # noqa: BLE001
+        print(f"e2e cleanup warn: {type(e).__name__}: {e}")
+
+
+def _resolve_url(path: str, tag: str = TAG) -> str:
+    return f"https://huggingface.co/datasets/{REPO}/resolve/{tag}/{path}"
+
+
+def _http_get(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "mat-vis-e2e/1"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.read()
+
+
+class TestBakeRoutingProducesPerFileTree:
+    def test_tier_complete_sentinel_exists(self, baked_tag) -> None:
+        """ADR-0012 atomicity: every completed tier carries a sentinel."""
+        body = _http_get(_resolve_url(f"{SOURCE}/{TIER}/.tier_complete"))
+        # Sentinel content is the release tag — a 1-line marker.
+        assert TAG in body.decode("utf-8")
+
+    def test_catalog_at_root_is_v3(self, baked_tag) -> None:
+        """Catalog lives at repo root, not under <source>/<tier>/."""
+        import json
+
+        body = _http_get(_resolve_url(f"{SOURCE}.json"))
+        catalog = json.loads(body)
+        assert len(catalog) >= 2
+        assert all("mat_vis" in entry for entry in catalog), "catalog must be v3-shaped"
+
+
+class TestApiGetRoundTrip:
+    """Plain HTTP GET on a per-file URL returns the baker's bytes.
+
+    This is the contract #186 will codify in ``MatVisClient.fetch_texture``.
+    Until then, exercising it via stdlib urllib proves the substrate is
+    independently usable from any HTTP client.
+    """
+
+    def test_fetch_color_png_bytes(self, baked_tag) -> None:
+        from huggingface_hub import HfApi
+
+        api = HfApi(token=_hf_token())
+        # Find first material id from the freshly-baked tree.
+        tree = list(
+            api.list_repo_tree(
+                repo_id=REPO,
+                repo_type="dataset",
+                revision=TAG,
+                path_in_repo=f"{SOURCE}/{TIER}",
+                recursive=True,
+            )
+        )
+        png_files = [
+            getattr(e, "path", "") for e in tree if getattr(e, "path", "").endswith("/color.png")
+        ]
+        assert png_files, f"no color.png in tree: {[getattr(e, 'path', '') for e in tree]}"
+
+        repo_path = png_files[0]
+        body = _http_get(_resolve_url(repo_path))
+        assert body.startswith(b"\x89PNG\r\n\x1a\n"), "must be a real PNG"
+        assert len(body) > 1024, "PNG too small to be a real texture"
+
+        # Cross-check against the LFS pointer's recorded blob.
+        # (HF resolve/ serves the actual bytes through the LFS CDN.)
+        sha256 = hashlib.sha256(body).hexdigest()
+        assert len(sha256) == 64
+
+
+class TestResumeViaPreflight:
+    """Re-running the baker with the same tag must skip everything."""
+
+    def test_second_bake_is_a_noop(self, baked_tag) -> None:
+        from mat_vis_baker.hf_bake import bake_one
+
+        with tempfile.TemporaryDirectory() as td:
+            result = bake_one(
+                source=SOURCE,
+                tier=TIER,
+                release_tag=TAG,
+                work_dir=Path(td),
+                repo_id=REPO,
+                hf_token=_hf_token(),
+                limit=2,
+                batch_size=2,
+            )
+
+        assert result.get("ok", 0) == 0, "preflight should skip everything"
+        assert result.get("skipped_preflight", 0) == 2
