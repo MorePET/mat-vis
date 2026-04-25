@@ -126,22 +126,25 @@ def bake_one(
     hf_token: str | None = None,
     dry_run: bool = False,
     shard: tuple[int, int] | None = None,
+    legacy_tar: bool = False,
+    allow_prod: bool = False,
 ) -> dict:
-    """Bake one ``(source, tier)`` into a tar and atomic-commit to HF.
+    """Bake one ``(source, tier)`` and commit to HF.
 
-    Streaming: fetch in batches, bake in-place, pack into the tar,
-    delete the batch's raw textures, loop. Constant disk usage — the
-    tar grows but raw downloads do not accumulate.
+    Default substrate (ADR-0012): per-file — one HF file per
+    (source, tier, material, channel) under
+    ``<source>/<tier>/<mid>/<channel>.{png,ktx2}``. Routes to
+    ``bake_one_per_file``.
 
-    Scalar sources route through ``bake_scalar_source`` automatically.
+    Set ``legacy_tar=True`` to invoke the original tar+rowmap path.
+    Kept as a one-release-cycle escape hatch; retired by #189.
 
-    When ``shard=(index, total)`` is set, only materials whose id
-    hashes into the given shard are baked — the fetcher still walks
-    every upstream entry (upstream APIs are paginated, not random-
-    access), but ``material_in_shard`` gates the expensive
-    download + bake + pack step. Output filenames gain a
-    ``.shard-N-of-K`` suffix. The catalog write is skipped per shard
-    (the later ``merge-shards`` writes it once from the union)."""
+    Scalar sources (``physicallybased``) always route through
+    ``bake_scalar_source`` regardless of ``legacy_tar``.
+
+    Sharding (``shard=(index, total)``) only applies under the legacy
+    tar path. Per-file substrate makes per-shard tars redundant — pre-
+    flight tree scan + batch commits are the resumability primitive."""
     # Pre-flight: refuse (source, tier) combos with no upstream data.
     # Earlier code let these proceed, then produced 454-materials-failed
     # bake artifacts when every fetch returned no matching package.
@@ -158,13 +161,39 @@ def bake_one(
         raise ValueError(_tier_unsupported_msg(source, tier))
 
     if source == "physicallybased":
-        # Scalar sources are one unit — sharding has no benefit.
+        # Scalar sources are one unit — sharding has no benefit, and
+        # per-file vs tar substrates both no-op into a single catalog
+        # JSON commit.
         return bake_scalar_source(
             source,
             release_tag,
             work_dir,
             repo_id=repo_id,
             hf_token=hf_token,
+            dry_run=dry_run,
+        )
+
+    if not legacy_tar:
+        # ADR-0012 per-file substrate (default).
+        from mat_vis_baker.hf_bake_per_file import bake_one_per_file
+
+        if shard is not None:
+            log.warning(
+                "shard=%r ignored under per-file substrate (ADR-0012); "
+                "use --legacy-tar to retain shard semantics for one cycle.",
+                shard,
+            )
+        return bake_one_per_file(
+            source=source,
+            tier=tier,
+            release_tag=release_tag,
+            work_dir=work_dir,
+            repo_id=repo_id,
+            hf_token=hf_token,
+            allow_prod=allow_prod,
+            limit=limit,
+            offset=offset,
+            batch_size=batch_size,
             dry_run=dry_run,
         )
 
