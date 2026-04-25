@@ -161,3 +161,66 @@ class TestResumeViaPreflight:
 
         assert result.get("ok", 0) == 0, "preflight should skip everything"
         assert result.get("skipped_preflight", 0) == 2
+
+
+# ── #185 slice: Dagger passthrough produces the same per-file tree ──
+
+
+@pytest.mark.skipif(
+    not os.environ.get("MAT_VIS_E2E_DAGGER"),
+    reason="set MAT_VIS_E2E_DAGGER=1 to also run the Dagger smoke (needs `dagger` CLI)",
+)
+class TestDaggerBakeRoutingSmoke:
+    """Run the Dagger ``bake`` op end-to-end against ``mat-vis-tst``.
+
+    Gated on ``MAT_VIS_E2E_DAGGER=1`` (separate from the baker E2E gate)
+    because it requires a working ``dagger`` CLI on the host. CI runs
+    this in the dagger-for-github action; locally it's opt-in.
+    """
+
+    DAGGER_TAG = "v0.0.0-e2e-185-dagger"
+
+    def test_dagger_bake_2_polyhaven_lands_per_file(self) -> None:
+        import subprocess
+
+        from huggingface_hub import HfApi
+
+        token = _hf_token()
+        try:
+            cmd = [
+                "dagger",
+                "call",
+                "bake",
+                "--context=.",
+                "--source=polyhaven",
+                "--tier=1k",
+                f"--release-tag={self.DAGGER_TAG}",
+                "--hf-token=env:HF_TOKEN",
+                "--repo-id=gerchowl/mat-vis-tst",
+                "--limit=2",
+                "--batch-size=2",
+            ]
+            env = {**os.environ, "HF_TOKEN": token}
+            proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=600)
+            assert proc.returncode == 0, f"dagger call bake failed: {proc.stderr[-2000:]}"
+
+            api = HfApi(token=token)
+            tree = list(
+                api.list_repo_tree(
+                    repo_id=REPO,
+                    repo_type="dataset",
+                    revision=self.DAGGER_TAG,
+                    path_in_repo=f"{SOURCE}/{TIER}",
+                    recursive=True,
+                )
+            )
+            paths = {getattr(e, "path", "") for e in tree}
+            assert any(p.endswith("/color.png") for p in paths)
+            assert f"{SOURCE}/{TIER}/.tier_complete" in paths
+        finally:
+            try:
+                HfApi(token=token).delete_branch(
+                    repo_id=REPO, repo_type="dataset", branch=self.DAGGER_TAG
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"dagger e2e cleanup warn: {type(e).__name__}: {e}")
