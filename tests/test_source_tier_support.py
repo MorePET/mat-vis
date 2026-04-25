@@ -113,17 +113,26 @@ class TestBakeRefusesUnsupportedTier:
         from mat_vis_baker.hf_bake import bake_one
 
         # Short-circuit the actual fetch so we don't hit upstream.
+        # Per-file (default since #184) reads the fetcher from
+        # hf_bake_per_file._get_fetcher, not hf_bake — patch both so
+        # this test is substrate-agnostic.
         monkeypatch.setattr(
             "mat_vis_baker.hf_bake._get_fetcher",
             lambda _source: lambda *a, **kw: [],
         )
+        monkeypatch.setattr(
+            "mat_vis_baker.hf_bake_per_file._get_fetcher",
+            lambda _source: lambda *a, **kw: [],
+        )
         # Dry-run + empty fetcher result is fine — we're only checking
-        # the supported-tier guard lets the call through.
+        # the supported-tier guard lets the call through. Use the
+        # scratch repo so the per-file prod-target guard doesn't fire.
         result = bake_one(
             source="gpuopen",
             tier="1k",
             release_tag="v0.0.0-test",
             work_dir=tmp_path,
+            repo_id="gerchowl/mat-vis-tst",
             hf_token="unused",
             dry_run=True,
         )

@@ -212,8 +212,8 @@ def cmd_merge_shards(args: argparse.Namespace) -> int:
 
 
 def cmd_hf_bake(args: argparse.Namespace) -> int:
-    """Bake (source, tier) → atomic HF push. The ADR-0007 replacement
-    for ``cmd_all``'s parquet/GH-Releases path."""
+    """Bake (source, tier) → HF commit. Per-file substrate by default
+    (ADR-0012); legacy tar via --legacy-tar for one transition cycle."""
     from mat_vis_baker.hf_bake import bake_one
     from mat_vis_baker.shard_utils import validate_shard_args
 
@@ -235,6 +235,8 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
         dry_run=args.dry_run,
         shard=shard,
+        legacy_tar=args.legacy_tar,
+        allow_prod=args.allow_prod,
     )
     log.info("hf-bake result: %s", result)
     if "error" in result:
@@ -361,13 +363,31 @@ def main() -> int:
         "--shard-index",
         type=int,
         default=None,
-        help="0-based shard index. Requires --shard-total.",
+        help="0-based shard index. Requires --shard-total. Legacy tar only.",
     )
     p_hf.add_argument(
         "--shard-total",
         type=int,
         default=None,
-        help="Total number of shards. Requires --shard-index.",
+        help="Total number of shards. Requires --shard-index. Legacy tar only.",
+    )
+    p_hf.add_argument(
+        "--legacy-tar",
+        action="store_true",
+        help=(
+            "Use the pre-ADR-0012 tar+rowmap substrate instead of the "
+            "default per-file layout. One-release-cycle escape hatch; "
+            "retired by #189."
+        ),
+    )
+    p_hf.add_argument(
+        "--allow-prod",
+        action="store_true",
+        help=(
+            "Permit writes to non-scratch HF dataset repos (per-file "
+            "substrate guard). Scratch repos are named */mat-vis-tst "
+            "and */mat-vis-*-tst; anything else requires this flag."
+        ),
     )
 
     p_hd = sub.add_parser(

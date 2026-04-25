@@ -405,6 +405,11 @@ class MatVisCi:
         (upstream fetch + tar write + rowmap + catalog + manifest) without
         needing an HF_TOKEN in the runner — skipping the actual HF push.
         Runs native (no platform override).
+
+        Pinned to ``--legacy-tar`` (#184): the verify script asserts the
+        tar+rowmap shape. Once #189 retires the tar substrate, this test
+        is rewritten against the per-file shape (covered live by the
+        ``MAT_VIS_E2E=1`` round-trip suite in the meantime).
         """
         context = src or dag.host().directory(".")
         pip_cache = dag.cache_volume("pip-cache")
@@ -427,6 +432,7 @@ class MatVisCi:
                     "--release-tag",
                     "v0000.00.0",
                     "--dry-run",
+                    "--legacy-tar",
                 ]
             )
             .with_new_file(
