@@ -1269,12 +1269,17 @@ class TestMtlxSource:
 # ── Live tests (network required) ──────────────────────────────
 
 live = pytest.mark.skipif(
-    os.environ.get("MAT_VIS_SKIP_LIVE_TESTS") == "1",
-    reason="MAT_VIS_SKIP_LIVE_TESTS=1",
+    os.environ.get("MAT_VIS_LIVE_TESTS") != "1",
+    reason=(
+        "set MAT_VIS_LIVE_TESTS=1 to run live tests against the prod HF dataset. "
+        "Disabled by default until prod is rebaked under the per-file substrate "
+        "(#186 / ADR-0012); the current prod tags are tar-substrate and the "
+        "v0.6 client has dropped tar support."
+    ),
 )
 
 
-LIVE_TAG = "v2026.04.1"
+LIVE_TAG = os.environ.get("MAT_VIS_LIVE_TAG", "v2026.04.1")
 LIVE_SOURCE = "polyhaven"
 LIVE_TIER = "1k"
 
