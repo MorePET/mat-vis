@@ -170,28 +170,49 @@ def test_rate_limit_still_raises_rate_limit_error():
 
 
 def _client_with_index(rowmap_materials: dict, index_entries: list[dict]):
-    """Build a MatVisClient with a baked rowmap + index, no network."""
+    """Build a MatVisClient with a baked v3 catalog, no network.
+
+    Per-file substrate (#186 / ADR-0012): the rowmap is gone — material
+    staging is signaled by ``available_tiers`` on each catalog entry.
+    The ``rowmap_materials`` arg is kept for back-compat with existing
+    tests: a material id appears in ``rowmap_materials`` ⇒ its catalog
+    entry gets ``available_tiers=["1k"]``; otherwise the entry has no
+    tier and ``MaterialNotStagedError`` fires.
+    """
     from mat_vis_client import MatVisClient
     import tempfile
     from pathlib import Path
 
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "release_tag": "v2026.04.0",
         "sources": {
             "gpuopen": {
                 "catalog": "gpuopen.json",
-                "tiers": {"1k": {"rowmap": "gpuopen-1k-rowmap.json", "tar": "gpuopen-1k.tar"}},
+                "tiers": {"1k": {"complete": True}},
             }
         },
     }
-    rowmap = {"materials": rowmap_materials, "tar_file": "gpuopen-1k.tar"}
+
+    enriched: list[dict] = []
+    for entry in index_entries:
+        out = dict(entry)
+        out.setdefault("source", "gpuopen")
+        if entry.get("id") in rowmap_materials:
+            out["available_tiers"] = ["1k"]
+            out["maps"] = sorted(rowmap_materials[entry["id"]].keys())
+        else:
+            out["available_tiers"] = []
+            out["maps"] = []
+        enriched.append(out)
 
     tmp = Path(tempfile.mkdtemp(prefix="mat-vis-test-resolver-"))
     client = MatVisClient(cache_dir=tmp)
     client._manifest = manifest
-    client._rowmaps = {"gpuopen-1k": rowmap}
-    client._indexes = {"gpuopen": index_entries}
+    client._indexes = {"gpuopen": enriched}
+    # Pre-mark the tier-complete sentinel as seen so fetch_texture skips
+    # the live HEAD probe in unit tests.
+    client._tier_complete[("gpuopen", "1k")] = True
     return client
 
 
@@ -282,30 +303,13 @@ def test_fetch_texture_404_raises_material_not_found_or_http_fetch_error():
     from mat_vis_client import HTTPFetchError, MatVisClient
 
     MOCK_MANIFEST = {
-        "schema_version": 1,
+        "schema_version": 3,
         "release_tag": "v2026.04.0",
-        "tiers": {
-            "1k": {
-                "base_url": "https://example.com/",
-                "sources": {
-                    "ambientcg": {
-                        "parquet_files": ["ambientcg-1k.parquet"],
-                        "rowmap_file": "ambientcg-1k-rowmap.json",
-                    },
-                },
-            }
-        },
-    }
-    MOCK_ROWMAP = {
-        "parquet_file": "ambientcg-1k.parquet",
-        "materials": {
-            "Rock064": {
-                "color": {
-                    "offset": 0,
-                    "length": 100,
-                    "parquet_file": "ambientcg-1k.parquet",
-                }
-            }
+        "sources": {
+            "ambientcg": {
+                "catalog": "ambientcg.json",
+                "tiers": {"1k": {"complete": True}},
+            },
         },
     }
 
@@ -314,9 +318,21 @@ def test_fetch_texture_404_raises_material_not_found_or_http_fetch_error():
 
     tmp = Path(tempfile.mkdtemp(prefix="mat-vis-test-errors-"))
     client = MatVisClient(cache_dir=tmp)
-    # Inject manifest + rowmap so no network call happens for those
+    # Inject manifest + catalog + sentinel so no network call happens for
+    # the metadata path; only the texture GET hits urlopen and 404s.
     client._manifest = MOCK_MANIFEST
-    client._rowmap_cache = {("ambientcg", "1k"): MOCK_ROWMAP}
+    client._indexes = {
+        "ambientcg": [
+            {
+                "id": "Rock064",
+                "source": "ambientcg",
+                "mat_vis": {"name": "Rock064", "category": "stone"},
+                "available_tiers": ["1k"],
+                "maps": ["color"],
+            }
+        ]
+    }
+    client._tier_complete[("ambientcg", "1k")] = True
 
     def fake_urlopen(req, timeout=60):
         raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)

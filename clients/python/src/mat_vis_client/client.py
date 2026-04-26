@@ -114,13 +114,6 @@ def _fmt_size(n: int) -> str:
 # Default soft cap: 5 GB (configurable via MAT_VIS_CACHE_MAX_SIZE).
 DEFAULT_CACHE_MAX_BYTES = _parse_size(os.environ.get("MAT_VIS_CACHE_MAX_SIZE", "5GB"))
 
-# Hard cap per range-read: the rowmap tells us how many bytes to pull for
-# one texture, but a compromised/corrupt rowmap could claim (e.g.) 10 GB
-# for a single PNG and drive the client OOM. Textures are capped in the
-# baker well below this — 500 MB is ~10× the largest legitimate 8k PNG.
-# Override with MAT_VIS_MAX_FETCH_SIZE if you really need more.
-DEFAULT_MAX_FETCH_BYTES = _parse_size(os.environ.get("MAT_VIS_MAX_FETCH_SIZE", "500MB"))
-
 # Previously a hardcoded frozenset of 10 names. The client doesn't need a
 # static enum — categories are discoverable at runtime from rowmap filenames
 # in the release manifest. See MatVisClient.categories(). Kept as a
@@ -421,7 +414,7 @@ def _in_range(value: float | None, lo: float, hi: float) -> bool:
 # Schema versions this client understands. Manifest declares its own
 # schema_version field; if the manifest version is outside this set,
 # the client refuses to operate rather than silently misreading data.
-COMPATIBLE_SCHEMA_VERSIONS = frozenset([2])
+COMPATIBLE_SCHEMA_VERSIONS = frozenset([2, 3])  # 3 = per-file substrate (#186 / ADR-0012)
 
 
 class MatVisClient:
@@ -459,7 +452,10 @@ class MatVisClient:
         self._cache_dir = cache_dir or DEFAULT_CACHE_DIR
         self._cache = cache
         self._manifest: dict | None = None
-        self._rowmaps: dict[str, dict] = {}
+        # Per-file substrate (#186 / ADR-0012): which (source, tier) pairs
+        # we've already verified carry a .tier_complete sentinel. The
+        # probe is a single HEAD request, cached process-wide.
+        self._tier_complete: dict[tuple[str, str], bool] = {}
         self._indexes: dict[str, list[dict]] = {}
         # Cached alternate clients keyed by tag (populated by .at()).
         # Each shares this instance's cache_dir + cache flag so all tag
@@ -552,61 +548,47 @@ class MatVisClient:
         return self._manifest
 
     def _build_manifest_from_tree(self) -> dict:
-        """Build the v2 manifest in memory from the HF tree listing.
+        """Build the manifest in memory from the HF tree listing.
 
-        Single HTTPS GET — no bake-time shared state to race on. The
-        filename conventions encoded here are the sole coupling to
-        the baker: ``<src>.json`` catalogs, ``<src>-<tier>.tar`` +
-        ``<src>-<tier>-rowmap.json`` at root, ``ktx2/<src>-<tier>.tar``
-        + ``ktx2/<src>-<tier>-rowmap.json`` under the ktx2 subtree.
+        Single HTTPS GET — no bake-time shared state to race on. Per-
+        file substrate (#186 / ADR-0012): ``<src>.json`` catalogs at
+        root, ``<src>/<tier>/.tier_complete`` sentinels mark which
+        tiers are atomically complete. Each material × channel file
+        lives at ``<src>/<tier>/<mid>/<channel>.{png,ktx2}`` but the
+        manifest only enumerates (source, tier) pairs — material lists
+        come from the catalog.
         """
-        import re
-
         rev = self._tag or "main"
         tree_url = f"https://huggingface.co/api/datasets/{HF_DATASET}/tree/{rev}?recursive=true"
         tree = _get_json(tree_url)
         paths = [e["path"] for e in tree if e.get("type") == "file"]
 
         sources: dict[str, dict] = {}
-        top_tar_re = re.compile(r"^(?P<src>[a-z]+)-(?P<tier>[A-Za-z0-9-]+)\.tar$")
-        ktx2_tar_re = re.compile(r"^ktx2/(?P<src>[a-z]+)-(?P<tier>[A-Za-z0-9-]+)\.tar$")
 
+        # 1) Discover per-source catalogs at repo root.
         for path in paths:
             if (
                 path.endswith(".json")
-                and "-rowmap" not in path
+                and "-rowmap" not in path  # legacy bakes still co-exist on old tags
                 and "/" not in path
                 and path != "release-manifest.json"
             ):
                 src = path[:-5]
                 sources.setdefault(src, {"catalog": path, "tiers": {}})
-                continue
 
-            m = top_tar_re.match(path)
-            if m:
-                src = m.group("src")
-                tier = m.group("tier")
-                stem = path[:-4]
-                sources.setdefault(src, {"catalog": f"{src}.json", "tiers": {}})
-                sources[src]["tiers"][tier] = {
-                    "tar": path,
-                    "rowmap": f"{stem}-rowmap.json",
-                }
+        # 2) Discover completed tiers via .tier_complete sentinels.
+        for path in paths:
+            if not path.endswith("/.tier_complete"):
                 continue
-
-            m = ktx2_tar_re.match(path)
-            if m:
-                src = m.group("src")
-                tier = m.group("tier")
-                stem = path[len("ktx2/") : -4]
-                sources.setdefault(src, {"catalog": f"{src}.json", "tiers": {}})
-                sources[src]["tiers"][tier] = {
-                    "tar": path,
-                    "rowmap": f"ktx2/{stem}-rowmap.json",
-                }
+            parts = path.split("/")
+            if len(parts) != 3:
+                continue
+            src, tier, _sentinel = parts
+            sources.setdefault(src, {"catalog": f"{src}.json", "tiers": {}})
+            sources[src]["tiers"][tier] = {"complete": True}
 
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "release_tag": rev,
             "sources": sources,
         }
@@ -824,59 +806,51 @@ class MatVisClient:
         CATEGORIES = frozenset(result)
         return result
 
-    def rowmap(self, source: str, tier: str, category: str | None = None) -> dict:
-        """Fetch and cache the rowmap for a (source, tier).
+    def materials(self, source: str, tier: str) -> list[str]:
+        """List material IDs available for a (source, tier).
 
-        v0.6.0: exactly one rowmap per (source, tier) — no per-category
-        partitioning (ADR-0007). The ``category`` kwarg is accepted for
-        back-compat with 0.5.x callers but ignored: every material is
-        in the same tar, filtering by category is the caller's job
-        (typically via `search()` / `index()`).
+        v0.6.0+ (#186 / ADR-0012): derived from the v3 catalog —
+        entries whose ``available_tiers`` list includes ``tier``.
         """
-        del category  # accepted but no longer partitions the fetch
-
-        key = f"{source}-{tier}"
-        if key in self._rowmaps:
-            return self._rowmaps[key]
-
+        # Validate (source, tier) is known to the manifest before trusting
+        # the catalog scan — keeps the friendly error messages.
         sources = self.manifest.get("sources", {})
         src_entry = _lookup(sources, source, kind="source")
-        tier_entry = _lookup(
+        _lookup(
             src_entry.get("tiers") or {},
             tier,
             kind="tier",
             context=f"source {source!r}",
         )
-        rowmap_path = tier_entry["rowmap"]
 
-        cache_path = self._cache_scope / ".rowmaps" / rowmap_path
-        cached = self._cache_read_text(cache_path)
-        if cached is not None:
-            rm = json.loads(cached)
-        else:
-            rm = _get_json(self._hf_url(rowmap_path))
-            self._cache_write_text(cache_path, json.dumps(rm, indent=2))
-
-        # Attach the tar path to every channel so fetch_texture can find
-        # the bytes without re-reading the manifest.
-        tar_path = tier_entry["tar"]
-        for channels in rm.get("materials", {}).values():
-            for ch_data in channels.values():
-                ch_data["tar_file"] = tar_path
-
-        self._rowmaps[key] = rm
-        return rm
-
-    def materials(self, source: str, tier: str) -> list[str]:
-        """List material IDs available for a source × tier."""
-        rm = self.rowmap(source, tier)
-        return sorted(rm.get("materials", {}).keys())
+        idx = self._load_index_raw(source)
+        out: list[str] = []
+        for entry in idx:
+            if not isinstance(entry, dict):
+                continue
+            tiers = entry.get("available_tiers") or []
+            if tier in tiers and entry.get("id"):
+                out.append(entry["id"])
+        return sorted(out)
 
     def channels(self, source: str, material_id: str, tier: str) -> list[str]:
-        """List channels available for a material."""
-        rm = self.rowmap(source, tier)
-        mat = rm.get("materials", {}).get(material_id, {})
-        return sorted(mat.keys())
+        """List channels available for a material at a tier.
+
+        v0.6.0+ (#186 / ADR-0012): read from the v3 catalog entry's
+        ``maps`` list (or ``texture_hashes`` keys as fallback). The
+        ``tier`` is required to confirm the material is actually staged
+        for that resolution; mismatches raise the existing typed errors
+        via ``_resolve_material_id``.
+        """
+        resolved = self._resolve_material_id(source, material_id, tier)
+        idx = self._load_index_raw(source)
+        for entry in idx:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("id") == resolved:
+                maps = entry.get("maps") or list((entry.get("texture_hashes") or {}).keys())
+                return sorted(m for m in maps if isinstance(m, str))
+        return []
 
     # ── Index & search ──────────────────────────────────────────
 
@@ -1133,31 +1107,28 @@ class MatVisClient:
         return unicodedata.normalize("NFKC", s).strip().casefold()
 
     def _resolve_material_id(self, source: str, material_id: str, tier: str) -> str:
-        """Resolve ``material_id`` to its canonical rowmap key.
+        """Resolve ``material_id`` to its canonical catalog id.
+
+        Per-file substrate (#186 / ADR-0012): "is this material staged
+        for the requested tier?" comes from the v3 catalog entry's
+        ``available_tiers`` field, not a separate rowmap.
 
         Resolution order, for the UX described in mat-vis#143:
 
-        1. Direct rowmap hit → ``material_id`` is already a canonical id.
-        2. Exact ``id`` match in the per-source index but not in the rowmap
-           → :class:`MaterialNotStagedError` (needs a re-bake).
-        3. Normalized-name match against the index
-           (:meth:`_normalize_name`) — resolve to that entry's ``id``:
+        1. Direct id hit + tier in available_tiers → canonical id.
+        2. Exact ``id`` match in the catalog but tier not in
+           ``available_tiers`` → :class:`MaterialNotStagedError`.
+        3. Normalized-name match against ``mat_vis.name``
+           (:meth:`_normalize_name`):
            a. >1 match → :class:`AmbiguousMaterialError` (mat-vis#144).
-           b. 1 match, id in rowmap → return it.
-           c. 1 match, id missing from rowmap → :class:`MaterialNotStagedError`.
+           b. 1 match, tier staged → return id.
+           c. 1 match, tier not staged → :class:`MaterialNotStagedError`.
         4. Nothing matches → :class:`UnknownMaterialError`.
         """
-        rm = self.rowmap(source, tier)
-        materials = rm.get("materials", {})
-        if material_id in materials:
-            return material_id
-
         try:
             idx = self.index(source)
         except MatVisError:
             idx = []
-        # Defend against tests / fallbacks where index() returns a non-list
-        # (e.g. a cached rowmap got wired in by accident) — treat as empty.
         if not isinstance(idx, list):
             idx = []
 
@@ -1173,7 +1144,12 @@ class MatVisClient:
             if entry_name and self._normalize_name(entry_name) == norm_query:
                 by_name.append(entry)
 
+        def _is_staged(entry: dict) -> bool:
+            return tier in (entry.get("available_tiers") or [])
+
         if by_id is not None:
+            if _is_staged(by_id):
+                return material_id
             raise MaterialNotStagedError(source=source, material_id=material_id, tier=tier)
 
         if len(by_name) > 1:
@@ -1185,13 +1161,17 @@ class MatVisClient:
 
         if len(by_name) == 1:
             resolved = by_name[0].get("id", "")
-            if resolved in materials:
+            if _is_staged(by_name[0]):
                 return resolved
             raise MaterialNotStagedError(source=source, material_id=resolved, tier=tier)
 
+        # Build the "available materials at this tier" hint from the catalog.
+        staged_ids = sorted(
+            e["id"] for e in idx if isinstance(e, dict) and _is_staged(e) and e.get("id")
+        )
         raise UnknownMaterialError(
             key=material_id,
-            available=sorted(materials.keys()),
+            available=staged_ids,
             context=f"{source}/{tier}",
         )
 
@@ -1354,33 +1334,37 @@ class MatVisClient:
                 self._mtlx_originals[source] = {}
         return self._mtlx_originals[source]
 
-    # ── Deprecated mtlx shims ──────────────────────────────────
+    # ── Per-file texture fetch (#186 / ADR-0012) ───────────────────
 
-    def rowmap_entry(
-        self,
-        source: str,
-        material_id: str,
-        tier: str = "1k",
-    ) -> dict[str, dict]:
-        """Get raw rowmap offsets for a material (for DIY consumers).
+    _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+    _KTX2_MAGIC = b"\xabKTX 20\xbb\r\n\x1a\n"
 
-        ``material_id`` may be a canonical id or a human-readable name
-        (see :meth:`_resolve_material_id`).
+    def _per_file_url(self, source: str, tier: str, mid: str, channel: str, ext: str) -> str:
+        """``<source>/<tier>/<mid>/<channel>.<ext>`` resolve URL on HF."""
+        return self._hf_url(f"{source}/{tier}/{mid}/{channel}.{ext}")
 
-        Returns a dict of channel -> {offset, length, tar_file}.
+    def _assert_tier_complete(self, source: str, tier: str) -> None:
+        """Probe ``<source>/<tier>/.tier_complete`` once per process.
+
+        ADR-0012: the sentinel is the final commit per tier, so its
+        presence confirms the tier is atomically baked. Probe once and
+        cache; reject partial tiers loudly so callers don't silently
+        consume half-baked data.
         """
-        resolved = self._resolve_material_id(source, material_id, tier)
-        rm = self.rowmap(source, tier)
-        mat = rm["materials"][resolved]
-        tar_file = rm.get("tar_file", "")
-        return {
-            ch: {
-                "offset": info["offset"],
-                "length": info["length"],
-                "tar_file": info.get("tar_file", tar_file),
-            }
-            for ch, info in mat.items()
-        }
+        key = (source, tier)
+        if self._tier_complete.get(key):
+            return
+        url = self._hf_url(f"{source}/{tier}/.tier_complete")
+        try:
+            _get(url)  # any 2xx response means the sentinel exists
+        except Exception as e:  # noqa: BLE001 — wrap in friendly error
+            raise MatVisError(
+                f"tier {source}/{tier!r} is not atomically complete on this "
+                f"release (no .tier_complete sentinel). The bake may still be "
+                f"running, or this revision was committed mid-batch. Re-run "
+                f"the bake or pin a known-complete tag."
+            ) from e
+        self._tier_complete[key] = True
 
     def fetch_texture(
         self,
@@ -1391,74 +1375,85 @@ class MatVisClient:
         *,
         tag: str | None = None,
     ) -> bytes:
-        """Fetch a single texture PNG via HTTP range read.
+        """Fetch a single texture via plain HTTPS GET (#186 / ADR-0012).
 
-        Returns raw PNG bytes. Caches locally under the active tag scope
-        (so releases don't collide). Pass ``cache=False`` at client
-        construction to opt out entirely.
+        URL: ``<HF_BASE>/<tag>/<source>/<tier>/<material_id>/<channel>.{png,ktx2}``.
+        PNG is tried first (the common case for textured sources); on
+        404 the client falls back to KTX2 for derived ktx2 tiers.
 
-        Pass ``tag="v..."`` to fetch from a specific release without
-        reinstantiating the client (hf-hub ``revision=`` pattern).
+        Per-file substrate replaces the pre-#186 tar+rowmap+Range path.
+        Verifies a ``.tier_complete`` sentinel for the requested tier
+        on first read so partial bakes never serve half-baked bytes.
+
+        Returns raw bytes. Caches locally under the active tag scope.
+        Pass ``tag="v..."`` to delegate to ``self.at(tag)`` for a
+        specific release without reinstantiating.
         """
         if tag is not None and tag != self._tag:
             return self.at(tag).fetch_texture(source, material_id, channel, tier)
-        resolved = self._resolve_material_id(source, material_id, tier)
-        # Check cache first (tag-scoped)
-        cache_path = self._cache_scope / source / tier / resolved / f"{channel}.png"
-        cached = self._cache_read_bytes(cache_path)
-        if cached is not None:
-            return cached
 
-        # Find in rowmap (resolver guarantees membership)
-        rm = self.rowmap(source, tier)
-        mat = rm["materials"][resolved]
-        rng = _lookup(
-            mat,
-            channel,
-            kind="channel",
-            context=f"{source}/{tier}/{resolved}",
+        # Validate (source, tier) against the manifest first — gives the
+        # friendliest possible error before we hit the catalog or HF.
+        sources_block = self.manifest.get("sources", {})
+        src_entry = _lookup(sources_block, source, kind="source")
+        _lookup(
+            src_entry.get("tiers") or {},
+            tier,
+            kind="tier",
+            context=f"source {source!r}",
         )
-        offset = rng["offset"]
-        length = rng["length"]
 
-        # Defend against malicious/corrupt rowmaps claiming huge reads.
-        # A bad rowmap could otherwise allocate gigabytes for one PNG
-        # and OOM the client; see 0.3.1 security review.
-        if not isinstance(length, int) or length <= 0:
+        resolved = self._resolve_material_id(source, material_id, tier)
+
+        # Channel-existence check up front so a friendly error fires
+        # before we waste a GET. Mirrors the pre-#186 rowmap-lookup error.
+        available = self.channels(source, resolved, tier)
+        if channel not in available:
             raise MatVisError(
-                f"invalid rowmap entry for {source}/{resolved}/{channel}: length={length!r}"
-            )
-        if length > DEFAULT_MAX_FETCH_BYTES:
-            raise MatVisError(
-                f"rowmap claims {_fmt_size(length)} for {source}/{resolved}/{channel}, "
-                f"over the {_fmt_size(DEFAULT_MAX_FETCH_BYTES)} safety cap. "
-                "Raise MAT_VIS_MAX_FETCH_SIZE to override."
+                f"channel {channel!r} not found "
+                f"(context: {source}/{tier}/{resolved}). "
+                f"Available: {available}"
             )
 
-        # Range-read the tar on HF. HF's resolve URL is stable (no
-        # expiring signed-URL dance), so one GET per channel is fine.
-        tar_file = rng.get("tar_file") or rm.get("tar_file", f"{source}-{tier}.tar")
-        url = self._hf_url(tar_file)
-        range_header = f"bytes={offset}-{offset + length - 1}"
-        data = _get(url, headers={"Range": range_header})
+        # ext is unknown until we hit one — try .png in cache first
+        # (overwhelming common case), fall back to .ktx2 cache key.
+        for ext in ("png", "ktx2"):
+            cache_path = self._cache_scope / source / tier / resolved / f"{channel}.{ext}"
+            cached = self._cache_read_bytes(cache_path)
+            if cached is not None:
+                return cached
 
-        # Verify payload magic matches one of the formats we bake:
-        # PNG (\x89PNG\r\n\x1a\n) or KTX2 (\xabKTX 20\xbb\r\n\x1a\n).
-        _PNG = b"\x89PNG\r\n\x1a\n"
-        _KTX2 = b"\xabKTX 20\xbb\r\n\x1a\n"
-        if not (data.startswith(_PNG) or data.startswith(_KTX2)):
-            raise ValueError(
-                f"Expected PNG or KTX2 bytes, got {data[:12]!r} "
-                f"({source}/{resolved}/{channel} @ {tier})"
-            )
+        # Confirm the tier is atomically complete before reading.
+        self._assert_tier_complete(source, tier)
 
-        # Cache (tag-scoped; no-op if cache=False)
-        self._cache_write_bytes(cache_path, data)
+        # Try PNG, fall back to KTX2. HF returns 404 for missing files.
+        # If the PNG path 404s but a KTX2 lands, that's the derived
+        # ktx2 tier shape. If BOTH 404, surface the original error
+        # type — callers (and tests) expect HTTPFetchError, not a
+        # generic MatVisError, so the network-failure contract is stable.
+        last_exc: Exception | None = None
+        for ext in ("png", "ktx2"):
+            url = self._per_file_url(source, tier, resolved, channel, ext)
+            try:
+                data = _get(url)
+            except Exception as e:  # noqa: BLE001
+                last_exc = e
+                continue
+            if not (data.startswith(self._PNG_MAGIC) or data.startswith(self._KTX2_MAGIC)):
+                raise ValueError(
+                    f"Expected PNG or KTX2 bytes, got {data[:12]!r} "
+                    f"({source}/{resolved}/{channel} @ {tier})"
+                )
+            cache_path = self._cache_scope / source / tier / resolved / f"{channel}.{ext}"
+            self._cache_write_bytes(cache_path, data)
+            self._maybe_warn_cache_cap()
+            return data
 
-        # Soft-cap warning (once per process)
-        self._maybe_warn_cache_cap()
-
-        return data
+        # Both extensions failed. Re-raise the underlying network error
+        # so HTTPFetchError (and friends) propagate to callers.
+        if last_exc is not None:
+            raise last_exc
+        raise MatVisError(f"channel {channel!r} not available for {source}/{resolved} @ {tier}")
 
     # ── Cache management ────────────────────────────────────────
 

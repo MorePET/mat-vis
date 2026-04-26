@@ -163,6 +163,115 @@ class TestResumeViaPreflight:
         assert result.get("skipped_preflight", 0) == 2
 
 
+# ── #186 slice: Python client fetch_texture round-trip ──────────────
+
+
+class TestPythonClientFetchTextureRoundTrip:
+    """Bake → MatVisClient.fetch_texture → bytes match. Locks the
+    plain-GET contract end-to-end (#186 / ADR-0012)."""
+
+    def _client_pointed_at_tst(self, td: Path):
+        """Return a MatVisClient whose HF_BASE / HF_DATASET point at
+        ``mat-vis-tst`` for the duration of the test. The client uses
+        module-level constants for these, so monkeypatch them on the
+        loaded module."""
+        from mat_vis_client import MatVisClient
+        from mat_vis_client import client as _mvc
+
+        _mvc.HF_DATASET = REPO  # gerchowl/mat-vis-tst
+        _mvc.HF_BASE = f"https://huggingface.co/datasets/{REPO}/resolve"
+        return MatVisClient(tag=TAG, cache_dir=td, cache=False)
+
+    def test_client_fetch_returns_baker_bytes(self, baked_tag) -> None:
+        """Python client .fetch_texture against the freshly-baked tag
+        returns valid PNG bytes through the per-file resolve URL."""
+        with tempfile.TemporaryDirectory() as td:
+            client = self._client_pointed_at_tst(Path(td))
+            mats = client.materials(SOURCE, TIER)
+            assert len(mats) >= 2, f"expected at least 2 baked materials, got {mats}"
+
+            # Validate channels enumeration.
+            chs = client.channels(SOURCE, mats[0], TIER)
+            assert "color" in chs
+
+            # Plain GET on per-file URL returns valid PNG bytes.
+            data = client.fetch_texture(SOURCE, mats[0], "color", TIER)
+            assert data.startswith(b"\x89PNG\r\n\x1a\n"), "must be a real PNG"
+            assert len(data) > 1024, "PNG too small to be a real texture"
+
+    def test_client_rejects_partial_tier(self, baked_tag) -> None:
+        """Pointed at an existing-but-incomplete tier (no .tier_complete
+        sentinel), .fetch_texture raises ``MatVisError``. Lock this gate
+        so future regressions can't silently serve mid-batch state."""
+        from huggingface_hub import HfApi
+
+        from mat_vis_client import MatVisClient, MatVisError
+
+        token = _hf_token()
+        api = HfApi(token=token)
+
+        # Make a sibling tag that has files but lacks the sentinel —
+        # snapshot main and add a single file so the tier looks "started".
+        partial_tag = "v0.0.0-e2e-186-partial"
+        from huggingface_hub import CommitOperationAdd
+
+        api.create_branch(
+            repo_id=REPO,
+            repo_type="dataset",
+            branch=partial_tag,
+            revision="main",
+            exist_ok=True,
+        )
+        api.create_commit(
+            repo_id=REPO,
+            repo_type="dataset",
+            operations=[
+                CommitOperationAdd(
+                    path_in_repo=f"{SOURCE}/{TIER}/dummy/color.png",
+                    path_or_fileobj=b"\x89PNG\r\n\x1a\n" + b"\x00" * 1100,
+                ),
+            ],
+            commit_message="e2e #186 partial-tier setup (intentionally NO sentinel)",
+            revision=partial_tag,
+        )
+
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                from mat_vis_client import client as _mvc
+
+                _mvc.HF_DATASET = REPO
+                _mvc.HF_BASE = f"https://huggingface.co/datasets/{REPO}/resolve"
+                client = MatVisClient(tag=partial_tag, cache_dir=Path(td), cache=False)
+                # Pre-seed manifest + index so we get past metadata
+                # validation and into the sentinel probe.
+                client._manifest = {
+                    "schema_version": 3,
+                    "release_tag": partial_tag,
+                    "sources": {
+                        SOURCE: {
+                            "catalog": f"{SOURCE}.json",
+                            "tiers": {TIER: {"complete": False}},
+                        },
+                    },
+                }
+                client._indexes[SOURCE] = [
+                    {
+                        "id": "dummy",
+                        "source": SOURCE,
+                        "mat_vis": {"name": "dummy", "category": "other"},
+                        "available_tiers": [TIER],
+                        "maps": ["color"],
+                    },
+                ]
+                with pytest.raises(MatVisError, match="not atomically complete"):
+                    client.fetch_texture(SOURCE, "dummy", "color", TIER)
+        finally:
+            try:
+                api.delete_branch(repo_id=REPO, repo_type="dataset", branch=partial_tag)
+            except Exception as e:  # noqa: BLE001
+                print(f"e2e #186 cleanup warn: {type(e).__name__}: {e}")
+
+
 # ── #185 slice: Dagger passthrough produces the same per-file tree ──
 
 
