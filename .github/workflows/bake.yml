@@ -95,6 +95,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `uv` is needed by the schema-drift gate below; install once up-front
+      # so the gate doesn't fail with `uv: command not found` (latent since
+      # #170 — gate had never fired against a non-dry-run bake until #214).
+      - uses: astral-sh/setup-uv@v6
+
       - name: Dagger shell-safety lint (#61)
         run: python3 scripts/check-dagger-shell-safety.py
 
