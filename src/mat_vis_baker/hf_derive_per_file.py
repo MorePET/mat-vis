@@ -54,6 +54,7 @@ from PIL import Image
 
 from mat_vis_baker.common import CANONICAL_CHANNELS, TIER_TO_PX
 from mat_vis_baker.hf_bake_per_file import _guard_prod_target
+from mat_vis_baker.progress import ProgressTracker, emit_bake_plan
 
 log = logging.getLogger("mat-vis-baker.hf_derive_per_file")
 
@@ -423,6 +424,27 @@ def _derive_driver(
     if not mids:
         return {"error": "no source materials", "ok": 0, "failed": 0, "skipped_preflight": 0}
 
+    # #217: structured plan line. derive_plan mirrors bake_plan exactly
+    # except for the leading token. expected_files is materials × the
+    # canonical channel count (a rough estimate; per-source channel
+    # sets are non-uniform, hence the `≈` in the format).
+    expected_files = len(mids) * len(CANONICAL_CHANNELS)
+    emit_bake_plan(
+        source=source,
+        tier=target_tier,
+        total_materials=len(mids),
+        expected_files=expected_files,
+        release_tag=release_tag,
+        repo_id=repo_id,
+        kind="derive",
+    )
+    progress = ProgressTracker(
+        source=source,
+        tier=target_tier,
+        total_materials=len(mids),
+        kind="derive",
+    )
+
     n_ok = 0
     n_failed = 0
     n_skipped = 0
@@ -436,6 +458,11 @@ def _derive_driver(
         nonlocal last_commit_sha
         if not pending_ops:
             return last_commit_sha
+        # Bytes accounting: the ops we built carry the transformed
+        # bytes inline, so summing len() avoids a second pass.
+        batch_bytes = sum(
+            len(op.path_or_fileobj) for op in pending_ops if isinstance(op.path_or_fileobj, bytes)
+        )
         if dry_run:
             log.info(
                 "%s dry-run: would commit %d files for %d materials",
@@ -443,26 +470,30 @@ def _derive_driver(
                 len(pending_ops),
                 len(pending_mids),
             )
-            return last_commit_sha
-        commit = api.create_commit(
-            repo_id=repo_id,
-            repo_type="dataset",
-            operations=list(pending_ops),
-            commit_message=(
-                f"feat(data): {release_tag} — derive {source} {target_tier} "
-                f"from {source_tier} ({len(pending_mids)} materials, "
-                f"{len(pending_ops)} files)"
-            ),
-            revision=release_tag,
-        )
-        sha = getattr(commit, "oid", "") or getattr(commit, "commit_oid", "")
-        log.info(
-            "%s batch commit: %d materials, %d files, sha=%s",
-            label,
-            len(pending_mids),
-            len(pending_ops),
-            sha[:12] if sha else "?",
-        )
+            sha = ""
+        else:
+            commit = api.create_commit(
+                repo_id=repo_id,
+                repo_type="dataset",
+                operations=list(pending_ops),
+                commit_message=(
+                    f"feat(data): {release_tag} — derive {source} {target_tier} "
+                    f"from {source_tier} ({len(pending_mids)} materials, "
+                    f"{len(pending_ops)} files)"
+                ),
+                revision=release_tag,
+            )
+            sha = getattr(commit, "oid", "") or getattr(commit, "commit_oid", "")
+            log.info(
+                "%s batch commit: %d materials, %d files, sha=%s",
+                label,
+                len(pending_mids),
+                len(pending_ops),
+                sha[:12] if sha else "?",
+            )
+        # #217: structured progress line — emit AFTER the commit lands.
+        progress.record_batch(materials=len(pending_mids), bytes_added=batch_bytes)
+        progress.emit_progress()
         return sha or last_commit_sha
 
     for i, mid in enumerate(mids):
@@ -648,6 +679,8 @@ def _derive_driver(
         n_failed,
         n_skipped,
     )
+    # #217: closing line of the (plan, progress, …, done) triple.
+    progress.emit_done(ok=n_ok, failed=n_failed, skipped_preflight=n_skipped)
 
     return {
         "commit": last_commit_sha,

@@ -45,6 +45,7 @@ from mat_vis_baker.common import (
     hash_textures,
 )
 from mat_vis_baker.index_builder import build_index
+from mat_vis_baker.progress import ProgressTracker, emit_bake_plan
 from mat_vis_baker.source_tiers import is_supported, unsupported_tier_message
 
 log = logging.getLogger("mat-vis-baker.hf_bake_per_file")
@@ -85,6 +86,31 @@ def _get_fetcher(source: str):
     else:
         raise NotImplementedError(f"Source {source!r} not yet implemented")
     return fetch
+
+
+def _discover_total_materials(source: str) -> int:
+    """Count materials on the upstream catalog for ``bake_plan``.
+
+    Best-effort: failures return 0 so we still emit the plan line (with
+    ``total_materials=0``) rather than crashing the bake. The real count
+    surfaces in ``bake_done`` either way.
+    """
+    try:
+        if source == "ambientcg":
+            from mat_vis_baker.sources.ambientcg import discover
+
+            return len(discover())
+        if source == "polyhaven":
+            from mat_vis_baker.sources.polyhaven import discover
+
+            return len(discover())
+        if source == "gpuopen":
+            from mat_vis_baker.sources.gpuopen import discover
+
+            return len(discover())
+    except Exception as e:  # noqa: BLE001
+        log.warning("bake_plan total_materials lookup failed (%s): %s", type(e).__name__, e)
+    return 0
 
 
 def _already_committed_material_ids(
@@ -276,6 +302,30 @@ def bake_one_per_file(
         len(already),
     )
 
+    # #217: structured plan line — first non-init log entry of the bake
+    # step. Emitted even when total_materials lookup fails (best-effort
+    # discover() falls back to 0). expected_files is a rough estimate:
+    # total_materials × len(CANONICAL_CHANNELS). Per-source channel sets
+    # are non-uniform (see ambientcg.py), so this is "≈" not exact —
+    # which the line shape (`expected_files≈<M>`) reflects.
+    total_materials = _discover_total_materials(source)
+    expected_files = total_materials * len(CANONICAL_CHANNELS)
+    emit_bake_plan(
+        source=source,
+        tier=tier,
+        total_materials=total_materials,
+        expected_files=expected_files,
+        release_tag=release_tag,
+        repo_id=repo_id,
+        kind="bake",
+    )
+    progress = ProgressTracker(
+        source=source,
+        tier=tier,
+        total_materials=total_materials,
+        kind="bake",
+    )
+
     pending_batch: list[MaterialRecord] = []
 
     def _flush_batch(batch: list[MaterialRecord]) -> str:
@@ -290,8 +340,15 @@ def bake_one_per_file(
             ops.extend(_build_commit_ops_for_record(rec, source, tier))
         if not ops:
             return last_commit_sha
+        # Account bytes by reading the same in-memory payload the
+        # CommitOperationAdd holds — avoids a second disk read and
+        # matches the actual upload size.
+        batch_bytes = sum(
+            len(op.path_or_fileobj) for op in ops if isinstance(op.path_or_fileobj, bytes)
+        )
         if dry_run:
             log.info("dry-run: would commit %d files for %d materials", len(ops), len(batch))
+            sha = ""
         else:
             commit = api.create_commit(
                 repo_id=repo_id,
@@ -311,6 +368,11 @@ def bake_one_per_file(
                 len(ops),
                 sha[:12] if sha else "?",
             )
+        # #217: structured progress line — emit AFTER the commit lands so
+        # a crash mid-commit doesn't credit the operator with progress
+        # the substrate doesn't actually hold.
+        progress.record_batch(materials=len(batch), bytes_added=batch_bytes)
+        progress.emit_progress()
         # Free per-rec files now the commit is durable.
         for rec in batch:
             for p in list(rec.texture_paths.values()):
@@ -318,7 +380,7 @@ def bake_one_per_file(
                     Path(p).unlink(missing_ok=True)
                 except OSError:
                     pass
-        return sha if not dry_run else ""
+        return sha
 
     while True:
         batch_limit = batch_size
@@ -468,6 +530,9 @@ def bake_one_per_file(
         n_failed,
         n_skipped_preflight,
     )
+    # #217: structured terminal line — single-line summary that closes
+    # the (plan, progress, …, done) triple a parser can lock onto.
+    progress.emit_done(ok=n_ok, failed=n_failed, skipped_preflight=n_skipped_preflight)
 
     return {
         "commit": last_commit_sha,

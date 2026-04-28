@@ -290,6 +290,15 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
 
+    # #217: line-buffered stdout so structured `bake_plan` / `bake_progress`
+    # / `bake_done` lines reach the parent process (GitHub Actions live
+    # log) within the OS pipe-flush window. `PYTHONUNBUFFERED=1` is set
+    # on the Dagger baker container, but this is the belt to that
+    # suspenders for non-Dagger callers.
+    from mat_vis_baker.progress import enable_line_buffering
+
+    enable_line_buffering()
+
     parser = argparse.ArgumentParser(prog="mat-vis-baker")
     sub = parser.add_subparsers(dest="command", required=True)
 
