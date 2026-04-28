@@ -227,6 +227,7 @@ def cmd_hf_derive(args: argparse.Namespace) -> int:
         allow_prod=args.allow_prod,
         limit=args.limit,
         batch_size=args.batch_size,
+        batch_max_bytes=args.batch_max_bytes,
     )
     log.info("hf-derive result: %s", result)
     if "error" in result:
@@ -252,6 +253,7 @@ def cmd_hf_derive_ktx2(args: argparse.Namespace) -> int:
         allow_prod=args.allow_prod,
         limit=args.limit,
         batch_size=args.batch_size,
+        batch_max_bytes=args.batch_max_bytes,
     )
     log.info("hf-derive-ktx2 result: %s", result)
     if "error" in result:
@@ -278,6 +280,7 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
         limit=args.limit,
         offset=args.offset,
         batch_size=args.batch_size,
+        batch_max_bytes=args.batch_max_bytes,
         dry_run=args.dry_run,
         allow_prod=args.allow_prod,
     )
@@ -405,7 +408,28 @@ def main() -> int:
     )
     p_hf.add_argument("--limit", type=int, default=None)
     p_hf.add_argument("--offset", type=int, default=0)
-    p_hf.add_argument("--batch-size", type=int, default=50)
+    p_hf.add_argument(
+        "--batch-size",
+        type=int,
+        default=300,
+        help=(
+            "Materials per atomic commit (count ceiling). #228: bytes is "
+            "the binding constraint at typical content (~1.5 MiB/material), "
+            "so 300 is a safe overshoot — flush trips on whichever bound hits first."
+        ),
+    )
+    p_hf.add_argument(
+        "--batch-max-bytes",
+        type=int,
+        default=700 * 1024 * 1024,
+        help=(
+            "Max bytes per atomic commit (default 734003200 = 700 MiB). "
+            "Flush triggers on first-of-N-or-bytes — whichever bound trips "
+            "first. Bytes only; no human-friendly units. HF hard-caps at "
+            "1 GiB/commit; 700 MiB leaves headroom for catalog + manifest "
+            "+ sentinel commits sharing the 128/hr/repo budget."
+        ),
+    )
     p_hf.add_argument(
         "--dry-run",
         action="store_true",
@@ -455,7 +479,25 @@ def main() -> int:
         help="HfApi token; raw or 'env:VAR'. Falls back to cached HF login.",
     )
     p_hfd.add_argument("--limit", type=int, default=None)
-    p_hfd.add_argument("--batch-size", type=int, default=50)
+    p_hfd.add_argument(
+        "--batch-size",
+        type=int,
+        default=300,
+        help=(
+            "Materials per atomic commit (count ceiling, #228). Bytes is "
+            "the binding constraint at typical content; 300 is a safe overshoot."
+        ),
+    )
+    p_hfd.add_argument(
+        "--batch-max-bytes",
+        type=int,
+        default=700 * 1024 * 1024,
+        help=(
+            "Max bytes per atomic commit (default 734003200 = 700 MiB). "
+            "Flush triggers on first-of-N-or-bytes. HF caps at 1 GiB/commit; "
+            "700 MiB leaves headroom for catalog + manifest + sentinel."
+        ),
+    )
     p_hfd.add_argument("--dry-run", action="store_true")
     p_hfd.add_argument(
         "--allow-prod",
@@ -495,7 +537,25 @@ def main() -> int:
         help="HfApi token; raw or 'env:VAR'. Falls back to cached HF login.",
     )
     p_hfk.add_argument("--limit", type=int, default=None)
-    p_hfk.add_argument("--batch-size", type=int, default=50)
+    p_hfk.add_argument(
+        "--batch-size",
+        type=int,
+        default=300,
+        help=(
+            "Materials per atomic commit (count ceiling, #228). Bytes is "
+            "the binding constraint at typical content; 300 is a safe overshoot."
+        ),
+    )
+    p_hfk.add_argument(
+        "--batch-max-bytes",
+        type=int,
+        default=700 * 1024 * 1024,
+        help=(
+            "Max bytes per atomic commit (default 734003200 = 700 MiB). "
+            "Flush triggers on first-of-N-or-bytes. HF caps at 1 GiB/commit; "
+            "700 MiB leaves headroom for catalog + manifest + sentinel."
+        ),
+    )
     p_hfk.add_argument("--dry-run", action="store_true")
     p_hfk.add_argument(
         "--allow-prod",

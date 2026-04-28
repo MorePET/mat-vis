@@ -19,6 +19,7 @@ def bake_argv(
     limit: int,
     dry_run: bool,
     allow_prod: bool,
+    batch_max_bytes: int = 700 * 1024 * 1024,
 ) -> list[str]:
     """Build the ``mat-vis-baker hf-bake`` argv list.
 
@@ -30,6 +31,10 @@ def bake_argv(
     retired with the legacy tar substrate (#189 / ADR-0012) — per-file
     bakes use pre-flight tree scan + batch commits as the resumability
     primitive instead of shard-N-of-K artifacts.
+
+    #228: ``--batch-max-bytes`` is always emitted. The CLI defaults
+    match this default, but emitting unconditionally keeps the Dagger
+    surface explicit (and lets a workflow input override it).
     """
     argv: list[str] = [
         "uv",
@@ -47,6 +52,8 @@ def bake_argv(
         str(offset),
         "--batch-size",
         str(batch_size),
+        "--batch-max-bytes",
+        str(batch_max_bytes),
     ]
     if limit > 0:
         argv += ["--limit", str(limit)]

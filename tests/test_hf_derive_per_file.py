@@ -614,3 +614,173 @@ class TestDeriveCasRetryOnManifestCommit:
         assert attempts["n"] == 1, f"401 must not retry (got {attempts['n']} attempts)"
         assert fetch_mfst.call_count == 1, fetch_mfst.call_count
         assert exc is not None and "401" in str(exc), exc
+
+
+# ── #228: bytes-aware batching (derive path) ─────────────────────────
+
+
+def _texture_only_commits(api):
+    """Strip the catalog+manifest commit and the sentinel commit from the
+    derive call list — what's left is the texture-batch flushes."""
+    return [
+        c
+        for c in api.create_commit.call_args_list
+        if not any(
+            op.path_in_repo
+            in {
+                "release-manifest.json",
+                "polyhaven.json",
+                "polyhaven/512/.tier_complete",
+            }
+            for op in c.kwargs["operations"]
+        )
+    ]
+
+
+class TestDeriveBytesAwareBatching:
+    """#228: derive driver flushes on first-of-N-or-bytes. Same shape
+    of test as the bake-side coverage. The transform inflates payload
+    bytes (resize → smaller PNG) so the test stubs the transform with a
+    deterministic fixed-size payload to make the math predictable."""
+
+    def _setup_api_with_n_materials(self, n: int) -> MagicMock:
+        api = MagicMock()
+        tree = [_fake_tree_entry(f"polyhaven/1k/mat_{i}/color.png") for i in range(n)]
+
+        def _list(repo_id, repo_type, revision, path_in_repo, recursive=False, **kw):
+            return [e for e in tree if e.path.startswith(path_in_repo.rstrip("/") + "/")]
+
+        api.list_repo_tree.side_effect = _list
+        api.create_commit.return_value = SimpleNamespace(oid="deadbeef" * 5)
+        return api
+
+    def test_count_ceiling_drives_flush_when_bytes_below_max(self, tmp_path):
+        """Many tiny derived payloads → count drives the flush.
+        batch_size=2 across 5 materials ⇒ 3 texture-batch commits."""
+        api = self._setup_api_with_n_materials(5)
+        small_png = _make_png(8)  # ~70-90 bytes
+
+        def _get(url, *, token=None, timeout=120):
+            if url.endswith(".json"):
+                return json.dumps(
+                    [{"id": f"mat_{i}", "available_tiers": ["1k"]} for i in range(5)]
+                ).encode("utf-8")
+            return small_png
+
+        # Stub transform to return a fixed-size small payload.
+        small_out = PNG_MAGIC + b"\x00" * 200
+
+        with (
+            patch("mat_vis_baker.hf_derive_per_file.HfApi", return_value=api),
+            patch("mat_vis_baker.hf_derive_per_file._http_get", side_effect=_get),
+            patch("mat_vis_baker.hf_derive_per_file._http_head_ok", return_value=False),
+            patch(
+                "mat_vis_baker.hf_derive_per_file._resize_png",
+                side_effect=lambda raw, target_px: small_out,
+            ),
+        ):
+            result = derive_smaller_tier(
+                source="polyhaven",
+                source_tier="1k",
+                target_tier="512",
+                release_tag="v0.0.0-test",
+                work_dir=tmp_path,
+                repo_id="gerchowl/mat-vis-tst",
+                batch_size=2,
+                batch_max_bytes=10 * 1024 * 1024,
+            )
+
+        assert result["ok"] == 5
+        texture_calls = _texture_only_commits(api)
+        assert len(texture_calls) == 3, (
+            f"expected 3 texture commits (count-driven 2+2+1); got {len(texture_calls)}"
+        )
+
+    def test_bytes_ceiling_drives_flush_when_count_below_max(self, tmp_path):
+        """Few large derived payloads → bytes drives the flush.
+        Stub transform returns ~5 MiB per channel; with a 6 MiB ceiling
+        each material lands as its own commit despite batch_size=300."""
+        api = self._setup_api_with_n_materials(3)
+        small_in = _make_png(8)
+        big_out = PNG_MAGIC + b"\x00" * (5 * 1024 * 1024)
+
+        def _get(url, *, token=None, timeout=120):
+            if url.endswith(".json"):
+                return json.dumps(
+                    [{"id": f"mat_{i}", "available_tiers": ["1k"]} for i in range(3)]
+                ).encode("utf-8")
+            return small_in
+
+        with (
+            patch("mat_vis_baker.hf_derive_per_file.HfApi", return_value=api),
+            patch("mat_vis_baker.hf_derive_per_file._http_get", side_effect=_get),
+            patch("mat_vis_baker.hf_derive_per_file._http_head_ok", return_value=False),
+            patch(
+                "mat_vis_baker.hf_derive_per_file._resize_png",
+                side_effect=lambda raw, target_px: big_out,
+            ),
+        ):
+            result = derive_smaller_tier(
+                source="polyhaven",
+                source_tier="1k",
+                target_tier="512",
+                release_tag="v0.0.0-test",
+                work_dir=tmp_path,
+                repo_id="gerchowl/mat-vis-tst",
+                batch_size=300,  # high — count must NOT bind
+                batch_max_bytes=4 * 1024 * 1024,  # below one material's payload
+            )
+
+        assert result["ok"] == 3
+        texture_calls = _texture_only_commits(api)
+        assert len(texture_calls) == 3, (
+            f"expected 3 texture commits (bytes-driven, one each); got {len(texture_calls)}"
+        )
+
+    def test_preflight_skip_still_works_under_bytes_aware_batching(self, tmp_path):
+        """Preflight skip primitive intact: 5 materials, mat_0 + mat_1
+        already on HF, batch_size=2 → only 3 derived → 2 texture commits."""
+        api = self._setup_api_with_n_materials(5)
+        png = _make_png(16)
+
+        # Mark mat_0 + mat_1 as already present at target tier.
+        existing_target_urls = {
+            f"https://huggingface.co/datasets/gerchowl/mat-vis-tst/resolve/v0.0.0-test"
+            f"/polyhaven/512/mat_{i}/color.png"
+            for i in range(2)
+        }
+
+        def _get(url, *, token=None, timeout=120):
+            if url.endswith(".json"):
+                return json.dumps(
+                    [{"id": f"mat_{i}", "available_tiers": ["1k"]} for i in range(5)]
+                ).encode("utf-8")
+            return png
+
+        def _head(url, *, token=None, timeout=30):
+            return url in existing_target_urls
+
+        with (
+            patch("mat_vis_baker.hf_derive_per_file.HfApi", return_value=api),
+            patch("mat_vis_baker.hf_derive_per_file._http_get", side_effect=_get),
+            patch("mat_vis_baker.hf_derive_per_file._http_head_ok", side_effect=_head),
+        ):
+            result = derive_smaller_tier(
+                source="polyhaven",
+                source_tier="1k",
+                target_tier="512",
+                release_tag="v0.0.0-test",
+                work_dir=tmp_path,
+                repo_id="gerchowl/mat-vis-tst",
+                batch_size=2,
+                batch_max_bytes=10 * 1024 * 1024,
+            )
+
+        assert result["ok"] == 3
+        assert result["skipped_preflight"] == 2
+
+        texture_calls = _texture_only_commits(api)
+        # 3 unskipped → batch_size=2 → 2+1 → 2 texture commits.
+        assert len(texture_calls) == 2, (
+            f"expected 2 texture commits across 3 unskipped materials; got {len(texture_calls)}"
+        )

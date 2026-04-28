@@ -547,7 +547,15 @@ class MatVisCi:
         ] = False,
         limit: Annotated[int, Doc("Max materials (0 = no limit)")] = 0,
         offset: Annotated[int, Doc("Skip first N materials")] = 0,
-        batch_size: Annotated[int, Doc("Materials per streaming batch")] = 50,
+        batch_size: Annotated[int, Doc("Materials per atomic commit (count ceiling, #228)")] = 300,
+        batch_max_bytes: Annotated[
+            int,
+            Doc(
+                "Bytes per atomic commit (default 700 MiB). #228: flush "
+                "trips on first-of-N-or-bytes. HF caps at 1 GiB/commit; "
+                "700 MiB leaves room for catalog + manifest + sentinel."
+            ),
+        ] = 700 * 1024 * 1024,
         dry_run: Annotated[bool, Doc("Build locally; skip HF push")] = False,
     ) -> str:
         """Bake one (source, tier) into an HF commit (#136 / ADR-0012).
@@ -580,6 +588,7 @@ class MatVisCi:
             repo_id=repo_id,
             offset=offset,
             batch_size=batch_size,
+            batch_max_bytes=batch_max_bytes,
             limit=limit,
             dry_run=dry_run,
             allow_prod=allow_prod,
@@ -717,7 +726,14 @@ class MatVisCi:
             bool, Doc("Opt-in flag required to target any non-*-tst repo")
         ] = False,
         limit: Annotated[int, Doc("Max materials (0 = no limit)")] = 0,
-        batch_size: Annotated[int, Doc("Materials per atomic commit batch")] = 50,
+        batch_size: Annotated[int, Doc("Materials per atomic commit (count ceiling, #228)")] = 300,
+        batch_max_bytes: Annotated[
+            int,
+            Doc(
+                "Bytes per atomic commit (default 700 MiB). #228: flush "
+                "trips on first-of-N-or-bytes. HF caps at 1 GiB/commit."
+            ),
+        ] = 700 * 1024 * 1024,
         dry_run: Annotated[bool, Doc("Skip the HF push; build locally")] = False,
     ) -> str:
         """Per-file derive: resize an existing per-file tier into a smaller one (#204).
@@ -754,6 +770,8 @@ class MatVisCi:
             "env:HF_TOKEN",
             "--batch-size",
             str(batch_size),
+            "--batch-max-bytes",
+            str(batch_max_bytes),
         ]
         if limit > 0:
             cmd += ["--limit", str(limit)]
@@ -777,7 +795,14 @@ class MatVisCi:
         ] = False,
         target_tier: Annotated[str, Doc("KTX2 target tier label; empty = ktx2-<source-tier>")] = "",
         limit: Annotated[int, Doc("Max materials (0 = no limit)")] = 0,
-        batch_size: Annotated[int, Doc("Materials per atomic commit batch")] = 50,
+        batch_size: Annotated[int, Doc("Materials per atomic commit (count ceiling, #228)")] = 300,
+        batch_max_bytes: Annotated[
+            int,
+            Doc(
+                "Bytes per atomic commit (default 700 MiB). #228: flush "
+                "trips on first-of-N-or-bytes. HF caps at 1 GiB/commit."
+            ),
+        ] = 700 * 1024 * 1024,
         dry_run: Annotated[bool, Doc("Skip the HF push; build locally")] = False,
     ) -> str:
         """Per-file derive: transcode an existing per-file PNG tier to KTX2 (#204).
@@ -815,6 +840,8 @@ class MatVisCi:
             "env:HF_TOKEN",
             "--batch-size",
             str(batch_size),
+            "--batch-max-bytes",
+            str(batch_max_bytes),
         ]
         if target_tier:
             cmd += ["--target-tier", target_tier]
