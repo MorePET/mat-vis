@@ -242,12 +242,18 @@ def bake_one_per_file(
     batch_size: int = DEFAULT_BATCH_SIZE,
     batch_max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
     dry_run: bool = False,
+    storage_tier: str | None = None,
+    _pre_manifest_hook=None,
 ) -> dict:
     """Bake one (source, tier) into per-file HF commits.
 
     Returns a dict with ``ok``, ``failed``, ``skipped`` counts plus
     the last commit SHA on success. Pre-flight tree scan populates
     ``skipped``; actual bake work populates ``ok`` + ``failed``.
+    Also returns ``cas_retries``: the number of times the catalog +
+    manifest commit hit a 412 precondition mismatch and re-merged
+    (zero on a single-writer bake; non-zero proves the retry path
+    fired under concurrent writers — see #210/#230).
 
     Batching: flushes on first-of-N-or-bytes — whichever bound trips
     first. ``batch_size`` (default 300) caps materials per commit;
@@ -256,10 +262,22 @@ def bake_one_per_file(
     catalog + manifest + sentinel commits on the same hour budget.
     The rate-cap binding constraint flips from count to bytes for
     typical 1k content (~1.5 MiB/material), giving ~5× fewer commits
-    per source vs the old count-only batching (#228)."""
+    per source vs the old count-only batching (#228).
+
+    ``storage_tier`` (#230): test-only escape hatch. When set, used
+    as the path key (``<source>/<storage_tier>/...``) and manifest
+    tier label, while ``tier`` continues to drive the upstream
+    fetcher. Lets the concurrency E2E (#210) park N parallel writers
+    at distinct (source, tier) paths under one release tag without
+    weakening the production tier guard. Default ``None`` →
+    ``storage_tier == tier`` exactly as before. Not exposed on the
+    CLI."""
     if not is_supported(source, tier):
         raise ValueError(unsupported_tier_message(source, tier))
     _guard_prod_target(repo_id, allow_prod)
+    # #230: storage_tier defaults to the fetch tier — preserves
+    # pre-existing single-arg semantics for every production caller.
+    storage_tier = storage_tier if storage_tier is not None else tier
 
     work_dir.mkdir(parents=True, exist_ok=True)
     textures_dir = work_dir / "textures"
@@ -285,7 +303,8 @@ def bake_one_per_file(
             log.warning("branch create failed (may already exist): %s", e)
 
     # Pre-flight: which materials are already committed on this tag?
-    already = _already_committed_material_ids(api, repo_id, release_tag, source, tier)
+    # Use storage_tier — that's where past runs of THIS bake wrote.
+    already = _already_committed_material_ids(api, repo_id, release_tag, source, storage_tier)
     if already:
         log.info(
             "preflight: %d materials already on %s@%s — skipping",
@@ -306,10 +325,11 @@ def bake_one_per_file(
     last_commit_sha = ""
 
     log.info(
-        "=== hf-bake-per-file %s %s → %s@%s "
+        "=== hf-bake-per-file %s %s%s → %s@%s "
         "(batch_size=%d, batch_max_bytes=%d, already_committed=%d) ===",
         source,
         tier,
+        f" (storage={storage_tier})" if storage_tier != tier else "",
         repo_id,
         release_tag,
         batch_size,
@@ -340,6 +360,11 @@ def bake_one_per_file(
         total_materials=total_materials,
         kind="bake",
     )
+
+    # #230: cross-call retry counter — every _create_commit_with_backoff
+    # invocation in this bake shares it so we observe the full picture
+    # (texture-batch lock-409s + manifest CAS lock-409s + manifest 412s).
+    retry_counter: dict[str, int] = {}
 
     # #228: pending_batch holds (rec, ops) — ops are computed at append
     # time so we can accumulate pending_bytes against batch_max_bytes
@@ -380,10 +405,11 @@ def bake_one_per_file(
                 repo_type="dataset",
                 operations=ops,
                 commit_message=(
-                    f"feat(data): {release_tag} — bake {source} {tier} "
+                    f"feat(data): {release_tag} — bake {source} {storage_tier} "
                     f"batch ({len(batch)} materials, {len(ops)} files)"
                 ),
                 revision=release_tag,
+                _retry_counter=retry_counter,
             )
             sha = getattr(commit, "oid", "") or getattr(commit, "commit_oid", "")
             log.info(
@@ -437,7 +463,7 @@ def bake_one_per_file(
             if rec.status != "ok":
                 n_failed += 1
                 continue
-            rec_ops = _build_commit_ops_for_record(rec, source, tier)
+            rec_ops = _build_commit_ops_for_record(rec, source, storage_tier)
             rec_bytes = sum(
                 len(op.path_or_fileobj) for op in rec_ops if isinstance(op.path_or_fileobj, bytes)
             )
@@ -486,21 +512,44 @@ def bake_one_per_file(
     manifest_path = work_dir / "release-manifest.json"
 
     # Sentinel commit — marks tier as "atomically complete". Clients
-    # can probe <source>/<tier>/.tier_complete in one HEAD request.
+    # can probe <source>/<storage_tier>/.tier_complete in one HEAD
+    # request. Path keyed by storage_tier so a non-default override
+    # (#230) lands the sentinel under the same path the texture
+    # commits used.
     sentinel_name = ".tier_complete"
-    sentinel_path = work_dir / f"{source}-{tier}-{sentinel_name}"
+    sentinel_path = work_dir / f"{source}-{storage_tier}-{sentinel_name}"
     sentinel_path.write_text(release_tag + "\n")
+
+    # #230: observable CAS-retry counter — exposed in the return dict
+    # so the concurrency E2E (#210) can prove the retry path actually
+    # fired without scraping log strings across multiprocessing pipes.
+    cas_retries = 0
 
     if dry_run:
         log.info("dry-run: would commit catalog + manifest + sentinel")
     else:
         from huggingface_hub import CommitOperationAdd
 
+        # #230: optional sync barrier for the concurrency E2E. Production
+        # callers leave _pre_manifest_hook=None and skip this entirely.
+        # The hook is fired exactly once, just before the first CAS
+        # attempt, so N parallel workers all start the manifest commit
+        # together and HF actually serves contention at the precondition
+        # check. Without it, fetch-time variance lets workers finish
+        # serially and cas_retries stays at 0 even with N processes.
+        if _pre_manifest_hook is not None:
+            try:
+                _pre_manifest_hook()
+            except Exception as e:  # noqa: BLE001
+                log.warning("pre_manifest_hook raised %s: %s", type(e).__name__, e)
+
         # CAS retry loop on the catalog + manifest commit.
         max_retries = 6  # >> realistic matrix concurrency (≤4 sources today)
         for attempt in range(max_retries):
             existing_manifest, parent_sha = _fetch_manifest_with_parent(api, repo_id, release_tag)
-            merged = _merge_manifest_for_source(existing_manifest, source, tier, release_tag)
+            merged = _merge_manifest_for_source(
+                existing_manifest, source, storage_tier, release_tag
+            )
             manifest_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
             try:
                 # #225: 429 retry sits *inside* the CAS loop. The helper
@@ -525,14 +574,27 @@ def bake_one_per_file(
                     commit_message=f"feat(data): {release_tag} — {source} catalog + manifest",
                     revision=release_tag,
                     parent_commit=parent_sha,
+                    _retry_counter=retry_counter,
                 )
                 last_commit_sha = getattr(catalog_commit, "oid", "") or last_commit_sha
                 break
             except Exception as e:  # noqa: BLE001
-                # HF returns 412 Precondition Failed on parent_commit mismatch.
+                # HF returns 412 Precondition Failed on parent_commit mismatch
+                # (the optimistic-lock path we designed for). It ALSO returns
+                # 409 "Another commit operation is in progress" when two
+                # commits race the server-side per-repo write lock — same
+                # underlying cause (concurrent writer), different layer.
+                # Treat both as a CAS retry: re-fetch + re-merge + retry.
                 # Other exceptions (auth, network) re-raise after the loop.
                 msg = str(e).lower()
-                if "412" in msg or "precondition" in msg or "parent_commit" in msg:
+                is_cas_conflict = (
+                    "412" in msg
+                    or "precondition" in msg
+                    or "parent_commit" in msg
+                    or "409" in msg
+                    or "another commit operation" in msg
+                )
+                if is_cas_conflict:
                     if attempt + 1 == max_retries:
                         log.error(
                             "manifest CAS exhausted after %d retries — concurrent writers?",
@@ -544,10 +606,11 @@ def bake_one_per_file(
                         attempt + 1,
                         max_retries,
                     )
+                    cas_retries += 1
                     continue
                 raise
 
-        # Sentinel commit — final marker. #225: 429-aware.
+        # Sentinel commit — final marker. #225: 429-aware. #230: 409-aware.
         sentinel_commit = _create_commit_with_backoff(
             api,
             source=source,
@@ -555,12 +618,13 @@ def bake_one_per_file(
             repo_type="dataset",
             operations=[
                 CommitOperationAdd(
-                    path_in_repo=f"{source}/{tier}/{sentinel_name}",
+                    path_in_repo=f"{source}/{storage_tier}/{sentinel_name}",
                     path_or_fileobj=str(sentinel_path),
                 )
             ],
-            commit_message=f"feat(data): {release_tag} — {source} {tier} complete",
+            commit_message=f"feat(data): {release_tag} — {source} {storage_tier} complete",
             revision=release_tag,
+            _retry_counter=retry_counter,
         )
         last_commit_sha = getattr(sentinel_commit, "oid", "") or last_commit_sha
 
@@ -581,4 +645,12 @@ def bake_one_per_file(
         "failed": n_failed,
         "skipped_preflight": n_skipped_preflight,
         "materials": len(all_records),
+        # #230: contention observability.
+        # ``cas_retries`` counts 412 parent_commit mismatches on the
+        # manifest commit (the optimistic-lock path). ``lock_409_retries``
+        # counts 409 per-repo write-lock contention across every commit
+        # this bake makes. Either one being non-zero proves the bake
+        # raced another writer and recovered cleanly.
+        "cas_retries": cas_retries,
+        "lock_409_retries": retry_counter.get("lock_409", 0),
     }
