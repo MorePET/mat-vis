@@ -3,9 +3,10 @@
 **PBR texture data factory for [MorePET/mat][mat].**
 
 Curates ~3 000 PBR materials from four open sources, bakes them to
-flat PNGs, and hosts the output as Parquet files on GitHub Releases.
-Consumers fetch individual textures via HTTP range reads — no bulk
-download, no pyarrow, no binary deps.
+flat PNGs, and hosts the output as a per-file Hugging Face dataset
+(``huggingface.co/datasets/gerchowl/mat-vis``, ADR-0012). Consumers
+fetch individual textures with one plain HTTP GET — no rowmap, no
+range read, no pyarrow, no binary deps.
 
 ```python
 pip install mat-vis-client
@@ -15,7 +16,7 @@ pip install mat-vis-client
 from mat_vis_client import MatVisClient
 
 client = MatVisClient()                                      # auto-discovers latest release
-png = client.fetch_texture("ambientcg", "Rock064", "color")  # 1k PNG bytes, one HTTP range read
+png = client.fetch_texture("ambientcg", "Rock064", "color")  # 1k PNG bytes, one HTTP GET
 results = client.search(category="wood")                      # filter by category
 ```
 
@@ -32,18 +33,17 @@ results = client.search(category="wood")                      # filter by catego
 │  .dagger/            — Dagger CI pipeline                       │
 └─────────────────────────────────────────────────────────────────┘
         │
-        ▼  Dagger bake pipeline (streaming writer, constant memory)
+        ▼  Dagger bake pipeline (per-file substrate, ADR-0012)
 ┌─────────────────────────────────────────────────────────────────┐
-│  ON GITHUB RELEASES (calver: v2026.04.0)                       │
+│  ON HUGGING FACE DATASETS (calver tag: v2026.04.0)             │
 │                                                                 │
-│  mat-vis-<source>-<tier>-<category>.parquet — PNG bytes         │
-│  <source>-<tier>-<category>-rowmap.json    — byte offset lookup │
-│  release-manifest.json                     — discovery index    │
-│  <source>.json                             — material metadata  │
-│  physicallybased.json                      — scalar properties  │
+│  <source>/<tier>/<material_id>/<channel>.png  — texture file    │
+│  <source>/<tier>/.tier_complete               — tier sentinel   │
+│  <source>.json                                — material catalog│
+│  physicallybased.json                         — scalar props    │
 └─────────────────────────────────────────────────────────────────┘
         │
-        ▼  HTTP range reads (stdlib urllib, zero deps)
+        ▼  one plain HTTP GET per texture (stdlib urllib, zero deps)
 ┌─────────────────────────────────────────────────────────────────┐
 │  CONSUMER                                                      │
 │                                                                 │
@@ -66,35 +66,35 @@ results = client.search(category="wood")                      # filter by catego
 
 ## Resolution tiers
 
-All tiers use the same Parquet + rowmap + client API.
+All tiers share the per-file substrate and client API. Each tier is
+the upstream's native resolution — sub-1k tiers below the natively-
+served set are out-of-scope for v0.6.0 (the tar-era resize derive
+pipeline was retired in #189; per-file derive is future work).
 
 | Tier | Per material | Status |
 |---|---|---|
-| 128 | ~10 KB | released (ambientcg, polyhaven, gpuopen) |
-| 256 | ~40 KB | released (ambientcg, polyhaven, gpuopen) |
-| 512 | ~150 KB | released (ambientcg, polyhaven, gpuopen) |
+| 128 | ~10 KB | released (ambientcg, polyhaven) |
+| 256 | ~40 KB | released (ambientcg, polyhaven) |
+| 512 | ~150 KB | released (ambientcg, polyhaven) |
 | 1k | ~2 MB | released (ambientcg, polyhaven, gpuopen) |
 | 2k | ~10 MB | released (polyhaven); ambientcg + gpuopen baking |
-
-Sub-1k tiers are derived from 1k parquets via `derive-from-release`
-(reads from our own release, resizes, packs — no upstream download).
 
 ## Client usage
 
 ### Feature matrix
 
 The Python client is the reference implementation and full-featured. JS and Rust
-clients are minimal range-read fetchers — the shell / SQL bindings are a couple
+clients are minimal per-file fetchers — the shell / SQL bindings are a couple
 of curl lines. Pick based on runtime needs.
 
 | Feature                                        | Python       | JS           | Rust         | Shell | SQL  |
 | ---------------------------------------------- | :----------: | :----------: | :----------: | :---: | :--: |
-| `fetch_texture` (ranged PNG reads)             | ✅           | ✅           | ✅           | ✅    | —    |
-| Manifest + rowmap discovery                    | ✅           | ✅           | ✅           | ✅    | —    |
+| `fetch_texture` (per-file PNG GET)             | ✅           | ✅           | ✅           | ✅    | —    |
+| Catalog discovery                              | ✅           | ✅           | ✅           | ✅    | —    |
 | Per-material materials list                    | ✅           | ✅           | ✅           | —     | —    |
 | Local file cache (`~/.cache/mat-vis/`)         | ✅           | —            | —            | —     | —    |
 | Cache soft-cap + `MAT_VIS_CACHE_MAX_SIZE`      | ✅           | —            | —            | —     | —    |
-| Range-read size cap (`MAT_VIS_MAX_FETCH_SIZE`) | ✅           | —            | —            | —     | —    |
+| Per-file size cap (`MAT_VIS_MAX_FETCH_SIZE`)   | ✅           | —            | —            | —     | —    |
 | Rate-limit auto-retry (429/503/403)            | ✅           | —            | —            | —     | —    |
 | Redirect / signed-URL cache                    | ✅           | —            | —            | —     | —    |
 | `search` by category + scalar ranges           | ✅           | —            | —            | —     | ✅   |
@@ -106,7 +106,7 @@ of curl lines. Pick based on runtime needs.
 | CLI                                            | ✅           | ✅ (Node)    | ✅           | ✅    | —    |
 
 If you need search, prefetch, MaterialX, or format adapters, use Python.
-For drop-in range reads in a browser or lightweight Rust binary, the smaller
+For drop-in per-file fetches in a browser or lightweight Rust binary, the smaller
 clients have what you need.
 
 ### Python

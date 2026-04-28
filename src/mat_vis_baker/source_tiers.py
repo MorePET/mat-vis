@@ -11,9 +11,10 @@ an ugly ``{'error': 'no materials'}`` artifact in the log.
 This module is the single source of truth for which (source, tier)
 combos have native upstream data. ``bake_one`` consults it upfront
 (see ``hf_bake._guard_supported_tier``) and refuses unsupported
-combos with a clear message pointing at ``hf-derive`` as the
-alternative — derive resizes existing larger tars, so gpuopen 512
-IS reachable, just not via a direct upstream bake.
+combos with a clear message naming the supported set. The legacy
+``hf-derive`` resize path was retired with the tar substrate in
+#189; per-file derive is future work, so for now operators must
+bake from a tier the upstream natively serves.
 
 Captured on 2026-04-21 by enumerating live gpuopen package labels:
 
@@ -32,9 +33,10 @@ from __future__ import annotations
 # the set of tier labels the baker can pass straight to the
 # fetcher without pre-processing.
 #
-# Derive-time tiers (produced by ``hf-derive`` / ``hf-derive-ktx2``
-# from a baked tar) are NOT listed here — they come into existence
-# on HF without involving this guard.
+# Derive-time tiers (resize / KTX2 transcode of an already-baked tier)
+# are NOT listed here — they come into existence on HF without
+# involving this guard. The tar-era derive pipeline was retired in
+# #189; per-file derive is future work.
 SUPPORTED_TIERS: dict[str, frozenset[str]] = {
     "ambientcg": frozenset({"128", "256", "512", "1k", "2k", "4k", "8k"}),
     "polyhaven": frozenset({"128", "256", "512", "1k", "2k", "4k", "8k"}),
@@ -54,12 +56,11 @@ def unsupported_tier_message(source: str, tier: str) -> str:
 
     Named so the test asserting the message content can assert on the
     exact string rather than re-duplicating the format. Mentions the
-    source, the tier, the supported set, and points at hf-derive for
-    the smaller tiers."""
+    source, the tier, and the supported set."""
     supported = SUPPORTED_TIERS.get(source, frozenset())
     supported_str = ", ".join(sorted(supported)) if supported else "(none)"
     guidance = (
-        "use `hf-derive` to resize from a larger tier"
+        "bake one of the natively-supported tiers above"
         if source != "physicallybased"
         else "physicallybased has no textures; bake tier='scalar' instead"
     )

@@ -4,7 +4,7 @@ Each upstream source publishes different native resolution tiers.
 The baker must declare those upfront so ``bake_one`` can:
 
 - Refuse an unsupported (source, tier) combo with a clear message
-  pointing operators at ``hf-derive`` for the smaller tiers.
+  naming the natively-supported set.
 - Let ``scripts/full-bake.sh`` enumerate (source, tier) pairs that
   will actually succeed, rather than issuing 454 per-material
   failures when no upstream package matches.
@@ -83,8 +83,7 @@ class TestSupportedTiers:
 class TestBakeRefusesUnsupportedTier:
     """``bake_one(source, tier, ...)`` must refuse early when the
     (source, tier) combo is known-unsupported by the upstream. Raises
-    with a message that names the supported set + points at hf-derive
-    for the smaller tiers."""
+    with a message that names the supported set."""
 
     def test_gpuopen_512_raises_with_helpful_message(self, tmp_path):
         """The staging-bake failure mode on 2026-04-21 was 454
@@ -105,7 +104,9 @@ class TestBakeRefusesUnsupportedTier:
         msg = str(exc.value)
         assert "gpuopen" in msg, f"error doesn't name source: {msg!r}"
         assert "512" in msg, f"error doesn't name tier: {msg!r}"
-        assert "hf-derive" in msg, f"error should point at hf-derive as the fix: {msg!r}"
+        # Message must enumerate the natively-supported tiers so the
+        # operator knows which tier to bake instead.
+        assert "1k" in msg, f"error should list supported tiers: {msg!r}"
 
     def test_gpuopen_1k_still_works(self, tmp_path, monkeypatch):
         """Supported combos proceed past the guard — we only want the

@@ -11,8 +11,9 @@ otherwise. Use with the free-tier stack documented in #131:
 
 Emits:
 
-- one root span per high-level op (``hf-bake``, ``hf-derive``,
-  ``hf-derive-ktx2``) with source/tier/release attrs;
+- one root span per high-level op (``hf-bake`` is the only live op
+  today; the tar-era ``hf-derive`` / ``hf-derive-ktx2`` were retired
+  in #189) with source/tier/release attrs;
 - a ``stream.transform`` child span with the ok/failed counters
   attached as attributes when the pool drains;
 - counter events every 30 s with a ``progress`` marker.
