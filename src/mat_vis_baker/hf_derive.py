@@ -35,6 +35,7 @@ from PIL import Image
 
 from mat_vis_baker.common import TIER_TO_PX
 from mat_vis_baker.hf_push import push_to_hf
+from mat_vis_baker.shard_utils import channel_in_shard, shard_suffix
 from mat_vis_baker.tar_writer import TarWriter
 from mat_vis_baker.telemetry import span
 
@@ -120,14 +121,37 @@ def _stream_transform_into_tar(
     max_workers: int,
     out_tar_path: Path,
     label: str,
+    shard: tuple[int, int] | None = None,
 ) -> dict[str, dict[str, dict[str, int]]]:
     """Fetch every channel via HTTP Range, run ``transform`` in a worker
     pool, write sequentially into ``out_tar_path``. Returns the rowmap
-    materials dict produced by the writer."""
+    materials dict produced by the writer.
+
+    When ``shard=(index, total)`` is set, only channels owned by
+    ``index`` are processed. The full source rowmap is still scanned so
+    the terminal success-rate gate is applied against the shard's own
+    channel count, not the global count."""
     session = requests.Session()
-    work: list[tuple[str, str, dict]] = [
+    all_work: list[tuple[str, str, dict]] = [
         (mid, ch, spec) for mid, channels in materials.items() for ch, spec in channels.items()
     ]
+    if shard is not None:
+        shard_index, shard_total = shard
+        work = [
+            (mid, ch, spec)
+            for mid, ch, spec in all_work
+            if channel_in_shard(mid, ch, shard_index, shard_total)
+        ]
+        log.info(
+            "%s: shard %d/%d owns %d/%d channels",
+            label,
+            shard_index,
+            shard_total,
+            len(work),
+            len(all_work),
+        )
+    else:
+        work = all_work
     n_total = len(work)
 
     def _one(item):
@@ -162,14 +186,31 @@ def _stream_transform_into_tar(
     first_error: str | None = None
     t_last = time.monotonic()
     t_start = time.monotonic()
-    with span("stream.transform", label=label, n_total=n_total, max_workers=max_workers) as outer:
+    span_attrs = {
+        "label": label,
+        "n_total": n_total,
+        "max_workers": max_workers,
+    }
+    if shard is not None:
+        span_attrs["shard_index"] = shard[0]
+        span_attrs["shard_total"] = shard[1]
+    # Buffer transformed bytes by (mid, ch) and flush to the tar in
+    # *sorted* order after the worker pool drains. Without this,
+    # ``as_completed`` yields in completion-arrival order → tar member
+    # offsets depend on worker scheduling → re-running the same shard
+    # produces different bytes. The buffer costs ~N × mean-channel-size
+    # of RAM per shard (for ktx2-2k at shard-total=8 that's ≤~600 MB,
+    # well under the 16 GB runner limit).
+    pending: dict[tuple[str, str], bytes] = {}
+
+    with span("stream.transform", **span_attrs) as outer:
         with ThreadPoolExecutor(max_workers=max_workers) as pool, TarWriter(out_tar_path) as tw:
             futures = {pool.submit(_one, item): item for item in work}
             for fut in as_completed(futures):
                 mid, ch, spec = futures[fut]
                 try:
                     r_mid, r_ch, out_bytes = fut.result()
-                    tw.add_channel(r_mid, r_ch, out_bytes)
+                    pending[(r_mid, r_ch)] = out_bytes
                     n_ok += 1
                     recent.append(False)
                 except Exception as e:
@@ -215,6 +256,14 @@ def _stream_transform_into_tar(
                         {"n_ok": n_ok, "n_failed": n_failed, "rate_per_s": rate},
                     )
                     t_last = time.monotonic()
+
+            # Flush buffered results to the tar in deterministic order.
+            # Sorting by (mid, ch) guarantees that two runs of the same
+            # shard against the same source produce byte-identical tars.
+            for key in sorted(pending):
+                mid, ch = key
+                tw.add_channel(mid, ch, pending[key])
+            pending.clear()  # release peak memory before finalize
             new_materials = tw.finalize()
         outer.set_attribute("outcome", "ok")
         outer.set_attribute("n_ok", n_ok)
@@ -222,14 +271,18 @@ def _stream_transform_into_tar(
 
     # Terminal gate: refuse to ship a partial tar. A few dozen bad
     # textures in a 11k-channel bake is tolerable; sub-90% is not.
-    ok_ratio = n_ok / n_total if n_total else 0.0
-    if ok_ratio < TERMINAL_MIN_OK_RATIO:
-        _write_step_summary(label, n_ok, n_failed, n_total, first_error)
-        raise RuntimeError(
-            f"{label}: terminal check — {n_ok}/{n_total} succeeded "
-            f"({ok_ratio * 100:.1f}% < {int(TERMINAL_MIN_OK_RATIO * 100)}%). "
-            f"Refusing to push a partial tar. First error: {first_error}"
-        )
+    # Empty shards (n_total == 0 — possible when shard_total grows
+    # past the channel count on a sparse source) are legitimately
+    # no-ops and must skip the gate rather than crash.
+    if n_total > 0:
+        ok_ratio = n_ok / n_total
+        if ok_ratio < TERMINAL_MIN_OK_RATIO:
+            _write_step_summary(label, n_ok, n_failed, n_total, first_error)
+            raise RuntimeError(
+                f"{label}: terminal check — {n_ok}/{n_total} succeeded "
+                f"({ok_ratio * 100:.1f}% < {int(TERMINAL_MIN_OK_RATIO * 100)}%). "
+                f"Refusing to push a partial tar. First error: {first_error}"
+            )
 
     log.info("%s done: %d ok / %d failed / %d total", label, n_ok, n_failed, n_total)
     _write_step_summary(label, n_ok, n_failed, n_total, first_error)
@@ -287,10 +340,16 @@ def derive_smaller_tier(
     hf_token: str | None = None,
     dry_run: bool = False,
     workers: int = DEFAULT_RESIZE_WORKERS,
+    shard: tuple[int, int] | None = None,
 ) -> dict:
     """Stream-resize every channel from ``<source>-<source_tier>.tar``
     to ``target_tier`` resolution. HTTP-range-reads the source tar; no
-    local full-tar download, no full-tar in RAM."""
+    local full-tar download, no full-tar in RAM.
+
+    When ``shard=(index, total)`` is set, only that shard's channels
+    are processed. Output filenames carry a ``.shard-N-of-K`` suffix
+    and the push happens independently per shard — a later
+    ``merge-shards`` step reassembles the unsharded artifact."""
     if target_tier not in TIER_TO_PX:
         raise ValueError(f"unknown target tier {target_tier!r}")
     if source_tier not in TIER_TO_PX:
@@ -303,8 +362,9 @@ def derive_smaller_tier(
         )
 
     work_dir.mkdir(parents=True, exist_ok=True)
-    out_tar_name = f"{source}-{target_tier}.tar"
-    out_rowmap_name = f"{source}-{target_tier}-rowmap.json"
+    suffix = shard_suffix(*shard) if shard else ""
+    out_tar_name = f"{source}-{target_tier}{suffix}.tar"
+    out_rowmap_name = f"{source}-{target_tier}{suffix}-rowmap.json"
     out_tar_path = work_dir / out_tar_name
     out_rowmap_path = work_dir / out_rowmap_name
 
@@ -328,6 +388,7 @@ def derive_smaller_tier(
     materials = src_rowmap.get("materials", {})
     tar_url = f"{resolve_base}/{source}-{source_tier}.tar"
 
+    label = f"resize→{target_tier}" + (f" shard {shard[0]}/{shard[1]}" if shard else "")
     new_materials, n_ok, n_failed = _stream_transform_into_tar(
         materials=materials,
         tar_url=tar_url,
@@ -335,12 +396,13 @@ def derive_smaller_tier(
         transform=_resize_transform(target_px),
         max_workers=workers,
         out_tar_path=out_tar_path,
-        label=f"resize→{target_tier}",
+        label=label,
+        shard=shard,
     )
     if n_ok == 0:
         return {"error": "no channels resized", "ok": 0, "failed": n_failed}
 
-    rowmap = {
+    rowmap: dict = {
         "version": 1,
         "release_tag": release_tag,
         "source": source,
@@ -348,6 +410,9 @@ def derive_smaller_tier(
         "tar_file": out_tar_name,
         "materials": new_materials,
     }
+    if shard is not None:
+        rowmap["shard_index"] = shard[0]
+        rowmap["shard_total"] = shard[1]
     out_rowmap_path.write_text(json.dumps(rowmap, indent=2) + "\n")
 
     log.info(
@@ -360,9 +425,7 @@ def derive_smaller_tier(
     if dry_run:
         return {"dry_run": True, "ok": n_ok, "failed": n_failed}
 
-    # Only push the tar + its rowmap. No catalog/manifest touch —
-    # tier presence is discovered from the tree listing by clients
-    # (removes the merge-race class that bit the earlier matrix).
+    shard_note = f" (shard {shard[0]}/{shard[1]})" if shard else ""
     sha = push_to_hf(
         repo_id=repo_id,
         files=[
@@ -370,7 +433,10 @@ def derive_smaller_tier(
             (out_rowmap_path, out_rowmap_name),
         ],
         revision=release_tag,
-        commit_message=f"feat(data): {release_tag} — derive {source} {target_tier} from {source_tier}",
+        commit_message=(
+            f"feat(data): {release_tag} — derive {source} {target_tier} "
+            f"from {source_tier}{shard_note}"
+        ),
         token=hf_token,
     )
     return {
@@ -441,9 +507,14 @@ def derive_ktx2_tier(
     dry_run: bool = False,
     target_tier: str | None = None,
     workers: int = DEFAULT_KTX2_WORKERS,
+    shard: tuple[int, int] | None = None,
 ) -> dict:
     """Stream-transcode every channel from ``<source>-<source_tier>.tar``
-    to KTX2. Requires ``toktx`` on PATH."""
+    to KTX2. Requires ``toktx`` on PATH.
+
+    When ``shard=(index, total)`` is set, only that shard's channels
+    are processed; output filenames carry a ``.shard-N-of-K`` suffix
+    and the push is independent per shard (see ``merge-shards``)."""
     target_tier = target_tier or f"ktx2-{source_tier}"
 
     try:
@@ -455,10 +526,11 @@ def derive_ktx2_tier(
         ) from e
 
     work_dir.mkdir(parents=True, exist_ok=True)
+    suffix = shard_suffix(*shard) if shard else ""
     out_subdir_name = "ktx2"
-    out_tar_name = f"{source}-{target_tier}.tar"
+    out_tar_name = f"{source}-{target_tier}{suffix}.tar"
     out_tar_in_repo = f"{out_subdir_name}/{out_tar_name}"
-    out_rowmap_name = f"{source}-{target_tier}-rowmap.json"
+    out_rowmap_name = f"{source}-{target_tier}{suffix}-rowmap.json"
     out_rowmap_in_repo = f"{out_subdir_name}/{out_rowmap_name}"
     (work_dir / out_subdir_name).mkdir(exist_ok=True)
     out_tar_path = work_dir / out_subdir_name / out_tar_name
@@ -484,6 +556,7 @@ def derive_ktx2_tier(
     materials = src_rowmap.get("materials", {})
     tar_url = f"{resolve_base}/{source}-{source_tier}.tar"
 
+    label = f"ktx2→{target_tier}" + (f" shard {shard[0]}/{shard[1]}" if shard else "")
     new_materials, n_ok, n_failed = _stream_transform_into_tar(
         materials=materials,
         tar_url=tar_url,
@@ -491,12 +564,13 @@ def derive_ktx2_tier(
         transform=_ktx2_transform_factory(),
         max_workers=workers,
         out_tar_path=out_tar_path,
-        label=f"ktx2→{target_tier}",
+        label=label,
+        shard=shard,
     )
     if n_ok == 0:
         return {"error": "no channels transcoded", "ok": 0, "failed": n_failed}
 
-    rowmap = {
+    rowmap: dict = {
         "version": 1,
         "release_tag": release_tag,
         "source": source,
@@ -504,6 +578,9 @@ def derive_ktx2_tier(
         "tar_file": out_tar_in_repo,
         "materials": new_materials,
     }
+    if shard is not None:
+        rowmap["shard_index"] = shard[0]
+        rowmap["shard_total"] = shard[1]
     out_rowmap_path.write_text(json.dumps(rowmap, indent=2) + "\n")
 
     log.info(
@@ -516,8 +593,7 @@ def derive_ktx2_tier(
     if dry_run:
         return {"dry_run": True, "ok": n_ok, "failed": n_failed}
 
-    # Only push the tar + rowmap. Tier presence is discovered by
-    # clients from the tree listing (ADR-0007 race-free design).
+    shard_note = f" (shard {shard[0]}/{shard[1]})" if shard else ""
     sha = push_to_hf(
         repo_id=repo_id,
         files=[
@@ -525,7 +601,10 @@ def derive_ktx2_tier(
             (out_rowmap_path, out_rowmap_in_repo),
         ],
         revision=release_tag,
-        commit_message=f"feat(data): {release_tag} — derive {source} {target_tier} from {source_tier}",
+        commit_message=(
+            f"feat(data): {release_tag} — derive {source} {target_tier} "
+            f"from {source_tier}{shard_note}"
+        ),
         token=hf_token,
     )
     return {

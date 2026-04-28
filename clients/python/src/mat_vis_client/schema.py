@@ -10,8 +10,17 @@ import time and shared by identity so there is one authoritative copy.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
-from enum import StrEnum
+
+if sys.version_info >= (3, 11):
+    from enum import StrEnum
+else:
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        def __str__(self) -> str:
+            return str(self.value)
 
 
 class Channel(StrEnum):

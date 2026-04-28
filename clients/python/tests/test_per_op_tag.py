@@ -20,39 +20,30 @@ from mat_vis_client import MatVisClient
 
 
 MOCK_MANIFEST_V1 = {
-    "schema_version": 1,
+    "schema_version": 3,  # per-file substrate (#186 / ADR-0012)
     "release_tag": "v2026.04.0",
-    "tiers": {
-        "1k": {
-            "base_url": "https://example.com/v2026.04.0/",
-            "sources": {
-                "ambientcg": {
-                    "parquet_files": ["ambientcg-1k.parquet"],
-                    "rowmap_file": "ambientcg-1k-rowmap.json",
-                },
-            },
-        }
+    "sources": {
+        "ambientcg": {
+            "catalog": "ambientcg.json",
+            "tiers": {"1k": {"complete": True}},
+        },
     },
 }
 MOCK_MANIFEST_V2 = {**MOCK_MANIFEST_V1, "release_tag": "v2026.05.0"}
-MOCK_MANIFEST_V2["tiers"] = {
-    "1k": {
-        "base_url": "https://example.com/v2026.05.0/",
-        "sources": MOCK_MANIFEST_V1["tiers"]["1k"]["sources"],
+
+MOCK_INDEX = [
+    {
+        "id": "Rock064",
+        "source": "ambientcg",
+        "mat_vis": {"name": "Rock064", "category": "stone"},
+        "available_tiers": ["1k"],
+        "maps": ["color"],
     }
-}
+]
 
-MOCK_ROWMAP = {
-    "parquet_file": "ambientcg-1k.parquet",
-    "materials": {
-        "Rock064": {
-            "color": {"offset": 0, "length": 100, "parquet_file": "ambientcg-1k.parquet"},
-        }
-    },
-}
-
-TINY_PNG_V1 = b"\x89PNG" + b"v1" * 40 + b"IEND"
-TINY_PNG_V2 = b"\x89PNG" + b"v2" * 40 + b"IEND"
+# Real PNG magic so the magic-byte check inside fetch_texture passes.
+TINY_PNG_V1 = b"\x89PNG\r\n\x1a\n" + b"v1_data" + b"\xaeB`\x82"
+TINY_PNG_V2 = b"\x89PNG\r\n\x1a\n" + b"v2_data" + b"\xaeB`\x82"
 
 
 @pytest.fixture
@@ -64,17 +55,21 @@ def tmp_cache():
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _prime(client: MatVisClient, manifest: dict) -> None:
+    """Pre-seed a per-file client (#186) so fetch_texture skips network for metadata."""
+    client._manifest = manifest
+    client._indexes = {"ambientcg": MOCK_INDEX}
+    client._tier_complete[("ambientcg", "1k")] = True
+
+
 def test_fetch_texture_accepts_tag_kwarg(tmp_cache):
     """fetch_texture must accept tag= override."""
     c = MatVisClient(cache_dir=tmp_cache, tag="v2026.04.0")
-    c._manifest = MOCK_MANIFEST_V1
-
-    def fake_get_json(url):
-        # manifest requests include "release-manifest.json"; rowmaps
-        # include "rowmap.json"; everything else fallback.
-        if "release-manifest.json" in url:
-            return MOCK_MANIFEST_V2 if "v2026.05.0" in url else MOCK_MANIFEST_V1
-        return MOCK_ROWMAP
+    _prime(c, MOCK_MANIFEST_V1)
+    # at() lazy-creates an alternate client sharing the cache dir; pre-prime
+    # it so the v2-tag fetch hits our mocks instead of the network.
+    alt = c.at("v2026.05.0")
+    _prime(alt, MOCK_MANIFEST_V2)
 
     def fake_get(url, headers=None, return_final_url=False):
         png = TINY_PNG_V2 if "v2026.05.0" in url else TINY_PNG_V1
@@ -82,10 +77,7 @@ def test_fetch_texture_accepts_tag_kwarg(tmp_cache):
             return png, url
         return png
 
-    with (
-        patch("mat_vis_client.client._get", side_effect=fake_get),
-        patch("mat_vis_client.client._get_json", side_effect=fake_get_json),
-    ):
+    with patch("mat_vis_client.client._get", side_effect=fake_get):
         data = c.fetch_texture("ambientcg", "Rock064", "color", tier="1k", tag="v2026.05.0")
     assert data == TINY_PNG_V2, "tag override should fetch v2 bytes"
 
@@ -93,12 +85,9 @@ def test_fetch_texture_accepts_tag_kwarg(tmp_cache):
 def test_fetch_texture_tag_override_does_not_mutate_client(tmp_cache):
     """Passing tag= must not change the client's default tag."""
     c = MatVisClient(cache_dir=tmp_cache, tag="v2026.04.0")
-    c._manifest = MOCK_MANIFEST_V1
-
-    def fake_get_json(url):
-        if "release-manifest.json" in url:
-            return MOCK_MANIFEST_V2 if "v2026.05.0" in url else MOCK_MANIFEST_V1
-        return MOCK_ROWMAP
+    _prime(c, MOCK_MANIFEST_V1)
+    alt = c.at("v2026.05.0")
+    _prime(alt, MOCK_MANIFEST_V2)
 
     def fake_get(url, headers=None, return_final_url=False):
         png = TINY_PNG_V2 if "v2026.05.0" in url else TINY_PNG_V1
@@ -106,10 +95,7 @@ def test_fetch_texture_tag_override_does_not_mutate_client(tmp_cache):
             return png, url
         return png
 
-    with (
-        patch("mat_vis_client.client._get", side_effect=fake_get),
-        patch("mat_vis_client.client._get_json", side_effect=fake_get_json),
-    ):
+    with patch("mat_vis_client.client._get", side_effect=fake_get):
         c.fetch_texture("ambientcg", "Rock064", "color", tier="1k", tag="v2026.05.0")
 
     assert c._tag == "v2026.04.0", "client's default tag must not change"

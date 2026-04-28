@@ -1,5 +1,10 @@
 ---
 # Bake workflow — atomic HF push per (source, tier) per ADR-0007.
+#
+# Invokes the Dagger `bake` function (#136) which wraps
+# mat-vis-baker hf-bake in a python:3.12-slim container. Container
+# bootstraps inside Dagger — no separate install steps here.
+# Reproduce locally with: dagger call bake --source=... --tier=1k ...
 
 name: Bake
 
@@ -64,41 +69,48 @@ jobs:
   bake:
     name: hf-bake ${{ inputs.source }} ${{ inputs.tier }}
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    # GH-hosted runners hard-cap at 360 min; 350 leaves headroom for
+    # the post-step log upload and any slack in the scheduler.
+    timeout-minutes: 350
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install baker
-        run: uv sync --all-extras
+      - name: Dagger shell-safety lint (#61)
+        run: python3 scripts/check-dagger-shell-safety.py
 
       - name: hf-bake
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          verb: call
+          module: .dagger
+          # Dagger fn sentinels: limit=0 (no cap), offset=0 (no skip),
+          # shard-index/total=-1 (unsharded). The baker CLI adopts the
+          # same sentinel convention so re-plumbing is a pure rename.
+          args: >-
+            bake
+            --context=.
+            --source=${{ inputs.source }}
+            --tier=${{ inputs.tier }}
+            --release-tag=${{ inputs.release-tag }}
+            --hf-token=env:HF_TOKEN
+            --limit=${{ inputs.limit }}
+            --offset=${{ inputs.offset }}
+            --batch-size=${{ inputs.batch-size }}
+            ${{ inputs.dry-run == true && '--dry-run=true' || '' }}
+
+      # ADR-0011 / mat-vis#152 phase-c: lock the Layer-2 upstream mirror
+      # against silent schema drift. The baker just pushed the candidate
+      # <source>.json to HF at release-tag; fetch it and diff against the
+      # previous release. See scripts/check_upstream_schema_drift.py.
+      # Skipped on dry-run (nothing was pushed to HF).
+      - name: Upstream schema-drift gate (#152)
+        if: inputs.dry-run != true
         run: |
-          set -euxo pipefail
-          limit_flag=""
-          if [ "${{ inputs.limit }}" != "0" ]; then
-            limit_flag="--limit ${{ inputs.limit }}"
-          fi
-          offset_flag=""
-          if [ "${{ inputs.offset }}" != "0" ]; then
-            offset_flag="--offset ${{ inputs.offset }}"
-          fi
-          dry_flag=""
-          if [ "${{ inputs.dry-run }}" = "true" ]; then
-            dry_flag="--dry-run"
-          fi
-          uv run mat-vis-baker hf-bake \
-            "${{ inputs.source }}" \
-            "${{ inputs.tier }}" \
-            /tmp/bake \
-            --release-tag "${{ inputs.release-tag }}" \
-            --batch-size "${{ inputs.batch-size }}" \
-            $limit_flag $offset_flag $dry_flag
+          uv run python scripts/check_upstream_schema_drift.py \
+            --source "${{ inputs.source }}" \
+            --candidate "https://huggingface.co/datasets/gerchowl/mat-vis/resolve/${{ inputs.release-tag }}/${{ inputs.source }}.json"
 
       - name: Notify on failure
         if: failure()

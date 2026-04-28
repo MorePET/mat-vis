@@ -157,7 +157,9 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
 def cmd_hf_derive(args: argparse.Namespace) -> int:
     from mat_vis_baker.hf_derive import derive_smaller_tier
+    from mat_vis_baker.shard_utils import validate_shard_args
 
+    shard = validate_shard_args(args.shard_index, args.shard_total)
     result = derive_smaller_tier(
         source=args.source,
         target_tier=args.target_tier,
@@ -166,6 +168,7 @@ def cmd_hf_derive(args: argparse.Namespace) -> int:
         work_dir=Path(args.work_dir),
         repo_id=args.repo_id,
         dry_run=args.dry_run,
+        shard=shard,
     )
     log.info("hf-derive result: %s", result)
     return 0 if "error" not in result else 1
@@ -173,7 +176,9 @@ def cmd_hf_derive(args: argparse.Namespace) -> int:
 
 def cmd_hf_derive_ktx2(args: argparse.Namespace) -> int:
     from mat_vis_baker.hf_derive import derive_ktx2_tier
+    from mat_vis_baker.shard_utils import validate_shard_args
 
+    shard = validate_shard_args(args.shard_index, args.shard_total)
     result = derive_ktx2_tier(
         source=args.source,
         source_tier=args.source_tier,
@@ -182,15 +187,35 @@ def cmd_hf_derive_ktx2(args: argparse.Namespace) -> int:
         repo_id=args.repo_id,
         dry_run=args.dry_run,
         target_tier=args.target_tier,
+        shard=shard,
     )
     log.info("hf-derive-ktx2 result: %s", result)
     return 0 if "error" not in result else 1
 
 
+def cmd_merge_shards(args: argparse.Namespace) -> int:
+    from mat_vis_baker.merge_shards import merge_shards
+
+    result = merge_shards(
+        source=args.source,
+        tier=args.tier,
+        release_tag=args.release_tag,
+        work_dir=Path(args.work_dir),
+        repo_id=args.repo_id,
+        dry_run=args.dry_run,
+        keep_shards=args.keep_shards,
+    )
+    log.info("merge-shards result: %s", result)
+    # merge_shards never puts "error" in its result — it raises on any
+    # fault (incomplete shard set, range-read mismatch). Always return 0.
+    return 0
+
+
 def cmd_hf_bake(args: argparse.Namespace) -> int:
-    """Bake (source, tier) → atomic HF push. The ADR-0007 replacement
-    for ``cmd_all``'s parquet/GH-Releases path."""
+    """Bake (source, tier) → HF commit. Per-file substrate by default
+    (ADR-0012); legacy tar via --legacy-tar for one transition cycle."""
     from mat_vis_baker.hf_bake import bake_one
+    from mat_vis_baker.shard_utils import validate_shard_args
 
     tier = args.tier
     if args.source == "physicallybased" or tier == "scalar":
@@ -198,6 +223,7 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
         # passed here is a user error.
         tier = "scalar"
 
+    shard = validate_shard_args(args.shard_index, args.shard_total)
     result = bake_one(
         source=args.source,
         tier=tier,
@@ -208,6 +234,9 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
         offset=args.offset,
         batch_size=args.batch_size,
         dry_run=args.dry_run,
+        shard=shard,
+        legacy_tar=args.legacy_tar,
+        allow_prod=args.allow_prod,
     )
     log.info("hf-bake result: %s", result)
     if "error" in result:
@@ -330,6 +359,36 @@ def main() -> int:
         action="store_true",
         help="Build tar + manifest locally; skip the HF push.",
     )
+    p_hf.add_argument(
+        "--shard-index",
+        type=int,
+        default=None,
+        help="0-based shard index. Requires --shard-total. Legacy tar only.",
+    )
+    p_hf.add_argument(
+        "--shard-total",
+        type=int,
+        default=None,
+        help="Total number of shards. Requires --shard-index. Legacy tar only.",
+    )
+    p_hf.add_argument(
+        "--legacy-tar",
+        action="store_true",
+        help=(
+            "Use the pre-ADR-0012 tar+rowmap substrate instead of the "
+            "default per-file layout. One-release-cycle escape hatch; "
+            "retired by #189."
+        ),
+    )
+    p_hf.add_argument(
+        "--allow-prod",
+        action="store_true",
+        help=(
+            "Permit writes to non-scratch HF dataset repos (per-file "
+            "substrate guard). Scratch repos are named */mat-vis-tst "
+            "and */mat-vis-*-tst; anything else requires this flag."
+        ),
+    )
 
     p_hd = sub.add_parser(
         "hf-derive",
@@ -342,6 +401,18 @@ def main() -> int:
     p_hd.add_argument("--release-tag", required=True)
     p_hd.add_argument("--repo-id", default="gerchowl/mat-vis")
     p_hd.add_argument("--dry-run", action="store_true")
+    p_hd.add_argument(
+        "--shard-index",
+        type=int,
+        default=None,
+        help="0-based shard index. Requires --shard-total.",
+    )
+    p_hd.add_argument(
+        "--shard-total",
+        type=int,
+        default=None,
+        help="Total number of shards. Requires --shard-index.",
+    )
 
     p_hk = sub.add_parser(
         "hf-derive-ktx2",
@@ -354,6 +425,37 @@ def main() -> int:
     p_hk.add_argument("--release-tag", required=True)
     p_hk.add_argument("--repo-id", default="gerchowl/mat-vis")
     p_hk.add_argument("--dry-run", action="store_true")
+    p_hk.add_argument(
+        "--shard-index",
+        type=int,
+        default=None,
+        help="0-based shard index. Requires --shard-total.",
+    )
+    p_hk.add_argument(
+        "--shard-total",
+        type=int,
+        default=None,
+        help="Total number of shards. Requires --shard-index.",
+    )
+
+    p_merge = sub.add_parser(
+        "merge-shards",
+        help="Reassemble shard-N-of-K artifacts into one tar + rowmap (#134).",
+    )
+    p_merge.add_argument("source", choices=SOURCES)
+    p_merge.add_argument(
+        "tier",
+        help="Tier name (e.g. '1k', 'ktx2-1k'). KTX2 tiers land under ktx2/.",
+    )
+    p_merge.add_argument("work_dir")
+    p_merge.add_argument("--release-tag", required=True)
+    p_merge.add_argument("--repo-id", default="gerchowl/mat-vis")
+    p_merge.add_argument("--dry-run", action="store_true")
+    p_merge.add_argument(
+        "--keep-shards",
+        action="store_true",
+        help="Don't delete shard artifacts after merge (useful for debugging).",
+    )
 
     p_mtlx = sub.add_parser(
         "pack-mtlx",
@@ -385,6 +487,8 @@ def main() -> int:
         return cmd_hf_derive(args)
     if args.command == "hf-derive-ktx2":
         return cmd_hf_derive_ktx2(args)
+    if args.command == "merge-shards":
+        return cmd_merge_shards(args)
 
     parser.print_help()
     return 1

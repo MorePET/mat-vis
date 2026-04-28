@@ -110,13 +110,6 @@ def _fmt_size(n: int) -> str:
 # Default soft cap: 5 GB (configurable via MAT_VIS_CACHE_MAX_SIZE).
 DEFAULT_CACHE_MAX_BYTES = _parse_size(os.environ.get("MAT_VIS_CACHE_MAX_SIZE", "5GB"))
 
-# Hard cap per range-read: the rowmap tells us how many bytes to pull for
-# one texture, but a compromised/corrupt rowmap could claim (e.g.) 10 GB
-# for a single PNG and drive the client OOM. Textures are capped in the
-# baker well below this — 500 MB is ~10× the largest legitimate 8k PNG.
-# Override with MAT_VIS_MAX_FETCH_SIZE if you really need more.
-DEFAULT_MAX_FETCH_BYTES = _parse_size(os.environ.get("MAT_VIS_MAX_FETCH_SIZE", "500MB"))
-
 # Previously a hardcoded frozenset of 10 names. The client doesn't need a
 # static enum — categories are discoverable at runtime from rowmap filenames
 # in the release manifest. See MatVisClient.categories(). Kept as a
@@ -373,7 +366,7 @@ def _in_range(value: float | None, lo: float, hi: float) -> bool:
 # Schema versions this client understands. Manifest declares its own
 # schema_version field; if the manifest version is outside this set,
 # the client refuses to operate rather than silently misreading data.
-COMPATIBLE_SCHEMA_VERSIONS = frozenset([2])
+COMPATIBLE_SCHEMA_VERSIONS = frozenset([2, 3])  # 3 = per-file substrate (#186 / ADR-0012)
 
 
 class MatVisClient:
@@ -411,7 +404,9 @@ class MatVisClient:
         self._cache_dir = cache_dir or DEFAULT_CACHE_DIR
         self._cache = cache
         self._manifest: dict | None = None
-        self._rowmaps: dict[str, dict] = {}
+        # Per-file substrate (#186 / ADR-0012): which (source, tier) pairs
+        # we've already verified carry a .tier_complete sentinel.
+        self._tier_complete: dict[tuple[str, str], bool] = {}
         self._indexes: dict[str, list[dict]] = {}
         self._alt_clients: dict[str, "MatVisClient"] = {}
         self._tag = tag
@@ -459,47 +454,41 @@ class MatVisClient:
         return self._manifest
 
     def _build_manifest_from_tree(self) -> dict:
-        """Derive a v2 manifest from the HF dataset tree listing."""
-        import re
+        """Synthesize a v3 manifest from the HF dataset tree listing.
 
+        Per-file substrate (#186 / ADR-0012): catalogs at root,
+        ``<src>/<tier>/.tier_complete`` sentinels mark complete tiers.
+        """
         rev = self._tag or "main"
         tree_url = f"https://huggingface.co/api/datasets/{HF_DATASET}/tree/{rev}?recursive=true"
         tree = _get_json(tree_url)
         paths = [e["path"] for e in tree if e.get("type") == "file"]
 
         sources: dict[str, dict] = {}
-        top_tar_re = re.compile(r"^(?P<src>[a-z]+)-(?P<tier>[A-Za-z0-9-]+)\.tar$")
-        ktx2_tar_re = re.compile(r"^ktx2/(?P<src>[a-z]+)-(?P<tier>[A-Za-z0-9-]+)\.tar$")
 
+        # 1) Discover per-source catalogs at repo root.
         for path in paths:
             if (
                 path.endswith(".json")
-                and "-rowmap" not in path
+                and "-rowmap" not in path  # legacy bakes still co-exist on old tags
                 and "/" not in path
                 and path != "release-manifest.json"
             ):
                 src = path[:-5]
                 sources.setdefault(src, {"catalog": path, "tiers": {}})
+
+        # 2) Discover completed tiers via .tier_complete sentinels.
+        for path in paths:
+            if not path.endswith("/.tier_complete"):
                 continue
-            m = top_tar_re.match(path)
-            if m:
-                src = m.group("src")
-                tier = m.group("tier")
-                stem = path[:-4]
-                sources.setdefault(src, {"catalog": f"{src}.json", "tiers": {}})
-                sources[src]["tiers"][tier] = {"tar": path, "rowmap": f"{stem}-rowmap.json"}
+            parts = path.split("/")
+            if len(parts) != 3:
                 continue
-            m = ktx2_tar_re.match(path)
-            if m:
-                src = m.group("src")
-                tier = m.group("tier")
-                stem = path[len("ktx2/") : -4]
-                sources.setdefault(src, {"catalog": f"{src}.json", "tiers": {}})
-                sources[src]["tiers"][tier] = {
-                    "tar": path,
-                    "rowmap": f"ktx2/{stem}-rowmap.json",
-                }
-        return {"schema_version": 2, "release_tag": rev, "sources": sources}
+            src, tier, _sentinel = parts
+            sources.setdefault(src, {"catalog": f"{src}.json", "tiers": {}})
+            sources[src]["tiers"][tier] = {"complete": True}
+
+        return {"schema_version": 3, "release_tag": rev, "sources": sources}
 
     # ── update checks ──────────────────────────────────────────
 
@@ -691,70 +680,59 @@ class MatVisClient:
     def categories(self) -> tuple[str, ...]:
         """Discover material categories from per-source catalogs.
 
-        ADR-0007 removed the per-category partitioning dimension, so
-        categories are read from ``entry.category`` in each catalog.
+        v3 (ADR-0011 / mat-vis#152) reads ``entry["mat_vis"]["category"]``.
         """
         global CATEGORIES
         found: set[str] = set()
         for source in self.sources():
             for entry in self.index(source):
-                cat = entry.get("category")
+                cat = (entry.get("mat_vis") or {}).get("category")
                 if cat:
                     found.add(cat)
         result = tuple(sorted(found))
         CATEGORIES = frozenset(result)
         return result
 
-    def rowmap(self, source: str, tier: str, category: str | None = None) -> dict:
-        """Fetch and cache the rowmap for a (source, tier).
+    def materials(self, source: str, tier: str) -> list[str]:
+        """List material IDs available for a (source, tier).
 
-        v0.6.0: one rowmap per (source, tier) — no per-category
-        partitioning. ``category`` is accepted for back-compat with
-        0.5.x callers but ignored.
+        v0.6.0+ (#186 / ADR-0012): derived from the v3 catalog —
+        entries whose ``available_tiers`` list contains ``tier``.
         """
-        del category
-        key = f"{source}-{tier}"
-        if key in self._rowmaps:
-            return self._rowmaps[key]
-
         sources = self.manifest.get("sources", {})
         src_entry = _lookup(sources, source, kind="source")
-        tier_entry = _lookup(
+        _lookup(
             src_entry.get("tiers") or {},
             tier,
             kind="tier",
             context=f"source {source!r}",
         )
-        rowmap_path = tier_entry["rowmap"]
 
-        cache_path = self._cache_dir / ".rowmaps" / rowmap_path.replace("/", "_")
-        if cache_path.exists():
-            rm = json.loads(cache_path.read_text())
-        else:
-            rm = _get_json(self._hf_url(rowmap_path))
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(json.dumps(rm, indent=2))
-
-        # Attach tar_file to every channel so fetch_texture can find
-        # the bytes without re-reading the manifest.
-        tar_path = tier_entry["tar"]
-        for channels in rm.get("materials", {}).values():
-            for ch_data in channels.values():
-                ch_data["tar_file"] = tar_path
-
-        self._rowmaps[key] = rm
-        return rm
-
-    def materials(self, source: str, tier: str) -> list[str]:
-        """List material IDs available for a source × tier."""
-        rm = self.rowmap(source, tier)
-        return sorted(rm.get("materials", {}).keys())
+        idx = self._load_index_raw(source)
+        out: list[str] = []
+        for entry in idx:
+            if not isinstance(entry, dict):
+                continue
+            tiers = entry.get("available_tiers") or []
+            if tier in tiers and entry.get("id"):
+                out.append(entry["id"])
+        return sorted(out)
 
     def channels(self, source: str, material_id: str, tier: str) -> list[str]:
-        """List channels available for a material."""
-        rm = self.rowmap(source, tier)
-        mat = rm.get("materials", {}).get(material_id, {})
-        return sorted(mat.keys())
+        """List channels available for a material at a tier.
+
+        v0.6.0+ (#186 / ADR-0012): read from the v3 catalog entry's
+        ``maps`` list (or ``texture_hashes`` keys as fallback).
+        """
+        resolved = self._resolve_material_id(source, material_id, tier)
+        idx = self._load_index_raw(source)
+        for entry in idx:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("id") == resolved:
+                maps = entry.get("maps") or list((entry.get("texture_hashes") or {}).keys())
+                return sorted(m for m in maps if isinstance(m, str))
+        return []
 
     # ── Index & search ──────────────────────────────────────────
 
@@ -766,8 +744,14 @@ class MatVisClient:
             catalog = f"{source}.json"
         return self._hf_url(catalog)
 
-    def index(self, source: str) -> list[dict]:
-        """Fetch and cache the per-source catalog JSON (v0.6.0: HF-only)."""
+    def _load_index_raw(self, source: str) -> list[dict]:
+        """Fetch + cache the per-source catalog JSON verbatim (with ``upstream``).
+
+        Internal accessor — public callers get the stripped view from
+        :meth:`index`. See the package client for the rationale.
+
+        Guards against a v3 client pointed at a v2 catalog (ADR-0011).
+        """
         if source not in self._indexes:
             cache_path = self._cache_dir / ".indexes" / f"{source}.json"
             if cache_path.exists():
@@ -777,16 +761,94 @@ class MatVisClient:
                 self._indexes[source] = data
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache_path.write_text(json.dumps(data, indent=2))
+            self._assert_v3_catalog(source, self._indexes[source])
         return self._indexes[source]
+
+    @staticmethod
+    def _assert_v3_catalog(source: str, entries: list[dict]) -> None:
+        """Raise if ``entries`` is a pre-ADR-0011 (v2) catalog — fail loudly
+        rather than silently return empty from ``search()`` / ``categories()``.
+        """
+        if not isinstance(entries, list) or not entries:
+            return
+        sample = entries[0]
+        if not isinstance(sample, dict):
+            return
+        if "mat_vis" in sample:
+            return
+        if any(k in sample for k in ("category", "color_hex", "roughness")):
+            raise MatVisError(
+                f"catalog for source {source!r} predates ADR-0011 (v2 shape). "
+                f"This client requires v3 catalogs (mat_vis block). "
+                f"Pin tag='v2026.04.1' or newer, or downgrade to mat-vis-client 0.5.x."
+            )
+
+    @staticmethod
+    def _strip_upstream(entry: dict) -> dict:
+        """Return a shallow copy of ``entry`` with the ``upstream`` key removed.
+
+        Layer-2 (``upstream.raw``) is explicitly NOT stable — shipping it in
+        every ``index()`` / ``search()`` response would drag unstable upstream
+        shape into the query surface. Use :meth:`upstream` directly to access
+        it for a specific material.
+        """
+        if "upstream" not in entry:
+            return entry
+        return {k: v for k, v in entry.items() if k != "upstream"}
+
+    def index(self, source: str) -> list[dict]:
+        """Fetch and cache the per-source catalog JSON (v0.6.0: HF-only).
+
+        The ``upstream`` block (Layer 2 of ADR-0011) is stripped from
+        every entry — it's the verbatim upstream response, intentionally
+        NOT part of the stable query surface. Use :meth:`upstream` to
+        access it for a specific material.
+        """
+        return [self._strip_upstream(e) for e in self._load_index_raw(source)]
+
+    def upstream(
+        self,
+        source: str,
+        material_id: str,
+        tier: str = "1k",
+    ) -> dict:
+        """Return the verbatim upstream metadata for a material.
+
+        The shape is source-specific and **unstable** — not covered by
+        semver. Use for advanced queries that need upstream fields not
+        exposed via ``mat_vis.*``. Returns ``{}`` when the entry exists
+        but carries no ``upstream`` block (pre-v3 catalogs).
+        """
+        resolved = self._resolve_material_id(source, material_id, tier)
+        for entry in self._load_index_raw(source):
+            if entry.get("id") != resolved:
+                continue
+            upstream = entry.get("upstream") or {}
+            raw = upstream.get("raw")
+            if not isinstance(raw, dict):
+                return {}
+            return raw
+        raise UnknownMaterialError(
+            key=material_id,
+            available=[],
+            context=f"{source}/{tier}",
+        )
+
+    _SCALAR_WIDEN = 0.2  # scalar shorthand → range half-width
 
     def search(
         self,
         category: str | None = None,
         *,
+        roughness: float | None = None,
+        metalness: float | None = None,
         roughness_range: tuple[float, float] | None = None,
         metalness_range: tuple[float, float] | None = None,
         source: str | None = None,
         tier: str = "1k",
+        tag: str | None = None,
+        score: bool = False,
+        limit: int | None = None,
     ) -> list[dict]:
         """Search materials by category and scalar ranges.
 
@@ -795,12 +857,47 @@ class MatVisClient:
 
         Args:
             category: Filter by material category (e.g. "metal", "wood").
+            roughness: Scalar shorthand. Matches within ± ``_SCALAR_WIDEN``.
+                Mutually exclusive with ``roughness_range``.
+            metalness: Scalar shorthand. Same semantics as ``roughness``.
             roughness_range: (min, max) roughness filter, inclusive.
             metalness_range: (min, max) metalness filter, inclusive.
             source: Limit search to one source. If None, searches all
                     sources available for the given tier.
             tier: Only return materials that have this tier available.
+            tag: Optional release tag override (see .at()).
+            score: When True and a scalar shorthand is passed, attach a
+                ``score`` field (absolute distance) and sort ascending.
+            limit: Cap the returned list length.
         """
+        if tag is not None and tag != self._tag:
+            return self.at(tag).search(
+                category,
+                roughness=roughness,
+                metalness=metalness,
+                roughness_range=roughness_range,
+                metalness_range=metalness_range,
+                source=source,
+                tier=tier,
+                score=score,
+                limit=limit,
+            )
+        # Scalar + range on the same dimension is ambiguous — reject.
+        if roughness is not None and roughness_range is not None:
+            raise MatVisError("pass roughness OR roughness_range, not both")
+        if metalness is not None and metalness_range is not None:
+            raise MatVisError("pass metalness OR metalness_range, not both")
+        # Scalar shorthand widens into an inclusive range.
+        if roughness is not None:
+            roughness_range = (
+                max(0.0, roughness - self._SCALAR_WIDEN),
+                min(1.0, roughness + self._SCALAR_WIDEN),
+            )
+        if metalness is not None:
+            metalness_range = (
+                max(0.0, metalness - self._SCALAR_WIDEN),
+                min(1.0, metalness + self._SCALAR_WIDEN),
+            )
         if category:
             valid = self.categories()  # discovered from manifest
             if valid and category not in valid:
@@ -818,19 +915,102 @@ class MatVisClient:
 
         for src in sources:
             for entry in self.index(src):
-                if category and entry.get("category") != category:
+                mv = entry.get("mat_vis") or {}
+                pbr = mv.get("pbr") or {}
+                if category and mv.get("category") != category:
                     continue
-                if roughness_range and not _in_range(entry.get("roughness"), *roughness_range):
+                if roughness_range and not _in_range(pbr.get("roughness"), *roughness_range):
                     continue
-                if metalness_range and not _in_range(entry.get("metalness"), *metalness_range):
+                if metalness_range and not _in_range(pbr.get("metalness"), *metalness_range):
                     continue
-                if tier not in entry.get("available_tiers", []):
+                # Scalar-only entries (e.g. physicallybased) advertise no
+                # textures — treat missing/empty ``available_tiers`` as
+                # tier-independent so they pass any tier filter (#167).
+                # Textured entries still get gated to the requested tier.
+                entry_tiers = entry.get("available_tiers")
+                if entry_tiers and tier not in entry_tiers:
                     continue
                 results.append(entry)
 
+        if score and (roughness is not None or metalness is not None):
+            for r in results:
+                pbr = (r.get("mat_vis") or {}).get("pbr") or {}
+                s = 0.0
+                if roughness is not None and pbr.get("roughness") is not None:
+                    s += abs(pbr["roughness"] - roughness)
+                if metalness is not None and pbr.get("metalness") is not None:
+                    s += abs(pbr["metalness"] - metalness)
+                r["score"] = s
+            results.sort(key=lambda r: r["score"])
+
+        if limit is not None:
+            results = results[:limit]
         return results
 
     # ── Bulk operations ─────────────────────────────────────────
+
+    @staticmethod
+    def _normalize_name(s: str) -> str:
+        """Case/whitespace-fold a name for index lookup. NFKC + casefold."""
+        import unicodedata
+
+        return unicodedata.normalize("NFKC", s).strip().casefold()
+
+    def _resolve_material_id(self, source: str, material_id: str, tier: str) -> str:
+        """Resolve ``material_id`` to its canonical catalog id.
+
+        Per-file substrate (#186 / ADR-0012): "is this material staged
+        for the requested tier?" comes from the v3 catalog entry's
+        ``available_tiers`` field, not a separate rowmap.
+        """
+        try:
+            idx = self.index(source)
+        except MatVisError:
+            idx = []
+        if not isinstance(idx, list):
+            idx = []
+
+        norm_query = self._normalize_name(material_id)
+        by_id: dict | None = None
+        by_name: list[dict] = []
+        for entry in idx:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("id") == material_id:
+                by_id = entry
+            entry_name = (entry.get("mat_vis") or {}).get("name") or ""
+            if entry_name and self._normalize_name(entry_name) == norm_query:
+                by_name.append(entry)
+
+        def _is_staged(entry: dict) -> bool:
+            return tier in (entry.get("available_tiers") or [])
+
+        if by_id is not None:
+            if _is_staged(by_id):
+                return material_id
+            raise MaterialNotStagedError(source=source, material_id=material_id, tier=tier)
+
+        if len(by_name) > 1:
+            raise AmbiguousMaterialError(
+                source=source,
+                name=material_id,
+                candidates=[e.get("id", "") for e in by_name if e.get("id")],
+            )
+
+        if len(by_name) == 1:
+            resolved = by_name[0].get("id", "")
+            if _is_staged(by_name[0]):
+                return resolved
+            raise MaterialNotStagedError(source=source, material_id=resolved, tier=tier)
+
+        staged_ids = sorted(
+            e["id"] for e in idx if isinstance(e, dict) and _is_staged(e) and e.get("id")
+        )
+        raise UnknownMaterialError(
+            key=material_id,
+            available=staged_ids,
+            context=f"{source}/{tier}",
+        )
 
     def fetch_all_textures(
         self,
@@ -912,18 +1092,33 @@ class MatVisClient:
     def _scalars_for(self, source: str, material_id: str) -> dict:
         """Look up PBR scalars for a material from the source index.
 
+        v3 (ADR-0011): reads ``mat_vis.pbr.*`` and synthesizes a
+        ``color_hex`` string from ``pbr.color_rgb`` for the adapters
+        (``to_threejs`` / ``to_gltf`` / ``to_mtlx``) which still consume
+        the hex shape.
+
         Silent on failure — returns ``{}`` if the index is unavailable or
-        the material isn't found. Used by :class:`MtlxSource` to fill in
-        shader scalar inputs when a texture channel is absent.
+        the material isn't found.
         """
         scalars: dict = {}
         try:
             for entry in self.index(source):
-                if entry["id"] == material_id:
-                    for k in ("roughness", "metalness", "ior", "color_hex"):
-                        if k in entry and entry[k] is not None:
-                            scalars[k] = entry[k]
-                    break
+                if entry["id"] != material_id:
+                    continue
+                pbr = (entry.get("mat_vis") or {}).get("pbr") or {}
+                for k in ("roughness", "metalness", "ior"):
+                    v = pbr.get(k)
+                    if v is not None:
+                        scalars[k] = v
+                rgb = pbr.get("color_rgb")
+                if isinstance(rgb, list) and len(rgb) >= 3:
+                    r, g, b = rgb[:3]
+                    scalars["color_hex"] = "#{:02X}{:02X}{:02X}".format(
+                        int(round(r * 255)),
+                        int(round(g * 255)),
+                        int(round(b * 255)),
+                    )
+                break
         except Exception:
             pass
         return scalars
@@ -948,32 +1143,37 @@ class MatVisClient:
                 self._mtlx_originals[source] = {}
         return self._mtlx_originals[source]
 
-    def rowmap_entry(
-        self,
-        source: str,
-        material_id: str,
-        tier: str = "1k",
-    ) -> dict[str, dict]:
-        """Get raw rowmap offsets for a material (for DIY consumers).
+    # ── Per-file texture fetch (#186 / ADR-0012) ───────────────────
 
-        Returns a dict of channel -> {offset, length, tar_file}.
+    _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+    _KTX2_MAGIC = b"\xabKTX 20\xbb\r\n\x1a\n"
+
+    def _per_file_url(self, source: str, tier: str, mid: str, channel: str, ext: str) -> str:
+        """``<source>/<tier>/<mid>/<channel>.<ext>`` resolve URL on HF."""
+        return self._hf_url(f"{source}/{tier}/{mid}/{channel}.{ext}")
+
+    def _assert_tier_complete(self, source: str, tier: str) -> None:
+        """Probe ``<source>/<tier>/.tier_complete`` once per process.
+
+        ADR-0012: the sentinel is the final commit per tier, so its
+        presence confirms the tier is atomically baked. Probe once and
+        cache; reject partial tiers loudly so callers don't silently
+        consume half-baked data.
         """
-        rm = self.rowmap(source, tier)
-        mat = _lookup(
-            rm.get("materials", {}),
-            material_id,
-            kind="material",
-            context=f"{source}/{tier}",
-        )
-        tar_file = rm.get("tar_file", "")
-        return {
-            ch: {
-                "offset": info["offset"],
-                "length": info["length"],
-                "tar_file": info.get("tar_file", tar_file),
-            }
-            for ch, info in mat.items()
-        }
+        key = (source, tier)
+        if self._tier_complete.get(key):
+            return
+        url = self._hf_url(f"{source}/{tier}/.tier_complete")
+        try:
+            _get(url)
+        except Exception as e:  # noqa: BLE001
+            raise MatVisError(
+                f"tier {source}/{tier!r} is not atomically complete on this "
+                f"release (no .tier_complete sentinel). The bake may still be "
+                f"running, or this revision was committed mid-batch. Re-run "
+                f"the bake or pin a known-complete tag."
+            ) from e
+        self._tier_complete[key] = True
 
     def fetch_texture(
         self,
@@ -982,71 +1182,61 @@ class MatVisClient:
         channel: str,
         tier: str = "1k",
     ) -> bytes:
-        """Fetch a single texture PNG via HTTP range read.
+        """Fetch a single texture via plain HTTPS GET (#186 / ADR-0012).
 
-        Returns raw PNG bytes. Caches locally.
+        URL: ``<HF_BASE>/<tag>/<source>/<tier>/<material_id>/<channel>.{png,ktx2}``.
+        PNG is tried first; on 404 falls back to KTX2 for derived ktx2 tiers.
+
+        Returns raw bytes. Caches locally.
         """
-        # Check cache first
-        cache_path = self._cache_dir / source / tier / material_id / f"{channel}.png"
-        if cache_path.exists():
-            return cache_path.read_bytes()
-
-        # Find in rowmap
-        rm = self.rowmap(source, tier)
-        mat = _lookup(
-            rm.get("materials", {}),
-            material_id,
-            kind="material",
-            context=f"{source}/{tier}",
+        sources_block = self.manifest.get("sources", {})
+        src_entry = _lookup(sources_block, source, kind="source")
+        _lookup(
+            src_entry.get("tiers") or {},
+            tier,
+            kind="tier",
+            context=f"source {source!r}",
         )
-        rng = _lookup(
-            mat,
-            channel,
-            kind="channel",
-            context=f"{source}/{tier}/{material_id}",
-        )
-        offset = rng["offset"]
-        length = rng["length"]
 
-        # Defend against malicious/corrupt rowmaps claiming huge reads.
-        # A bad rowmap could otherwise allocate gigabytes for one PNG
-        # and OOM the client; see 0.3.1 security review.
-        if not isinstance(length, int) or length <= 0:
+        resolved = self._resolve_material_id(source, material_id, tier)
+
+        available = self.channels(source, resolved, tier)
+        if channel not in available:
             raise MatVisError(
-                f"invalid rowmap entry for {source}/{material_id}/{channel}: length={length!r}"
-            )
-        if length > DEFAULT_MAX_FETCH_BYTES:
-            raise MatVisError(
-                f"rowmap claims {_fmt_size(length)} for {source}/{material_id}/{channel}, "
-                f"over the {_fmt_size(DEFAULT_MAX_FETCH_BYTES)} safety cap. "
-                "Raise MAT_VIS_MAX_FETCH_SIZE to override."
+                f"channel {channel!r} not found "
+                f"(context: {source}/{tier}/{resolved}). "
+                f"Available: {available}"
             )
 
-        # Range-read the tar on HF. HF's resolve URL is stable (no
-        # expiring signed-URL dance), so one GET per channel is fine.
-        tar_file = rng.get("tar_file") or rm.get("tar_file", f"{source}-{tier}.tar")
-        url = self._hf_url(tar_file)
-        range_header = f"bytes={offset}-{offset + length - 1}"
-        data = _get(url, headers={"Range": range_header})
+        for ext in ("png", "ktx2"):
+            cache_path = self._cache_dir / source / tier / resolved / f"{channel}.{ext}"
+            if cache_path.exists():
+                return cache_path.read_bytes()
 
-        # Verify payload magic matches one of the formats we bake:
-        # PNG (\x89PNG\r\n\x1a\n) or KTX2 (\xabKTX 20\xbb\r\n\x1a\n).
-        _PNG = b"\x89PNG\r\n\x1a\n"
-        _KTX2 = b"\xabKTX 20\xbb\r\n\x1a\n"
-        if not (data.startswith(_PNG) or data.startswith(_KTX2)):
-            raise ValueError(
-                f"Expected PNG or KTX2 bytes, got {data[:12]!r} "
-                f"({source}/{material_id}/{channel} @ {tier})"
-            )
+        self._assert_tier_complete(source, tier)
 
-        # Cache
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(data)
+        last_exc: Exception | None = None
+        for ext in ("png", "ktx2"):
+            url = self._per_file_url(source, tier, resolved, channel, ext)
+            try:
+                data = _get(url)
+            except Exception as e:  # noqa: BLE001
+                last_exc = e
+                continue
+            if not (data.startswith(self._PNG_MAGIC) or data.startswith(self._KTX2_MAGIC)):
+                raise ValueError(
+                    f"Expected PNG or KTX2 bytes, got {data[:12]!r} "
+                    f"({source}/{resolved}/{channel} @ {tier})"
+                )
+            cache_path = self._cache_dir / source / tier / resolved / f"{channel}.{ext}"
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_bytes(data)
+            self._maybe_warn_cache_cap()
+            return data
 
-        # Soft-cap warning (once per process)
-        self._maybe_warn_cache_cap()
-
-        return data
+        if last_exc is not None:
+            raise last_exc
+        raise MatVisError(f"channel {channel!r} not available for {source}/{resolved} @ {tier}")
 
     # ── Cache management ────────────────────────────────────────
 
@@ -1535,13 +1725,15 @@ def main():
             tier=args.tier,
         )
         for entry in results:
+            mv = entry.get("mat_vis") or {}
+            pbr = mv.get("pbr") or {}
             scalars = []
-            if entry.get("roughness") is not None:
-                scalars.append(f"R={entry['roughness']:.2f}")
-            if entry.get("metalness") is not None:
-                scalars.append(f"M={entry['metalness']:.2f}")
+            if pbr.get("roughness") is not None:
+                scalars.append(f"R={pbr['roughness']:.2f}")
+            if pbr.get("metalness") is not None:
+                scalars.append(f"M={pbr['metalness']:.2f}")
             scalar_str = f" ({', '.join(scalars)})" if scalars else ""
-            print(f"{entry['source']}/{entry['id']}  [{entry.get('category', '?')}]{scalar_str}")
+            print(f"{entry['source']}/{entry['id']}  [{mv.get('category', '?')}]{scalar_str}")
         print(f"\n{len(results)} result(s)", file=sys.stderr)
 
     elif args.cmd == "prefetch":
@@ -1599,6 +1791,59 @@ def main():
             print(
                 f"  {kind:8s}  {entry['current'] or '?'} {arrow} {entry['latest'] or '?'}{marker}"
             )
+
+
+# ── Module-level convenience API ────────────────────────────────
+#
+# Mirrors the packaged ``mat_vis_client.__init__`` helpers so that the
+# single-file standalone exposes the same free-function surface as the
+# installable package. Kept thin: delegates to a process-wide singleton
+# client so repeated calls share manifest / index / texture caches.
+
+_client: MatVisClient | None = None
+
+
+def get_client() -> MatVisClient:
+    """Return the process-wide ``MatVisClient`` singleton.
+
+    Lazily constructed on first call. Downstream consumers that want to
+    share the manifest/index/texture cache with the module-level
+    ``search()`` helper should use this instead of ``MatVisClient()``
+    directly.
+    """
+    global _client
+    if _client is None:
+        _client = MatVisClient()
+    return _client
+
+
+def search(
+    *,
+    category: str | None = None,
+    roughness: float | None = None,
+    metalness: float | None = None,
+    source: str | None = None,
+    tier: str = "1k",
+    tag: str | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Search the mat-vis index by category and scalar similarity.
+
+    Thin forwarder to :meth:`MatVisClient.search` with ``score=True`` —
+    the scoring/sorting + default ``limit=20`` are the only module-level
+    convenience on top of the method. Every other argument is just passed
+    through.
+    """
+    return get_client().search(
+        category,
+        roughness=roughness,
+        metalness=metalness,
+        source=source,
+        tier=tier,
+        tag=tag,
+        score=True,
+        limit=limit,
+    )
 
 
 if __name__ == "__main__":

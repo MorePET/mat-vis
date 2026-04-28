@@ -52,10 +52,11 @@ def _texture_section(source: str, entries: list[dict], thumb_dir: Path) -> str:
         tiers.update(e.get("available_tiers", []))
     tier_str = ", ".join(sorted(tiers)) if tiers else "—"
 
-    # Group by category
+    # Group by category (v3 shape: mat_vis.category)
     by_cat: dict[str, list[dict]] = defaultdict(list)
     for e in ok_entries:
-        by_cat[e.get("category", "other")].append(e)
+        mv = e.get("mat_vis") or {}
+        by_cat[mv.get("category", "other")].append(e)
 
     lines = [f"## {source} — {len(ok_entries)} materials ({tier_str})\n"]
 
@@ -67,9 +68,11 @@ def _texture_section(source: str, entries: list[dict], thumb_dir: Path) -> str:
 
         for entry in sorted(cat_entries, key=lambda e: e["id"]):
             mid = entry["id"]
-            name = entry.get("name", mid)
-            lic = entry.get("source_license", "—")
-            url = entry.get("source_url", "")
+            mv = entry.get("mat_vis") or {}
+            name = mv.get("name") or mid
+            attr = mv.get("attribution") or {}
+            lic = attr.get("license_spdx", "—")
+            url = attr.get("source_url", "")
             link = f"[{name}]({url})" if url else name
 
             color_thumb = thumb_dir / source / mid / "color_thumb.png"
@@ -91,7 +94,8 @@ def _scalar_section(source: str, entries: list[dict]) -> str:
 
     by_cat: dict[str, list[dict]] = defaultdict(list)
     for e in entries:
-        by_cat[e.get("category", "other")].append(e)
+        mv = e.get("mat_vis") or {}
+        by_cat[mv.get("category", "other")].append(e)
 
     lines = [f"## {source} — {len(entries)} materials (scalar only)\n"]
 
@@ -102,11 +106,20 @@ def _scalar_section(source: str, entries: list[dict]) -> str:
         lines.append("|---|---|---|---|---|")
 
         for entry in sorted(cat_entries, key=lambda e: e["id"]):
-            name = entry.get("name", entry["id"])
-            color = entry.get("color_hex")
-            rough = entry.get("roughness")
-            metal = entry.get("metalness")
-            ior = entry.get("ior")
+            mv = entry.get("mat_vis") or {}
+            pbr = mv.get("pbr") or {}
+            name = mv.get("name") or entry["id"]
+            rgb = pbr.get("color_rgb")
+            if isinstance(rgb, list) and len(rgb) >= 3:
+                r, g, b = rgb[:3]
+                color = "#{:02X}{:02X}{:02X}".format(
+                    int(round(r * 255)), int(round(g * 255)), int(round(b * 255))
+                )
+            else:
+                color = None
+            rough = pbr.get("roughness")
+            metal = pbr.get("metalness")
+            ior = pbr.get("ior")
 
             color_cell = f"`{color}`" if color else "—"
             rough_str = f"{rough:.2f}" if rough is not None else "—"
