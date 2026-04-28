@@ -250,8 +250,79 @@ live_tests() {
     esac
 }
 
+# ── e2e: opt-in via MAT_VIS_E2E=1 (mat-vis-tst per-file substrate, #193)
+#
+# Round-trips against the throwaway scratch dataset
+# `gerchowl/mat-vis-tst`. Gated on MAT_VIS_E2E=1.
+#
+# Ordering contract (#193): the Python E2E suite at
+# tests/e2e/test_per_file_roundtrip.py owns the bake/cleanup lifecycle
+# for the throwaway tag (default `v0.0.0-e2e-184-perfile`). This block
+# presumes that suite has already run (or is running in the same CI
+# job) so the tag exists. Operators run:
+#
+#   MAT_VIS_E2E=1 pytest tests/e2e/      # bakes the tag
+#   MAT_VIS_E2E=1 bash clients/test_client.sh   # rides on it
+#
+# We do NOT bake from shell — keeping the bake side-effect single-owner
+# avoids racy commits to mat-vis-tst.
+
+cmd_e2e() {
+    if [ "${MAT_VIS_E2E:-0}" != "1" ]; then
+        echo "=== e2e (skipped; set MAT_VIS_E2E=1 + a per-file mat-vis-tst tag) ==="
+        return
+    fi
+    echo "=== e2e (mat-vis-tst HF round-trip, #193) ==="
+
+    local repo="gerchowl/mat-vis-tst"
+    export MAT_VIS_HF_BASE="https://huggingface.co/datasets/$repo/resolve"
+    export MAT_VIS_TAG="${MAT_VIS_E2E_TAG:-v0.0.0-e2e-184-perfile}"
+    local cache
+    cache=$(mktemp -d)
+    export MAT_VIS_CACHE="$cache"
+    trap 'rm -rf "$cache"' RETURN
+
+    local mats first
+    if ! mats=$("$CLIENT" materials polyhaven 1k 2>&1); then
+        echo "  FAIL materials lookup failed: $mats"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    first=$(echo "$mats" | head -1)
+    if [ -z "$first" ]; then
+        echo "  FAIL polyhaven materials list empty (did the Python E2E suite bake the tag?)"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    echo "  PASS polyhaven materials non-empty (first=$first)"
+    PASS=$((PASS + 1))
+
+    local out="$cache/e2e.png"
+    if ! "$CLIENT" fetch polyhaven "$first" color 1k -o "$out" 2>&1; then
+        echo "  FAIL fetch failed for $first"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    local size
+    size=$(wc -c < "$out" | tr -d ' ')
+    if [ "$size" -gt 1000 ]; then
+        echo "  PASS fetch wrote PNG bytes ($size B)"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL fetch produced too-small file ($size B)"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    local magic
+    magic=$(head -c4 "$out" | od -An -tx1 | tr -d ' \n')
+    assert_eq "fetch emits PNG magic" "$magic" "89504e47"
+
+    unset MAT_VIS_HF_BASE MAT_VIS_TAG MAT_VIS_CACHE
+}
+
 structural_tests
 live_tests
+cmd_e2e
 
 echo ""
 echo "$PASS passed, $FAIL failed"
