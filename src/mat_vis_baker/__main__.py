@@ -1,10 +1,13 @@
 """CLI entry point for the mat-vis baker.
 
-v0.5.0+ (ADR-0007): the primary bake path is ``hf-bake`` — one atomic
-HF commit per ``(source, tier)``. The legacy ``all`` subcommand is a
-thin back-compat wrapper that routes to ``hf-bake``. ``derive`` /
-``derive-from-release`` / ``derive-ktx2`` are retired (issue #112
-will re-implement them on the tar substrate).
+v0.6.0+ (ADR-0012): per-file HF substrate. ``hf-bake`` is the only
+bake path — one HF file per ``(source, tier, material, channel)``.
+The legacy ``all`` subcommand is a thin back-compat wrapper.
+
+The tar-based ``hf-derive`` / ``hf-derive-ktx2`` / ``merge-shards``
+subcommands were retired by #189; their per-file replacements will
+be reborn under a future issue. ``derive`` / ``derive-from-release``
+/ ``derive-ktx2`` were retired earlier (issue #112).
 
 Usage:
     mat-vis-baker hf-bake <source> <tier> <work_dir> --release-tag <tag> [--limit N]
@@ -156,62 +159,6 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_hf_derive(args: argparse.Namespace) -> int:
-    from mat_vis_baker.hf_derive import derive_smaller_tier
-    from mat_vis_baker.shard_utils import validate_shard_args
-
-    shard = validate_shard_args(args.shard_index, args.shard_total)
-    result = derive_smaller_tier(
-        source=args.source,
-        target_tier=args.target_tier,
-        source_tier=args.source_tier,
-        release_tag=args.release_tag,
-        work_dir=Path(args.work_dir),
-        repo_id=args.repo_id,
-        dry_run=args.dry_run,
-        shard=shard,
-    )
-    log.info("hf-derive result: %s", result)
-    return 0 if "error" not in result else 1
-
-
-def cmd_hf_derive_ktx2(args: argparse.Namespace) -> int:
-    from mat_vis_baker.hf_derive import derive_ktx2_tier
-    from mat_vis_baker.shard_utils import validate_shard_args
-
-    shard = validate_shard_args(args.shard_index, args.shard_total)
-    result = derive_ktx2_tier(
-        source=args.source,
-        source_tier=args.source_tier,
-        release_tag=args.release_tag,
-        work_dir=Path(args.work_dir),
-        repo_id=args.repo_id,
-        dry_run=args.dry_run,
-        target_tier=args.target_tier,
-        shard=shard,
-    )
-    log.info("hf-derive-ktx2 result: %s", result)
-    return 0 if "error" not in result else 1
-
-
-def cmd_merge_shards(args: argparse.Namespace) -> int:
-    from mat_vis_baker.merge_shards import merge_shards
-
-    result = merge_shards(
-        source=args.source,
-        tier=args.tier,
-        release_tag=args.release_tag,
-        work_dir=Path(args.work_dir),
-        repo_id=args.repo_id,
-        dry_run=args.dry_run,
-        keep_shards=args.keep_shards,
-    )
-    log.info("merge-shards result: %s", result)
-    # merge_shards never puts "error" in its result — it raises on any
-    # fault (incomplete shard set, range-read mismatch). Always return 0.
-    return 0
-
-
 def _resolve_hf_token(value: str | None) -> str | None:
     """Accept either a raw token or ``env:VAR`` for indirection."""
     if value is None:
@@ -263,10 +210,8 @@ def cmd_audit_orphans(args: argparse.Namespace) -> int:
 
 
 def cmd_hf_bake(args: argparse.Namespace) -> int:
-    """Bake (source, tier) → HF commit. Per-file substrate by default
-    (ADR-0012); legacy tar via --legacy-tar for one transition cycle."""
+    """Bake (source, tier) → HF commit. Per-file substrate (ADR-0012)."""
     from mat_vis_baker.hf_bake import bake_one
-    from mat_vis_baker.shard_utils import validate_shard_args
 
     tier = args.tier
     if args.source == "physicallybased" or tier == "scalar":
@@ -274,7 +219,6 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
         # passed here is a user error.
         tier = "scalar"
 
-    shard = validate_shard_args(args.shard_index, args.shard_total)
     result = bake_one(
         source=args.source,
         tier=tier,
@@ -285,8 +229,6 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
         offset=args.offset,
         batch_size=args.batch_size,
         dry_run=args.dry_run,
-        shard=shard,
-        legacy_tar=args.legacy_tar,
         allow_prod=args.allow_prod,
     )
     log.info("hf-bake result: %s", result)
@@ -387,7 +329,7 @@ def main() -> int:
 
     p_hf = sub.add_parser(
         "hf-bake",
-        help="Bake (source, tier) and atomically push to HF Datasets (ADR-0007).",
+        help="Bake (source, tier) and atomically push to HF Datasets (ADR-0012).",
     )
     p_hf.add_argument("source", choices=SOURCES)
     p_hf.add_argument(
@@ -395,7 +337,7 @@ def main() -> int:
         choices=VALID_TIERS + ["scalar"],
         help="Tier name, or 'scalar' for physicallybased (no textures).",
     )
-    p_hf.add_argument("work_dir", help="Scratch dir for fetched + baked textures + tar.")
+    p_hf.add_argument("work_dir", help="Scratch dir for fetched + baked textures.")
     p_hf.add_argument("--release-tag", required=True)
     p_hf.add_argument(
         "--repo-id",
@@ -408,104 +350,16 @@ def main() -> int:
     p_hf.add_argument(
         "--dry-run",
         action="store_true",
-        help="Build tar + manifest locally; skip the HF push.",
-    )
-    p_hf.add_argument(
-        "--shard-index",
-        type=int,
-        default=None,
-        help="0-based shard index. Requires --shard-total. Legacy tar only.",
-    )
-    p_hf.add_argument(
-        "--shard-total",
-        type=int,
-        default=None,
-        help="Total number of shards. Requires --shard-index. Legacy tar only.",
-    )
-    p_hf.add_argument(
-        "--legacy-tar",
-        action="store_true",
-        help=(
-            "Use the pre-ADR-0012 tar+rowmap substrate instead of the "
-            "default per-file layout. One-release-cycle escape hatch; "
-            "retired by #189."
-        ),
+        help="Build per-file artifacts locally; skip the HF push.",
     )
     p_hf.add_argument(
         "--allow-prod",
         action="store_true",
         help=(
-            "Permit writes to non-scratch HF dataset repos (per-file "
-            "substrate guard). Scratch repos are named */mat-vis-tst "
-            "and */mat-vis-*-tst; anything else requires this flag."
+            "Permit writes to non-scratch HF dataset repos. Scratch "
+            "repos are named */mat-vis-tst and */mat-vis-*-tst; anything "
+            "else requires this flag."
         ),
-    )
-
-    p_hd = sub.add_parser(
-        "hf-derive",
-        help="Derive a smaller tier from an existing HF PNG tar (resize).",
-    )
-    p_hd.add_argument("source", choices=SOURCES)
-    p_hd.add_argument("target_tier", choices=VALID_TIERS)
-    p_hd.add_argument("work_dir")
-    p_hd.add_argument("--source-tier", default="1k", choices=VALID_TIERS)
-    p_hd.add_argument("--release-tag", required=True)
-    p_hd.add_argument("--repo-id", default="gerchowl/mat-vis")
-    p_hd.add_argument("--dry-run", action="store_true")
-    p_hd.add_argument(
-        "--shard-index",
-        type=int,
-        default=None,
-        help="0-based shard index. Requires --shard-total.",
-    )
-    p_hd.add_argument(
-        "--shard-total",
-        type=int,
-        default=None,
-        help="Total number of shards. Requires --shard-index.",
-    )
-
-    p_hk = sub.add_parser(
-        "hf-derive-ktx2",
-        help="Transcode an existing HF PNG tar → KTX2 (requires `toktx`).",
-    )
-    p_hk.add_argument("source", choices=SOURCES)
-    p_hk.add_argument("work_dir")
-    p_hk.add_argument("--source-tier", default="1k", choices=VALID_TIERS)
-    p_hk.add_argument("--target-tier", default=None, help="Default: ktx2-<source-tier>.")
-    p_hk.add_argument("--release-tag", required=True)
-    p_hk.add_argument("--repo-id", default="gerchowl/mat-vis")
-    p_hk.add_argument("--dry-run", action="store_true")
-    p_hk.add_argument(
-        "--shard-index",
-        type=int,
-        default=None,
-        help="0-based shard index. Requires --shard-total.",
-    )
-    p_hk.add_argument(
-        "--shard-total",
-        type=int,
-        default=None,
-        help="Total number of shards. Requires --shard-index.",
-    )
-
-    p_merge = sub.add_parser(
-        "merge-shards",
-        help="Reassemble shard-N-of-K artifacts into one tar + rowmap (#134).",
-    )
-    p_merge.add_argument("source", choices=SOURCES)
-    p_merge.add_argument(
-        "tier",
-        help="Tier name (e.g. '1k', 'ktx2-1k'). KTX2 tiers land under ktx2/.",
-    )
-    p_merge.add_argument("work_dir")
-    p_merge.add_argument("--release-tag", required=True)
-    p_merge.add_argument("--repo-id", default="gerchowl/mat-vis")
-    p_merge.add_argument("--dry-run", action="store_true")
-    p_merge.add_argument(
-        "--keep-shards",
-        action="store_true",
-        help="Don't delete shard artifacts after merge (useful for debugging).",
     )
 
     p_mtlx = sub.add_parser(
@@ -576,12 +430,6 @@ def main() -> int:
         return cmd_pack_mtlx(args)
     if args.command == "hf-bake":
         return cmd_hf_bake(args)
-    if args.command == "hf-derive":
-        return cmd_hf_derive(args)
-    if args.command == "hf-derive-ktx2":
-        return cmd_hf_derive_ktx2(args)
-    if args.command == "merge-shards":
-        return cmd_merge_shards(args)
     if args.command == "audit-orphans":
         return cmd_audit_orphans(args)
 
