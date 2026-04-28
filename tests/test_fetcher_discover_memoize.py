@@ -78,8 +78,7 @@ class TestPolyhavenMemoizesDiscover:
             for offset in (0, 50, 100):
                 polyhaven.fetch("1k", tmp_path, limit=50, offset=offset)
         assert m.call_count == 1, (
-            f"polyhaven.discover called {m.call_count}× across 3 fetches — "
-            "should be memoized"
+            f"polyhaven.discover called {m.call_count}× across 3 fetches — should be memoized"
         )
 
 
@@ -92,8 +91,7 @@ class TestGpuopenMemoizesDiscover:
             for offset in (0, 50, 100):
                 gpuopen.fetch("1k", tmp_path, limit=50, offset=offset)
         assert m.call_count == 1, (
-            f"gpuopen.discover called {m.call_count}× across 3 fetches — "
-            "should be memoized"
+            f"gpuopen.discover called {m.call_count}× across 3 fetches — should be memoized"
         )
 
 
@@ -111,6 +109,4 @@ class TestResetHelper:
             assert m.call_count == 1
             ambientcg._reset_discover_cache()
             ambientcg.fetch("1k", tmp_path, limit=50, offset=100)
-            assert m.call_count == 2, (
-                "discover must be re-called after _reset_discover_cache()"
-            )
+            assert m.call_count == 2, "discover must be re-called after _reset_discover_cache()"

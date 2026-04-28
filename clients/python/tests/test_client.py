@@ -601,6 +601,55 @@ class TestLiveFetchTexture:
             live_client.fetch_texture("ambientcg", "NONEXISTENT_XYZ", "color", "1k")
 
 
+# ── Live regression guards for py-mat#90 (mat-vis#141 / #143 / #144) ──
+# These hit the real gpuopen release and verify the preferred UX
+# (``fetch_all_textures(source, name)``) works end-to-end. They skip
+# gracefully until the mat-vis#142 rebake lands (i.e. while the index
+# still carries ``name="1k 8b"`` garbage); once semantic metadata is
+# published they become positive-confirmation tests automatically.
+
+
+@live
+class TestLiveGpuopenNameLookup:
+    """End-to-end guard for py-mat#90 — fetch gpuopen materials by human name."""
+
+    KNOWN_MATERIAL = "Aluminum Corrugated"
+    KNOWN_UUID = "25b88a68-251a-414a-a5b5-68381adfdc5f"
+
+    def _has_semantic_metadata(self, live_client) -> bool:
+        """Skip condition: true once mat-vis#142 rebake has published
+        a gpuopen index with real titles instead of ``"1k 8b"`` labels."""
+        try:
+            idx = live_client.index("gpuopen")
+        except Exception:
+            return False
+        return any(e.get("name") == self.KNOWN_MATERIAL for e in idx if isinstance(e, dict))
+
+    def test_name_resolves_to_known_uuid(self, live_client):
+        if not self._has_semantic_metadata(live_client):
+            pytest.skip("gpuopen rebake (mat-vis#142) not yet published")
+        resolved = live_client._resolve_material_id("gpuopen", self.KNOWN_MATERIAL, "1k")
+        assert resolved == self.KNOWN_UUID
+
+    def test_fetch_all_textures_by_name_returns_pngs(self, live_client):
+        """py-mat#90's exact preferred-UX call."""
+        if not self._has_semantic_metadata(live_client):
+            pytest.skip("gpuopen rebake (mat-vis#142) not yet published")
+        textures = live_client.fetch_all_textures("gpuopen", self.KNOWN_MATERIAL, tier="1k")
+        assert textures, "expected at least one channel"
+        for channel, data in textures.items():
+            assert data[:4] == b"\x89PNG", f"{channel} is not a PNG"
+
+    def test_unknown_gpuopen_name_raises_typed_error(self, live_client):
+        """Bogus name → UnknownMaterialError (not silent {})."""
+        if not self._has_semantic_metadata(live_client):
+            pytest.skip("gpuopen rebake (mat-vis#142) not yet published")
+        from mat_vis_client import UnknownMaterialError
+
+        with pytest.raises(UnknownMaterialError):
+            live_client.fetch_all_textures("gpuopen", "DEFINITELY NOT A REAL MATERIAL", tier="1k")
+
+
 # ── upstream accessor + strip (Phase C, mat-vis#152) ───────────
 
 
