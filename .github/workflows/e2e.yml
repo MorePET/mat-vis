@@ -1,0 +1,60 @@
+---
+# E2E workflow — live MAT_VIS_E2E=1 round-trip against mat-vis-tst (#193).
+#
+# Bakes a throwaway tag on `gerchowl/mat-vis-tst`, fetches it back via
+# the per-file HF substrate (ADR-0012), then deletes the tag on
+# teardown. Targets the scratch namespace exclusively — the dagger
+# function refuses any non-`*-tst` repo_id, with no --allow-prod
+# escape hatch.
+#
+# Reproduce locally with:
+#   dagger call test-e2e --hf-token=env:HF_TOKEN --context=.
+
+name: E2E
+
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch: {}
+  schedule:
+    # 06:00 UTC daily — well off-peak for HF and inside the GH-hosted
+    # runner free tier window. Bake takes ~3 min for 2 polyhaven 1k
+    # materials so this is cheap.
+    - cron: '0 6 * * *'
+
+permissions:
+  contents: read
+  issues: write          # needed by notify-on-failure composite action
+
+jobs:
+  e2e:
+    name: live round-trip against mat-vis-tst
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: test-e2e
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          verb: call
+          module: .dagger
+          args: >-
+            test-e2e
+            --context=.
+            --hf-token=env:HF_TOKEN
+            --repo-id=gerchowl/mat-vis-tst
+
+      - name: Notify on failure
+        if: failure()
+        uses: ./.github/actions/notify-on-failure
+        with:
+          label-prefix: "[e2e-failed]"
+          workflow-name: "e2e"
+          target: "gerchowl/mat-vis-tst"
+          context: >-
+            Likely causes: HF transient (rate-limit or 5xx), upstream
+            polyhaven API hiccup, or a regression in the per-file
+            substrate. The Python E2E suite cleans up its throwaway
+            tag on teardown — failed runs may leave the tag behind on
+            mat-vis-tst; safe to delete manually.
