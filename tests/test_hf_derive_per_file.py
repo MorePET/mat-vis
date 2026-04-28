@@ -435,3 +435,182 @@ class TestResizeTransform:
         assert out.startswith(PNG_MAGIC)
         img = Image.open(io.BytesIO(out))
         assert img.size == (64, 64)
+
+
+# ── #207 part 2 / #210 part A: derive must emit + CAS-retry the manifest ──
+
+
+def _make_412_error(msg: str = "412 Precondition Failed: revision moved") -> Exception:
+    """Mirror of bake-side helper. Substring detection in the production
+    code matches across hub error-class shifts."""
+    return RuntimeError(msg)
+
+
+class TestDeriveManifestEmission:
+    """The derive path's catalog+manifest commit was added in #209.
+    Mocked tests asserted the parent_commit kwarg is set, but never
+    verified the manifest path is in the commit ops set or that the
+    manifest body actually carries the new tier. Locking it down so a
+    refactor that drops the bundled commit can't reach prod."""
+
+    def test_commit_path_set_includes_manifest(self, tmp_path) -> None:
+        api = TestDeriveSmallerTier()._setup_api(["mat_0", "mat_1"], ["color"])
+        get, head = _patch_http_for_derive(png_bytes=_make_png(64), target_existing=set())
+
+        with (
+            patch("mat_vis_baker.hf_derive_per_file.HfApi", return_value=api),
+            patch("mat_vis_baker.hf_derive_per_file._http_get", side_effect=get),
+            patch("mat_vis_baker.hf_derive_per_file._http_head_ok", side_effect=head),
+        ):
+            derive_smaller_tier(
+                source="polyhaven",
+                source_tier="1k",
+                target_tier="512",
+                release_tag="v0.0.0-test",
+                work_dir=tmp_path,
+                repo_id="gerchowl/mat-vis-tst",
+            )
+
+        all_paths = {
+            op.path_in_repo
+            for c in api.create_commit.call_args_list
+            for op in c.kwargs["operations"]
+        }
+        # Substrate-contract paths the derive run MUST emit.
+        assert "release-manifest.json" in all_paths
+        assert "polyhaven.json" in all_paths
+        assert "polyhaven/512/.tier_complete" in all_paths
+
+    def test_manifest_body_lists_new_tier_under_source(self, tmp_path) -> None:
+        """The body of the manifest commit must carry
+        sources.<src>.tiers.<target_tier> = {complete: true} — clients
+        depend on this to discover derived tiers without re-baking."""
+        api = TestDeriveSmallerTier()._setup_api(["mat_0"], ["color"])
+        get, head = _patch_http_for_derive(png_bytes=_make_png(64), target_existing=set())
+
+        with (
+            patch("mat_vis_baker.hf_derive_per_file.HfApi", return_value=api),
+            patch("mat_vis_baker.hf_derive_per_file._http_get", side_effect=get),
+            patch("mat_vis_baker.hf_derive_per_file._http_head_ok", side_effect=head),
+        ):
+            derive_smaller_tier(
+                source="polyhaven",
+                source_tier="1k",
+                target_tier="512",
+                release_tag="v0.0.0-test",
+                work_dir=tmp_path,
+                repo_id="gerchowl/mat-vis-tst",
+            )
+
+        manifest_op = next(
+            op
+            for c in api.create_commit.call_args_list
+            for op in c.kwargs["operations"]
+            if op.path_in_repo == "release-manifest.json"
+        )
+        manifest = json.loads(manifest_op.path_or_fileobj)
+        assert manifest["schema_version"] == 3
+        assert manifest["sources"]["polyhaven"]["tiers"]["512"] == {"complete": True}
+
+
+class TestDeriveCasRetryOnManifestCommit:
+    """Mirror of bake-side TestCasRetryOnManifestCommit — proves the
+    derive path's 412-retry loop actually retries, exhausts at the
+    documented budget, and does NOT retry non-412 errors."""
+
+    def _drive_derive_with_commit_side_effect(
+        self, tmp_path, side_effect, *, expect_raises: bool = False
+    ):
+        """Returns (api, fetch_mfst, exc) — same shape as the bake helper."""
+        api = TestDeriveSmallerTier()._setup_api(["mat_0"], ["color"])
+        get, head = _patch_http_for_derive(png_bytes=_make_png(64), target_existing=set())
+
+        with (
+            patch("mat_vis_baker.hf_derive_per_file.HfApi", return_value=api),
+            patch("mat_vis_baker.hf_derive_per_file._http_get", side_effect=get),
+            patch("mat_vis_baker.hf_derive_per_file._http_head_ok", side_effect=head),
+            patch(
+                "mat_vis_baker.hf_bake_per_file._fetch_manifest_with_parent",
+                return_value=({}, "deadbeef"),
+            ) as fetch_mfst,
+        ):
+            api.create_commit.side_effect = side_effect
+            api.create_commit.return_value = SimpleNamespace(oid="cafef00d")
+            exc: Exception | None = None
+            try:
+                derive_smaller_tier(
+                    source="polyhaven",
+                    source_tier="1k",
+                    target_tier="512",
+                    release_tag="v0.0.0-test",
+                    work_dir=tmp_path,
+                    repo_id="gerchowl/mat-vis-tst",
+                )
+            except Exception as e:  # noqa: BLE001
+                exc = e
+
+            if expect_raises:
+                assert exc is not None, "expected an exception to propagate"
+            else:
+                assert exc is None, f"unexpected exception: {exc!r}"
+            return api, fetch_mfst, exc
+
+    def test_412_retry_succeeds_on_second_attempt(self, tmp_path) -> None:
+        """One 412 → retry → success. Asserts the loop fetched the
+        manifest twice (initial + retry) and made two manifest-commit
+        attempts."""
+        attempts = {"n": 0}
+
+        def side_effect(*args, **kwargs):
+            ops = kwargs.get("operations") or []
+            paths = {op.path_in_repo for op in ops}
+            if "release-manifest.json" in paths:
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    raise _make_412_error()
+            return SimpleNamespace(oid="cafef00d")
+
+        _api, fetch_mfst, _exc = self._drive_derive_with_commit_side_effect(
+            tmp_path, side_effect=side_effect, expect_raises=False
+        )
+
+        assert attempts["n"] == 2, f"expected 2 manifest attempts, got {attempts['n']}"
+        assert fetch_mfst.call_count == 2, fetch_mfst.call_count
+
+    def test_412_retry_exhausts_after_max_retries(self, tmp_path) -> None:
+        """Continuous 412 → 6 attempts then propagate."""
+
+        def side_effect(*args, **kwargs):
+            ops = kwargs.get("operations") or []
+            paths = {op.path_in_repo for op in ops}
+            if "release-manifest.json" in paths:
+                raise _make_412_error()
+            return SimpleNamespace(oid="cafef00d")
+
+        _api, fetch_mfst, exc = self._drive_derive_with_commit_side_effect(
+            tmp_path, side_effect=side_effect, expect_raises=True
+        )
+
+        assert fetch_mfst.call_count == 6, f"expected 6 retry attempts, got {fetch_mfst.call_count}"
+        assert exc is not None and "412" in str(exc), exc
+
+    def test_non_412_error_is_not_retried(self, tmp_path) -> None:
+        """A 401 must propagate immediately — masking auth failures
+        behind retry exhaustion would create false 'flaky CI' signals."""
+        attempts = {"n": 0}
+
+        def side_effect(*args, **kwargs):
+            ops = kwargs.get("operations") or []
+            paths = {op.path_in_repo for op in ops}
+            if "release-manifest.json" in paths:
+                attempts["n"] += 1
+                raise RuntimeError("401 Unauthorized: token rejected")
+            return SimpleNamespace(oid="cafef00d")
+
+        _api, fetch_mfst, exc = self._drive_derive_with_commit_side_effect(
+            tmp_path, side_effect=side_effect, expect_raises=True
+        )
+
+        assert attempts["n"] == 1, f"401 must not retry (got {attempts['n']} attempts)"
+        assert fetch_mfst.call_count == 1, fetch_mfst.call_count
+        assert exc is not None and "401" in str(exc), exc
