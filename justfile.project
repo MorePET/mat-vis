@@ -79,15 +79,25 @@ clean-artifacts:
 # PROJECT-SPECIFIC RECIPES
 # ===============================================================================
 
-# Run the full test suite (unit + live network tests)
+# Run the full test suite (unit + live network tests).
+# MAT_VIS_LIVE_TESTS=1 opts in to live tests; skipped by default since
+# v0.6 (per-file substrate, ADR-0012) — prod isn't rebaked yet.
+# Two invocations because the two `tests/` dirs both have __init__.py
+# and pytest's rootdir discovery conflates them in a single run.
 [group('test')]
 test-all *args:
-    uv run --with pytest pytest tests/ clients/python/test_client.py {{ args }}
+    MAT_VIS_LIVE_TESTS=1 uv run --reinstall-package mat-vis-client \
+        --with clients/python --with pytest pytest tests/ {{ args }}
+    MAT_VIS_LIVE_TESTS=1 uv run --reinstall-package mat-vis-client \
+        --with clients/python --with pytest pytest clients/python {{ args }}
 
-# Run only fast tests (skips live GitHub Releases network tests)
+# Run only fast tests (no network). Default for pre-push hook.
 [group('test')]
 test-fast *args:
-    MAT_VIS_SKIP_LIVE_TESTS=1 uv run --with pytest pytest tests/ clients/python/test_client.py {{ args }}
+    uv run --reinstall-package mat-vis-client \
+        --with clients/python --with pytest pytest tests/ {{ args }}
+    uv run --reinstall-package mat-vis-client \
+        --with clients/python --with pytest pytest clients/python {{ args }}
 
 # Sync every client's version literal from its package manifest
 # (Python standalone from pyproject; JS .mjs from package.json).
