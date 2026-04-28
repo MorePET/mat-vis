@@ -538,4 +538,73 @@ mod tests {
             .expect_err("404 sentinel must produce an error");
         assert!(err.contains("not atomically complete"), "error: {err}");
     }
+
+    // ── e2e (mat-vis-tst per-file substrate, #193) ─────────────────
+    //
+    // Round-trip against the throwaway scratch dataset
+    // `gerchowl/mat-vis-tst`. Gated on MAT_VIS_E2E=1.
+    //
+    // Ordering contract (#193): the Python E2E suite at
+    // tests/e2e/test_per_file_roundtrip.py owns the bake/cleanup
+    // lifecycle for the throwaway tag (default
+    // `v0.0.0-e2e-184-perfile`). This test presumes that suite has
+    // already run (or is running in the same CI job) so the tag
+    // exists. Operators run:
+    //
+    //   MAT_VIS_E2E=1 pytest tests/e2e/      # bakes the tag
+    //   MAT_VIS_E2E=1 cargo test --manifest-path clients/rust/Cargo.toml
+    //
+    // We do NOT bake from Rust — keeping the bake side-effect
+    // single-owner avoids racy commits to mat-vis-tst.
+
+    fn e2e_enabled() -> bool {
+        std::env::var("MAT_VIS_E2E").as_deref() == Ok("1")
+    }
+
+    fn e2e_tag() -> String {
+        std::env::var("MAT_VIS_E2E_TAG").unwrap_or_else(|_| "v0.0.0-e2e-184-perfile".to_string())
+    }
+
+    #[test]
+    fn e2e_fetch_color_png() {
+        if !e2e_enabled() {
+            eprintln!("(skipped: set MAT_VIS_E2E=1)");
+            return;
+        }
+        let _guard = ENV_LOCK.lock().unwrap();
+        // Point the client at the scratch dataset for the duration
+        // of this test only — ENV_LOCK serialises with the httpmock
+        // tests above so they don't see this URL.
+        let prev = std::env::var("MAT_VIS_HF_BASE").ok();
+        set_hf_base("https://huggingface.co/datasets/gerchowl/mat-vis-tst/resolve");
+
+        let result = (|| -> Result<(), String> {
+            let tag = e2e_tag();
+            let m = fetch_manifest(&tag);
+            assert_eq!(m.schema_version, 3);
+            let cat = fetch_catalog(&tag, "polyhaven", &m);
+            let mid = cat
+                .iter()
+                .find(|e| e.available_tiers.iter().any(|t| t == "1k"))
+                .map(|e| e.id.clone())
+                .ok_or_else(|| {
+                    "no 1k-staged polyhaven material in mat-vis-tst — did the Python E2E suite bake the tag?".to_string()
+                })?;
+            assert_tier_complete(&tag, "polyhaven", "1k")?;
+            let bytes = fetch_texture_bytes(&tag, "polyhaven", &mid, "color", "1k")?;
+            assert!(bytes.starts_with(PNG_MAGIC), "must be a real PNG");
+            assert!(bytes.len() > 1000, "PNG too small: {}", bytes.len());
+            Ok(())
+        })();
+
+        // Restore env (best-effort) before propagating any failure.
+        // SAFETY: ENV_LOCK is held for the duration of the test.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MAT_VIS_HF_BASE", v),
+                None => std::env::remove_var("MAT_VIS_HF_BASE"),
+            }
+        }
+        result.expect("e2e round-trip");
+    }
 }

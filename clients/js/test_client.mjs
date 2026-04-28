@@ -245,3 +245,56 @@ liveDescribe('live (set MAT_VIS_LIVE_TESTS=1; needs per-file prod tag)', () => {
     assert.ok(buf.byteLength > 1000);
   });
 });
+
+// ── e2e (mat-vis-tst per-file substrate, #193) ─────────────────────
+//
+// Round-trip against the throwaway scratch dataset
+// `gerchowl/mat-vis-tst`. Gated on MAT_VIS_E2E=1.
+//
+// Ordering contract (see issue #193): the Python E2E suite at
+// tests/e2e/test_per_file_roundtrip.py owns the bake/cleanup
+// lifecycle for the throwaway tag (default `v0.0.0-e2e-184-perfile`).
+// This block presumes that suite has already run (or is running in
+// the same CI job) so the tag exists. Operators run:
+//
+//   MAT_VIS_E2E=1 pytest tests/e2e/      # bakes the tag
+//   MAT_VIS_E2E=1 node --test clients/js/test_client.mjs  # rides on it
+//
+// We do NOT bake from JS — keeping the bake side-effect single-owner
+// avoids racy commits to mat-vis-tst.
+
+const E2E_ENABLED = process.env.MAT_VIS_E2E === '1';
+const E2E_TAG = process.env.MAT_VIS_E2E_TAG || 'v0.0.0-e2e-184-perfile';
+const E2E_REPO = 'gerchowl/mat-vis-tst';
+const E2E_HF_BASE = `https://huggingface.co/datasets/${E2E_REPO}/resolve`;
+
+const e2eDescribe = E2E_ENABLED ? describe : describe.skip;
+
+e2eDescribe('e2e (set MAT_VIS_E2E=1; needs per-file mat-vis-tst tag)', () => {
+  // The exported MatVisClient module captures HF_BASE at import time.
+  // Re-import it dynamically with MAT_VIS_HF_BASE set so the URL
+  // prefix points at mat-vis-tst for this block only.
+  let TstClient;
+
+  before(async () => {
+    process.env.MAT_VIS_HF_BASE = E2E_HF_BASE;
+    // Bust ESM cache by appending a query so we get a fresh module
+    // with the env var read at module init.
+    const mod = await import(`./mat-vis-client.mjs?e2e=${Date.now()}`);
+    TstClient = mod.MatVisClient;
+  });
+
+  it('round-trips a polyhaven 1k color PNG via per-file URL', async () => {
+    const client = new TstClient({ tag: E2E_TAG });
+    const mats = await client.materials('polyhaven', '1k');
+    assert.ok(mats.length >= 1, `expected baked polyhaven materials, got ${mats}`);
+    const buf = await client.fetchTexture('polyhaven', mats[0], 'color', '1k');
+    const magic = new Uint8Array(buf, 0, 4);
+    assert.deepStrictEqual(
+      [...magic],
+      [0x89, 0x50, 0x4e, 0x47],
+      'must be a real PNG',
+    );
+    assert.ok(buf.byteLength > 1000, `PNG too small: ${buf.byteLength}`);
+  });
+});
