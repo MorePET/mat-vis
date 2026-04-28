@@ -66,7 +66,10 @@ assert_tier_complete() {
     [ -f "$marker" ] && return 0
     local url
     url=$(hf_url "$source/$tier/.tier_complete")
-    if ! curl -sfL -H "User-Agent: $UA" -o /dev/null --head "$url"; then
+    # Use GET (not HEAD) to mirror the Python client's sentinel
+    # probe — HF's CDN is documented to behave consistently for GET
+    # but HEAD has occasionally diverged (auth gates, byte-counts).
+    if ! curl -sfL -H "User-Agent: $UA" -o /dev/null "$url"; then
         die "tier $source/$tier is not atomically complete on $TAG (no .tier_complete sentinel). Re-run the bake or pin a known-complete tag."
     fi
     mkdir -p "$(dirname "$marker")"

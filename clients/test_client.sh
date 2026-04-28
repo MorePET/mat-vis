@@ -151,6 +151,59 @@ structural_tests() {
 
     : > "$mockroot/$TAG/ambientcg/1k/.tier_complete"
 
+    # KTX2 fallback: serve a 404 on .png by removing it; .ktx2 must take over.
+    rm -rf "$cache"
+    cache=$(mktemp -d)
+    export MAT_VIS_CACHE="$cache"
+    rm -f "$mockroot/$TAG/ambientcg/1k/Rock064/color.png"
+    {
+        printf '\xab\x4b\x54\x58\x20\x32\x30\xbb\r\n\x1a\n'
+        head -c 1500 /dev/zero
+    } > "$mockroot/$TAG/ambientcg/1k/Rock064/color.ktx2"
+    "$CLIENT" fetch ambientcg Rock064 color 1k > "$cache/ktx2.out"
+    local k_magic
+    k_magic=$(head -c4 "$cache/ktx2.out" | od -An -tx1 | tr -d ' \n')
+    assert_eq "fetch falls back to .ktx2 when .png 404s" "$k_magic" "ab4b5458"
+    # restore for further tests
+    rm -f "$mockroot/$TAG/ambientcg/1k/Rock064/color.ktx2"
+    {
+        printf '\x89PNG\r\n\x1a\n'
+        head -c 1500 /dev/zero
+    } > "$mockroot/$TAG/ambientcg/1k/Rock064/color.png"
+
+    # Magic-byte rejection: .png served with bogus magic must be rejected.
+    rm -rf "$cache"
+    cache=$(mktemp -d)
+    export MAT_VIS_CACHE="$cache"
+    head -c 64 /dev/zero > "$mockroot/$TAG/ambientcg/1k/Rock064/color.png"
+    assert_fails "bogus magic rejected" \
+        "$CLIENT" fetch ambientcg Rock064 color 1k
+    {
+        printf '\x89PNG\r\n\x1a\n'
+        head -c 1500 /dev/zero
+    } > "$mockroot/$TAG/ambientcg/1k/Rock064/color.png"
+
+    # Pre-v3 manifest must be rejected loudly — the v0.6 client doesn't speak tar.
+    rm -rf "$cache"
+    cache=$(mktemp -d)
+    export MAT_VIS_CACHE="$cache"
+    cat > "$mockroot/$TAG/release-manifest.json" <<EOF
+{ "schema_version": 2, "release_tag": "$TAG", "tiers": { "1k": { "base_url": "https://example/" } } }
+EOF
+    assert_fails "pre-v3 manifest rejected" "$CLIENT" list
+    cat > "$mockroot/$TAG/release-manifest.json" <<EOF
+{
+  "schema_version": 3,
+  "release_tag": "$TAG",
+  "sources": {
+    "ambientcg": {
+      "catalog": "ambientcg.json",
+      "tiers": { "1k": { "complete": true } }
+    }
+  }
+}
+EOF
+
     unset MAT_VIS_HF_BASE MAT_VIS_TAG MAT_VIS_CACHE
 }
 

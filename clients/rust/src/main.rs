@@ -66,6 +66,16 @@ fn client() -> reqwest::blocking::Client {
         .expect("Failed to build HTTP client")
 }
 
+fn validate_schema(m: &Manifest) -> Result<(), String> {
+    if m.schema_version != 3 {
+        return Err(format!(
+            "Unsupported manifest schema_version={}; this client requires v3 (per-file substrate, ADR-0012).",
+            m.schema_version
+        ));
+    }
+    Ok(())
+}
+
 fn fetch_manifest(tag: &str) -> Manifest {
     let url = hf_url(tag, "release-manifest.json");
     let m: Manifest = client()
@@ -76,11 +86,9 @@ fn fetch_manifest(tag: &str) -> Manifest {
         .expect("Failed to fetch manifest")
         .json()
         .expect("Failed to parse manifest");
-    if m.schema_version != 3 {
-        panic!(
-            "Unsupported manifest schema_version={}; this client requires v3 (per-file substrate, ADR-0012).",
-            m.schema_version
-        );
+    if let Err(e) = validate_schema(&m) {
+        eprintln!("{e}");
+        std::process::exit(1);
     }
     m
 }
@@ -303,6 +311,28 @@ mod tests {
     fn ktx2_magic_matches() {
         let bytes = b"\xabKTX 20\xbb\r\n\x1a\n\x00";
         assert!(bytes.starts_with(KTX2_MAGIC));
+    }
+
+    #[test]
+    fn random_magic_rejected() {
+        let bytes = [0xffu8; 8];
+        assert!(!bytes.starts_with(PNG_MAGIC));
+        assert!(!bytes.starts_with(KTX2_MAGIC));
+    }
+
+    #[test]
+    fn validate_schema_rejects_v2() {
+        let m = serde_json::from_str::<Manifest>(r#"{"schema_version": 2, "sources": {}}"#)
+            .expect("parse");
+        let err = validate_schema(&m).expect_err("v2 must be rejected");
+        assert!(err.contains("schema_version=2"), "error message: {err}");
+    }
+
+    #[test]
+    fn validate_schema_accepts_v3() {
+        let m = serde_json::from_str::<Manifest>(r#"{"schema_version": 3, "sources": {}}"#)
+            .expect("parse");
+        assert!(validate_schema(&m).is_ok());
     }
 
     // ── live (opt-in via MAT_VIS_LIVE_TESTS=1) ─────────────────────

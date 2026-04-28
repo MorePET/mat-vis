@@ -82,7 +82,9 @@ describe('structural', () => {
     globalThis.fetch = originalFetch;
   });
 
-  it('fetchTexture builds a per-file URL and returns PNG bytes', async () => {
+  it('fetchTexture probes sentinel BEFORE the texture GET', async () => {
+    // Order matters — a regression that fetched the .png first would
+    // surface mid-batch bytes. Record call order and assert it.
     const calledUrls = [];
     globalThis.fetch = stubFetch([
       ['/release-manifest.json', () => jsonResp(MOCK_MANIFEST)],
@@ -107,13 +109,30 @@ describe('structural', () => {
     assert.ok(buf.byteLength > 0, 'should return non-empty bytes');
     const head = new Uint8Array(buf, 0, 4);
     assert.deepStrictEqual([...head], [0x89, 0x50, 0x4e, 0x47]);
+    const sentinelIdx = calledUrls.findIndex((u) => u.endsWith('/ambientcg/1k/.tier_complete'));
+    const pngIdx = calledUrls.findIndex((u) => u.endsWith('/ambientcg/1k/Rock064/color.png'));
+    assert.ok(sentinelIdx >= 0, 'sentinel must be probed');
+    assert.ok(pngIdx >= 0, 'per-file URL must be hit');
     assert.ok(
-      calledUrls.some((u) => u.endsWith('/ambientcg/1k/.tier_complete')),
-      'must probe sentinel before fetch',
+      sentinelIdx < pngIdx,
+      `sentinel must run before texture (got sentinel@${sentinelIdx}, png@${pngIdx})`,
     );
-    assert.ok(
-      calledUrls.some((u) => u.endsWith('/ambientcg/1k/Rock064/color.png')),
-      'must hit per-file URL',
+  });
+
+  it('fetchTexture rejects bytes whose magic is neither PNG nor KTX2', async () => {
+    globalThis.fetch = stubFetch([
+      ['/release-manifest.json', () => jsonResp(MOCK_MANIFEST)],
+      ['/ambientcg.json', () => jsonResp(MOCK_CATALOG)],
+      ['/.tier_complete', () => jsonResp({})],
+      [
+        '/color.png',
+        () => bytesResp(new Uint8Array([0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0])),
+      ],
+    ]);
+    const client = new MatVisClient({ tag: 'vtest' });
+    await assert.rejects(
+      () => client.fetchTexture('ambientcg', 'Rock064', 'color', '1k'),
+      /Expected PNG or KTX2 bytes/,
     );
   });
 
