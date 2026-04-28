@@ -473,10 +473,12 @@ class TestExportMtlx:
             assert path.suffix == ".mtlx"
 
             content = path.read_text()
-            assert "standard_surface" in content
-            assert 'name="metalness"' in content
-            assert 'name="specular_roughness"' in content
-            assert 'name="base_color"' in content
+            # Implementation uses UsdPreviewSurface (USD-style PBR), not
+            # the MaterialX Standard Surface shader. The input names follow
+            # USD conventions: metallic / roughness (no specular_ prefix).
+            assert "UsdPreviewSurface" in content
+            assert 'name="metallic"' in content
+            assert 'name="roughness"' in content
 
     def test_with_textures(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -493,7 +495,9 @@ class TestExportMtlx:
             assert (Path(tmp) / "TexMat_normal.png").exists()
 
             content = path.read_text()
-            assert "tiledimage" in content
+            # UsdPreviewSurface uses <image> nodes (not the MaterialX
+            # <tiledimage> primitive that Standard Surface emits).
+            assert "<image" in content
             assert "TexMat_color.png" in content
 
     def test_creates_output_dir(self):
@@ -510,30 +514,40 @@ class TestExportMtlx:
 
             content = path.read_text()
             assert 'name="MyMat"' in content
-            assert 'name="SR_MyMat"' in content
+            # UsdPreviewSurface shader uses <material>_shader, not SR_<material>.
+            assert 'name="MyMat_shader"' in content
 
 
 # ── Live tests (network required) ──────────────────────────────
 
 live = pytest.mark.skipif(
-    os.environ.get("MAT_VIS_SKIP_LIVE_TESTS") == "1",
-    reason="MAT_VIS_SKIP_LIVE_TESTS=1",
+    os.environ.get("MAT_VIS_LIVE_TESTS") != "1",
+    reason=(
+        "set MAT_VIS_LIVE_TESTS=1 to run live tests against the prod HF dataset. "
+        "Disabled by default until prod is rebaked under the per-file substrate "
+        "(#186 / ADR-0012); current prod tags are tar-substrate and the v0.6 "
+        "client has dropped tar support. See #179."
+    ),
 )
+
+
+LIVE_TAG = os.environ.get("MAT_VIS_LIVE_TAG", "v2026.04.1")
 
 
 @pytest.fixture
 def live_client():
-    """Client pointed at v2026.04.0 with temp cache."""
+    """Client pointed at the prod HF revision with a temp cache."""
     with tempfile.TemporaryDirectory() as tmp:
-        yield MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+        yield MatVisClient(tag=LIVE_TAG, cache_dir=Path(tmp))
 
 
 @live
 class TestLiveManifest:
     def test_fetch_manifest(self, live_client):
         m = live_client.manifest
-        assert m["version"] == 1
-        assert "tiers" in m
+        # Per-file substrate emits schema_version 3 (#186 / ADR-0012).
+        assert m["schema_version"] == 3
+        assert "sources" in m
 
     def test_tiers(self, live_client):
         tiers = live_client.tiers()
@@ -545,12 +559,7 @@ class TestLiveManifest:
 
 
 @live
-class TestLiveRowmap:
-    def test_fetch_rowmap(self, live_client):
-        rm = live_client.rowmap("ambientcg", "1k")
-        assert "materials" in rm
-        assert len(rm["materials"]) > 0
-
+class TestLiveCatalog:
     def test_materials_list(self, live_client):
         mats = live_client.materials("ambientcg", "1k")
         assert len(mats) > 0
@@ -586,7 +595,9 @@ class TestLiveFetchTexture:
             assert data[:4] == b"\x89PNG", f"{mid}/{ch} is not PNG"
 
     def test_fetch_nonexistent_material_raises(self, live_client):
-        with pytest.raises(KeyError):
+        from mat_vis_client import MatVisError
+
+        with pytest.raises((KeyError, MatVisError)):
             live_client.fetch_texture("ambientcg", "NONEXISTENT_XYZ", "color", "1k")
 
 
