@@ -8,10 +8,20 @@ re-upload bytes-free, so the only practical damage is the storage
 accounting line on the repo. This module gives operators a way to see
 and (with explicit confirmation) reclaim that space.
 
-An orphan = an LFS blob (sha-256 ``oid``) returned by
-``HfApi.list_lfs_files`` whose ``oid`` does NOT appear as the
+An orphan = an LFS blob (sha-256 content hash) returned by
+``HfApi.list_lfs_files`` whose ``file_oid`` does NOT appear as the
 ``lfs.sha256`` of any file in the committed tree at ``revision``
 (default: ``main``).
+
+Note on the two oid attributes on ``LFSFileInfo``:
+
+- ``LFSFileInfo.oid`` is a 40-char SHA-1 — the Git blob OID of the
+  *pointer file* committed under refs/convert/lfs.
+- ``LFSFileInfo.file_oid`` is a 64-char SHA-256 — the actual LFS
+  content hash, which is what ``BlobLfsInfo.sha256`` returns from
+  ``list_repo_tree``. So the orphan check must compare ``file_oid``
+  against ``lfs.sha256`` (NOT ``oid`` against ``sha256``, which would
+  always disagree because they are different hash functions).
 
 Notes on the underlying API names — `huggingface_hub` (>=1.x) calls
 these `list_lfs_files` and `permanently_delete_lfs_files`. The issue
@@ -65,7 +75,10 @@ def _committed_lfs_oids(api: Any, repo_id: str, revision: str) -> set[str]:
         lfs = getattr(entry, "lfs", None)
         if lfs is None:
             continue
-        # `BlobLfsInfo.sha256` is what list_lfs_files returns as `oid`.
+        # `BlobLfsInfo.sha256` is the lowercased hex SHA-256 of the LFS
+        # blob content; matches `LFSFileInfo.file_oid` from
+        # `list_lfs_files` (NOT `LFSFileInfo.oid`, which is the SHA-1
+        # Git OID of the pointer file).
         sha = getattr(lfs, "sha256", None)
         if sha:
             oids.add(sha)
@@ -115,8 +128,10 @@ def audit_orphans(
     log.info("listing committed tree at %s@%s", repo_id, rev)
     referenced = _committed_lfs_oids(api, repo_id, rev)
 
-    orphan_blobs = [b for b in lfs_blobs if getattr(b, "oid", None) not in referenced]
-    orphan_oids = [b.oid for b in orphan_blobs]
+    # Compare on `file_oid` (LFS content SHA-256), not `oid` (pointer-file
+    # SHA-1). See module docstring for the two-attribute rationale (#221).
+    orphan_blobs = [b for b in lfs_blobs if getattr(b, "file_oid", None) not in referenced]
+    orphan_oids = [b.file_oid for b in orphan_blobs]
 
     deleted: int | None = None
     if delete and orphan_blobs:
