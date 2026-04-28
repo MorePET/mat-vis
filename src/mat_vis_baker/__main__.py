@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -208,6 +209,56 @@ def cmd_merge_shards(args: argparse.Namespace) -> int:
     log.info("merge-shards result: %s", result)
     # merge_shards never puts "error" in its result — it raises on any
     # fault (incomplete shard set, range-read mismatch). Always return 0.
+    return 0
+
+
+def _resolve_hf_token(value: str | None) -> str | None:
+    """Accept either a raw token or ``env:VAR`` for indirection."""
+    if value is None:
+        return None
+    if value.startswith("env:"):
+        var = value[len("env:") :]
+        return os.environ.get(var)
+    return value
+
+
+def cmd_audit_orphans(args: argparse.Namespace) -> int:
+    """Audit (and optionally clean up) mid-batch orphan LFS blobs (#190)."""
+    from mat_vis_baker.audit_orphans import _confirm_delete, audit_orphans
+
+    token = _resolve_hf_token(args.hf_token)
+
+    if args.delete and not _confirm_delete():
+        print("aborted: confirmation not given", file=sys.stderr)
+        return 1
+
+    try:
+        result = audit_orphans(
+            repo_id=args.repo,
+            revision=args.revision,
+            delete=args.delete,
+            allow_prod=args.allow_prod,
+            hf_token=token,
+        )
+    except ValueError as e:
+        # Prod guard or other input-validation error — keep the
+        # message on stderr and bail without a stack trace.
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    log.info(
+        "audit-orphans %s@%s: total_lfs=%d referenced=%d orphans=%d deleted=%s",
+        result["repo_id"],
+        result["revision"],
+        result["total_lfs"],
+        result["referenced"],
+        len(result["orphans"]),
+        result["deleted"],
+    )
+    if result["orphans"]:
+        log.info("orphan oids:")
+        for oid in result["orphans"]:
+            log.info("  %s", oid)
     return 0
 
 
@@ -465,6 +516,48 @@ def main() -> int:
     p_mtlx.add_argument("--source", default=None, help="Source (default: gpuopen)")
     p_mtlx.add_argument("--mtlx-dir", default="mtlx", help="Directory with upstream .mtlx files")
 
+    p_audit = sub.add_parser(
+        "audit-orphans",
+        help=(
+            "List (and optionally delete) orphan LFS blobs left by mid-batch "
+            "crashes under the per-file substrate (#190 / ADR-0012 follow-up)."
+        ),
+    )
+    p_audit.add_argument(
+        "--repo",
+        required=True,
+        help="HF dataset repo (owner/name), e.g. gerchowl/mat-vis-tst.",
+    )
+    p_audit.add_argument(
+        "--revision",
+        default="main",
+        help="Git ref to audit against (default: main).",
+    )
+    p_audit.add_argument(
+        "--delete",
+        action="store_true",
+        help=(
+            "Permanently delete orphan blobs. Dry-run otherwise. "
+            "Prompts for 'DELETE' on stdin; bypass with MAT_VIS_AUDIT_FORCE=1."
+        ),
+    )
+    p_audit.add_argument(
+        "--allow-prod",
+        action="store_true",
+        help=(
+            "Required to audit non-scratch repos. Scratch repos are named "
+            "*/mat-vis-tst or */mat-vis-*-tst."
+        ),
+    )
+    p_audit.add_argument(
+        "--hf-token",
+        default=None,
+        help=(
+            "Token for HfApi. Accepts either a raw token or 'env:VAR'; "
+            "falls back to the cached huggingface_hub login."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.command == "all":
@@ -489,6 +582,8 @@ def main() -> int:
         return cmd_hf_derive_ktx2(args)
     if args.command == "merge-shards":
         return cmd_merge_shards(args)
+    if args.command == "audit-orphans":
+        return cmd_audit_orphans(args)
 
     parser.print_help()
     return 1

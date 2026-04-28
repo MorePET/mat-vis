@@ -189,6 +189,33 @@ mat-vis-baker derive-from-release v2026.04.0 512 ./output-512
 mat-vis-baker catalog-from-release v2026.04.0 --output-dir .
 ```
 
+### Operator's guide: orphan LFS cleanup
+
+Under the per-file substrate (ADR-0012) HF Hub uploads each LFS blob
+*before* finalizing the commit. A mid-batch crash can therefore leave
+orphan blobs on the object store — uploaded, but not referenced by any
+committed file. Xet dedup makes future re-uploads bytes-free, so the
+practical damage is the storage accounting line; cleanup is optional
+but housekeeping-friendly.
+
+```bash
+# Dry-run audit against the scratch repo (default behaviour).
+mat-vis-baker audit-orphans --repo gerchowl/mat-vis-tst
+
+# Pin to a specific revision.
+mat-vis-baker audit-orphans --repo gerchowl/mat-vis-tst --revision v2026.05.0
+
+# Delete orphans (interactive: type DELETE to confirm).
+mat-vis-baker audit-orphans --repo gerchowl/mat-vis-tst --delete
+
+# Auditing the canonical prod repo requires --allow-prod.
+mat-vis-baker audit-orphans --repo gerchowl/mat-vis --allow-prod
+
+# Bypass the interactive prompt (e.g. inside a CI job):
+MAT_VIS_AUDIT_FORCE=1 mat-vis-baker audit-orphans \
+  --repo gerchowl/mat-vis-tst --delete
+```
+
 ### Dagger CI
 
 ```bash
