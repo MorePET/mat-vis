@@ -60,10 +60,28 @@ on:  # yamllint disable-line rule:truthy
         required: false
         default: false
         type: boolean
+      repo-id:
+        description: 'HF dataset repo'
+        required: false
+        default: 'gerchowl/mat-vis-tst'
+        type: string
+      allow-prod:
+        description: 'Required to target any non-*-tst HF repo (e.g. gerchowl/mat-vis)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
   issues: write          # needed by notify-on-failure composite action
+
+# Serialise dispatches on (repo, release, source, tier). Two parallel
+# dispatches against the same target tier would race on the catalog +
+# release-manifest commits — order is observable to clients.
+concurrency:
+  group: >-
+    bake-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ inputs.source }}-${{ inputs.tier }}
+  cancel-in-progress: false
 
 jobs:
   bake:
@@ -94,6 +112,8 @@ jobs:
             --source=${{ inputs.source }}
             --tier=${{ inputs.tier }}
             --release-tag=${{ inputs.release-tag }}
+            --repo-id=${{ inputs.repo-id }}
+            --allow-prod=${{ inputs.allow-prod }}
             --hf-token=env:HF_TOKEN
             --limit=${{ inputs.limit }}
             --offset=${{ inputs.offset }}
@@ -110,7 +130,7 @@ jobs:
         run: |
           uv run python scripts/check_upstream_schema_drift.py \
             --source "${{ inputs.source }}" \
-            --candidate "https://huggingface.co/datasets/gerchowl/mat-vis/resolve/${{ inputs.release-tag }}/${{ inputs.source }}.json"
+            --candidate "https://huggingface.co/datasets/${{ inputs.repo-id }}/resolve/${{ inputs.release-tag }}/${{ inputs.source }}.json"
 
       - name: Notify on failure
         if: failure()
