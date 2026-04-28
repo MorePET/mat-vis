@@ -126,6 +126,47 @@ def _already_committed_material_ids(
     return mids
 
 
+def _fetch_manifest_with_parent(api: HfApi, repo_id: str, revision: str) -> tuple[dict, str | None]:
+    """Return ``(manifest, parent_sha)`` for the current revision.
+
+    Both halves matter: the manifest content for the merge, and the parent
+    SHA so a subsequent ``create_commit(parent_commit=...)`` can detect a
+    concurrent writer (matrix bakes against the same release tag write
+    the manifest from N parallel containers — see #207 race fix).
+    """
+    parent_sha: str | None = None
+    try:
+        info = api.repo_info(repo_id=repo_id, repo_type="dataset", revision=revision)
+        parent_sha = getattr(info, "sha", None)
+    except Exception:  # noqa: BLE001 — branch may not exist yet
+        pass
+
+    manifest: dict = {}
+    try:
+        path = api.hf_hub_download(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=revision,
+            filename="release-manifest.json",
+        )
+        manifest = json.loads(Path(path).read_text())
+    except Exception:  # noqa: BLE001 — 404 / not yet uploaded → {}
+        manifest = {}
+    return manifest, parent_sha
+
+
+def _merge_manifest_for_source(manifest: dict, source: str, tier: str, release_tag: str) -> dict:
+    """Layer this bake's (source, tier) into ``manifest`` and return it."""
+    manifest["schema_version"] = 3
+    manifest["release_tag"] = release_tag
+    sources = manifest.setdefault("sources", {})
+    src_entry = sources.setdefault(source, {})
+    src_entry["catalog"] = f"{source}.json"
+    tiers = src_entry.setdefault("tiers", {})
+    tiers[tier] = {"complete": True}
+    return manifest
+
+
 def _channel_ext(data: bytes) -> str:
     """Inspect magic bytes; mirror TarWriter's detection so URLs stay
     predictable for clients."""
@@ -337,6 +378,18 @@ def bake_one_per_file(
     index = build_index(all_records, source)
     catalog_path.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n")
 
+    # release-manifest.json — the entry point that JS/shell/Rust clients
+    # fetch first. The Python client has a tree-fallback, but the static
+    # file is the source of truth.
+    #
+    # Concurrency: matrix bakes (bake.yml) write the manifest from N
+    # parallel containers against the same release tag. We use HF's
+    # `parent_commit` parameter for optimistic locking — the commit
+    # fails if the revision moved since we read it. On conflict we
+    # re-fetch, re-merge, retry. Bounded retries prevent infinite loops
+    # on a runaway concurrent writer.
+    manifest_path = work_dir / "release-manifest.json"
+
     # Sentinel commit — marks tier as "atomically complete". Clients
     # can probe <source>/<tier>/.tier_complete in one HEAD request.
     sentinel_name = ".tier_complete"
@@ -344,24 +397,54 @@ def bake_one_per_file(
     sentinel_path.write_text(release_tag + "\n")
 
     if dry_run:
-        log.info("dry-run: would commit catalog + sentinel")
+        log.info("dry-run: would commit catalog + manifest + sentinel")
     else:
         from huggingface_hub import CommitOperationAdd
 
-        # Catalog commit
-        catalog_commit = api.create_commit(
-            repo_id=repo_id,
-            repo_type="dataset",
-            operations=[
-                CommitOperationAdd(
-                    path_in_repo=f"{source}.json",
-                    path_or_fileobj=str(catalog_path),
+        # CAS retry loop on the catalog + manifest commit.
+        max_retries = 6  # >> realistic matrix concurrency (≤4 sources today)
+        for attempt in range(max_retries):
+            existing_manifest, parent_sha = _fetch_manifest_with_parent(api, repo_id, release_tag)
+            merged = _merge_manifest_for_source(existing_manifest, source, tier, release_tag)
+            manifest_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
+            try:
+                catalog_commit = api.create_commit(
+                    repo_id=repo_id,
+                    repo_type="dataset",
+                    operations=[
+                        CommitOperationAdd(
+                            path_in_repo=f"{source}.json",
+                            path_or_fileobj=str(catalog_path),
+                        ),
+                        CommitOperationAdd(
+                            path_in_repo="release-manifest.json",
+                            path_or_fileobj=str(manifest_path),
+                        ),
+                    ],
+                    commit_message=f"feat(data): {release_tag} — {source} catalog + manifest",
+                    revision=release_tag,
+                    parent_commit=parent_sha,
                 )
-            ],
-            commit_message=f"feat(data): {release_tag} — {source} catalog",
-            revision=release_tag,
-        )
-        last_commit_sha = getattr(catalog_commit, "oid", "") or last_commit_sha
+                last_commit_sha = getattr(catalog_commit, "oid", "") or last_commit_sha
+                break
+            except Exception as e:  # noqa: BLE001
+                # HF returns 412 Precondition Failed on parent_commit mismatch.
+                # Other exceptions (auth, network) re-raise after the loop.
+                msg = str(e).lower()
+                if "412" in msg or "precondition" in msg or "parent_commit" in msg:
+                    if attempt + 1 == max_retries:
+                        log.error(
+                            "manifest CAS exhausted after %d retries — concurrent writers?",
+                            max_retries,
+                        )
+                        raise
+                    log.warning(
+                        "manifest CAS retry %d/%d — concurrent writer detected",
+                        attempt + 1,
+                        max_retries,
+                    )
+                    continue
+                raise
 
         # Sentinel commit — final marker.
         sentinel_commit = api.create_commit(
