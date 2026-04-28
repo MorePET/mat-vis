@@ -223,6 +223,15 @@ def _extract_maps_from_zip(
             out_path.write_bytes(zf.read(name))
             result[channel] = out_path
 
+    # Per-material channel set is intentionally non-uniform across the
+    # ambientcg catalog. Materials with creationMethod=PBRPhotogrammetry
+    # (e.g. Rock064) ship an AmbientOcclusion map; PBRApproximated assets
+    # (e.g. Wood095) do not, because there's no real height field to bake
+    # AO from. We mirror upstream truth — the catalog's `maps` field
+    # records exactly the channels the ZIP actually contains. Clients
+    # read `maps` per-entry and never assume a uniform channel set, so
+    # this is fine end-to-end. Verified 2026-04-28 against ambientcg's
+    # 1k+2k zips for both materials.
     return result
 
 
