@@ -75,13 +75,24 @@ permissions:
   contents: read
   issues: write          # needed by notify-on-failure composite action
 
-# Serialise dispatches on (repo, release, source, tier). Two parallel
-# dispatches against the same target tier would race on the catalog +
-# release-manifest commits — order is observable to clients.
+# #225: serialise *every* dispatch against a given HF repo. Previously
+# the group was (repo, release, source, tier), which let parallel
+# matrix bakes (different sources / tiers) saturate HF's 128-commits/hr
+# repo-wide cap and 429 the in-flight job at its final manifest commit.
+# A single repo-scoped writer keeps us safely under that cap.
+#
+# Trade-off: slower wallclock — bakes that previously fanned out
+# across 3-4 sources now serialize. The reliability win is worth it
+# under a hard external rate limit. The narrower (repo, release,
+# source, tier) grouping remains the right model once the helper's
+# 429 backoff (#225) absorbs the residual contention; it's noted as a
+# future option below for when we have telemetry showing the budget
+# is no longer biting.
 concurrency:
-  group: >-
-    bake-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ inputs.source }}-${{ inputs.tier }}
+  group: bake-${{ inputs.repo-id }}-budget
   cancel-in-progress: false
+  # Future option (when 429 backoff makes per-tier serialization safe):
+  # group: bake-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ inputs.source }}-${{ inputs.tier }}
 
 jobs:
   bake:
