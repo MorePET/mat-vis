@@ -78,14 +78,23 @@ permissions:
   contents: read
   issues: write          # needed by notify-on-failure composite action
 
-# Serialise dispatches on (release, source, source-tier, kind, target).
-# Two parallel dispatches against the same target tier would race on
-# the .tier_complete sentinel commit — order is observable to clients.
+# #225: serialise *every* dispatch against a given HF repo. The matrix
+# of phase-3 bakes + phase-4 derives in the same hour tripped HF's
+# 128-commits/hr repo-wide cap, killing the gpuopen derive at its
+# final manifest commit. Repo-scoped concurrency keeps one writer at
+# a time, well under the budget.
+#
+# Trade-off: derives that previously ran in parallel for different
+# (source-tier, kind) combos now serialize. Wallclock grows roughly
+# linearly with the number of derive flavours; given derives are
+# already cheap (~1-2h per source × tier), the reliability win
+# dominates. Narrower group noted below as a future option once
+# telemetry shows the budget is no longer biting.
 concurrency:
-  group: >-
-    derive-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ inputs.source }}
-    -${{ inputs.source-tier }}-${{ inputs.kind }}
+  group: derive-${{ inputs.repo-id }}-budget
   cancel-in-progress: false
+  # Future option (when 429 backoff makes per-target serialization safe):
+  # group: derive-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ inputs.source }}-${{ inputs.source-tier }}-${{ inputs.kind }}
 
 jobs:
   setup:

@@ -44,6 +44,7 @@ from mat_vis_baker.common import (
     MaterialRecord,
     hash_textures,
 )
+from mat_vis_baker.hf_retry import _create_commit_with_backoff
 from mat_vis_baker.index_builder import build_index
 from mat_vis_baker.progress import ProgressTracker, emit_bake_plan
 from mat_vis_baker.source_tiers import is_supported, unsupported_tier_message
@@ -350,7 +351,12 @@ def bake_one_per_file(
             log.info("dry-run: would commit %d files for %d materials", len(ops), len(batch))
             sha = ""
         else:
-            commit = api.create_commit(
+            # #225: bounded 429 retry/backoff. Helper re-raises every other
+            # exception so the existing CAS / auth / network handlers
+            # keep working untouched.
+            commit = _create_commit_with_backoff(
+                api,
+                source=source,
                 repo_id=repo_id,
                 repo_type="dataset",
                 operations=ops,
@@ -470,7 +476,13 @@ def bake_one_per_file(
             merged = _merge_manifest_for_source(existing_manifest, source, tier, release_tag)
             manifest_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
             try:
-                catalog_commit = api.create_commit(
+                # #225: 429 retry sits *inside* the CAS loop. The helper
+                # re-raises 412 unchanged so the precondition matcher
+                # below still catches concurrent-writer conflicts; only
+                # 429 throttles get the bounded backoff treatment.
+                catalog_commit = _create_commit_with_backoff(
+                    api,
+                    source=source,
                     repo_id=repo_id,
                     repo_type="dataset",
                     operations=[
@@ -508,8 +520,10 @@ def bake_one_per_file(
                     continue
                 raise
 
-        # Sentinel commit — final marker.
-        sentinel_commit = api.create_commit(
+        # Sentinel commit — final marker. #225: 429-aware.
+        sentinel_commit = _create_commit_with_backoff(
+            api,
+            source=source,
             repo_id=repo_id,
             repo_type="dataset",
             operations=[
