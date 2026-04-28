@@ -5,9 +5,10 @@ bake path — one HF file per ``(source, tier, material, channel)``.
 The legacy ``all`` subcommand is a thin back-compat wrapper.
 
 The tar-based ``hf-derive`` / ``hf-derive-ktx2`` / ``merge-shards``
-subcommands were retired by #189; their per-file replacements will
-be reborn under a future issue. ``derive`` / ``derive-from-release``
-/ ``derive-ktx2`` were retired earlier (issue #112).
+subcommands were retired by #189. ``hf-derive`` and ``hf-derive-ktx2``
+have been reborn against the per-file substrate (#204). ``derive`` /
+``derive-from-release`` / ``derive-ktx2`` (the v0.4.x subcommands)
+remain retired (issue #112).
 
 Usage:
     mat-vis-baker hf-bake <source> <tier> <work_dir> --release-tag <tag> [--limit N]
@@ -209,6 +210,55 @@ def cmd_audit_orphans(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hf_derive(args: argparse.Namespace) -> int:
+    """Derive a smaller PNG tier from an existing per-file HF tier (#204)."""
+    from mat_vis_baker.hf_derive_per_file import derive_smaller_tier
+
+    token = _resolve_hf_token(args.hf_token)
+    result = derive_smaller_tier(
+        source=args.source,
+        target_tier=args.target_tier,
+        source_tier=args.source_tier,
+        release_tag=args.release_tag,
+        work_dir=Path(args.work_dir),
+        repo_id=args.repo_id,
+        hf_token=token,
+        dry_run=args.dry_run,
+        allow_prod=args.allow_prod,
+        limit=args.limit,
+        batch_size=args.batch_size,
+    )
+    log.info("hf-derive result: %s", result)
+    if "error" in result:
+        return 1
+    return 0
+
+
+def cmd_hf_derive_ktx2(args: argparse.Namespace) -> int:
+    """Transcode a per-file PNG tier to a KTX2 tier (#204)."""
+    from mat_vis_baker.hf_derive_per_file import derive_ktx2_tier
+
+    token = _resolve_hf_token(args.hf_token)
+    target_tier = args.target_tier or f"ktx2-{args.source_tier}"
+    result = derive_ktx2_tier(
+        source=args.source,
+        source_tier=args.source_tier,
+        target_tier=target_tier,
+        release_tag=args.release_tag,
+        work_dir=Path(args.work_dir),
+        repo_id=args.repo_id,
+        hf_token=token,
+        dry_run=args.dry_run,
+        allow_prod=args.allow_prod,
+        limit=args.limit,
+        batch_size=args.batch_size,
+    )
+    log.info("hf-derive-ktx2 result: %s", result)
+    if "error" in result:
+        return 1
+    return 0
+
+
 def cmd_hf_bake(args: argparse.Namespace) -> int:
     """Bake (source, tier) → HF commit. Per-file substrate (ADR-0012)."""
     from mat_vis_baker.hf_bake import bake_one
@@ -362,6 +412,88 @@ def main() -> int:
         ),
     )
 
+    # ── per-file derive (#204) ────────────────────────────────────
+    p_hfd = sub.add_parser(
+        "hf-derive",
+        help=(
+            "Derive a smaller PNG tier from an existing per-file HF tier "
+            "(no upstream re-fetch). ADR-0012 / #204."
+        ),
+    )
+    p_hfd.add_argument("--source", required=True, choices=SOURCES)
+    p_hfd.add_argument(
+        "--source-tier",
+        required=True,
+        choices=VALID_TIERS,
+        help="Tier to read from on HF (must already be baked).",
+    )
+    p_hfd.add_argument(
+        "--target-tier",
+        required=True,
+        choices=VALID_TIERS,
+        help="Smaller tier to derive. Must be ≤ source-tier (no upscale).",
+    )
+    p_hfd.add_argument("--release-tag", required=True)
+    p_hfd.add_argument("--work-dir", required=True, help="Scratch directory.")
+    p_hfd.add_argument(
+        "--repo-id",
+        default="gerchowl/mat-vis",
+        help="HF dataset repo (default: gerchowl/mat-vis).",
+    )
+    p_hfd.add_argument(
+        "--hf-token",
+        default=None,
+        help="HfApi token; raw or 'env:VAR'. Falls back to cached HF login.",
+    )
+    p_hfd.add_argument("--limit", type=int, default=None)
+    p_hfd.add_argument("--batch-size", type=int, default=50)
+    p_hfd.add_argument("--dry-run", action="store_true")
+    p_hfd.add_argument(
+        "--allow-prod",
+        action="store_true",
+        help="Required to target any non-*-tst HF dataset repo.",
+    )
+
+    p_hfk = sub.add_parser(
+        "hf-derive-ktx2",
+        help=(
+            "Transcode an existing per-file PNG tier on HF into a KTX2 tier. "
+            "Requires toktx on PATH. ADR-0012 / #204."
+        ),
+    )
+    p_hfk.add_argument("--source", required=True, choices=SOURCES)
+    p_hfk.add_argument(
+        "--source-tier",
+        required=True,
+        choices=VALID_TIERS,
+        help="PNG tier to transcode from (must already be baked).",
+    )
+    p_hfk.add_argument(
+        "--target-tier",
+        default=None,
+        help="KTX2 tier label (default: ktx2-<source-tier>).",
+    )
+    p_hfk.add_argument("--release-tag", required=True)
+    p_hfk.add_argument("--work-dir", required=True, help="Scratch directory.")
+    p_hfk.add_argument(
+        "--repo-id",
+        default="gerchowl/mat-vis",
+        help="HF dataset repo (default: gerchowl/mat-vis).",
+    )
+    p_hfk.add_argument(
+        "--hf-token",
+        default=None,
+        help="HfApi token; raw or 'env:VAR'. Falls back to cached HF login.",
+    )
+    p_hfk.add_argument("--limit", type=int, default=None)
+    p_hfk.add_argument("--batch-size", type=int, default=50)
+    p_hfk.add_argument("--dry-run", action="store_true")
+    p_hfk.add_argument(
+        "--allow-prod",
+        action="store_true",
+        help="Required to target any non-*-tst HF dataset repo.",
+    )
+
     p_mtlx = sub.add_parser(
         "pack-mtlx",
         help="Pack original upstream .mtlx files into JSON map for release",
@@ -430,6 +562,10 @@ def main() -> int:
         return cmd_pack_mtlx(args)
     if args.command == "hf-bake":
         return cmd_hf_bake(args)
+    if args.command == "hf-derive":
+        return cmd_hf_derive(args)
+    if args.command == "hf-derive-ktx2":
+        return cmd_hf_derive_ktx2(args)
     if args.command == "audit-orphans":
         return cmd_audit_orphans(args)
 

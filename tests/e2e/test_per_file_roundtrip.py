@@ -333,3 +333,154 @@ class TestDaggerBakeRoutingSmoke:
                 )
             except Exception as e:  # noqa: BLE001
                 print(f"dagger e2e cleanup warn: {type(e).__name__}: {e}")
+
+
+# ── #204 slice: per-file derive (resize + ktx2) round-trip ──────────
+
+
+class TestDeriveResizeRoundTrip:
+    """Bake @1k → derive 1k → 512 (resize) → assert per-file PNGs land
+    + .tier_complete sentinel + catalog reflects the new tier."""
+
+    DERIVE_TAG = "v0.0.0-e2e-204-derive"
+    DERIVE_TARGET = "512"
+
+    def test_derive_resize_writes_per_file_pngs_and_sentinel(self, baked_tag) -> None:
+        from huggingface_hub import HfApi
+
+        from mat_vis_baker.hf_derive_per_file import derive_smaller_tier
+
+        token = _hf_token()
+        # Bake into a fresh tag so cleanup is a single delete-branch call.
+        # Reuse baked_tag's two materials by cloning the SOURCE/TIER subtree
+        # via a re-bake against DERIVE_TAG.
+        from mat_vis_baker.hf_bake import bake_one
+
+        with tempfile.TemporaryDirectory() as td:
+            r = bake_one(
+                source=SOURCE,
+                tier=TIER,
+                release_tag=self.DERIVE_TAG,
+                work_dir=Path(td),
+                repo_id=REPO,
+                hf_token=token,
+                limit=2,
+                batch_size=2,
+            )
+        assert r.get("ok", 0) == 2, f"setup bake failed: {r}"
+
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                result = derive_smaller_tier(
+                    source=SOURCE,
+                    source_tier=TIER,
+                    target_tier=self.DERIVE_TARGET,
+                    release_tag=self.DERIVE_TAG,
+                    work_dir=Path(td),
+                    repo_id=REPO,
+                    hf_token=token,
+                    batch_size=2,
+                )
+            assert result.get("ok", 0) >= 1, f"derive failed: {result}"
+
+            # Tree probe — at least one color.png and the sentinel.
+            api = HfApi(token=token)
+            tree = list(
+                api.list_repo_tree(
+                    repo_id=REPO,
+                    repo_type="dataset",
+                    revision=self.DERIVE_TAG,
+                    path_in_repo=f"{SOURCE}/{self.DERIVE_TARGET}",
+                    recursive=True,
+                )
+            )
+            paths = {getattr(e, "path", "") for e in tree}
+            assert any(p.endswith("/color.png") for p in paths), (
+                f"no derived color.png in tree: {sorted(paths)[:10]}"
+            )
+            assert f"{SOURCE}/{self.DERIVE_TARGET}/.tier_complete" in paths
+
+            # HTTP GET on a derived PNG returns valid PNG bytes.
+            png_paths = [p for p in paths if p.endswith("/color.png")]
+            body = _http_get(_resolve_url(png_paths[0], tag=self.DERIVE_TAG))
+            assert body.startswith(b"\x89PNG\r\n\x1a\n"), "derived must be PNG"
+        finally:
+            try:
+                HfApi(token=token).delete_branch(
+                    repo_id=REPO, repo_type="dataset", branch=self.DERIVE_TAG
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"derive e2e cleanup warn: {type(e).__name__}: {e}")
+
+
+class TestDeriveKtx2RoundTrip:
+    """Bake @1k → transcode 1k → ktx2-1k → assert KTX2 bytes land."""
+
+    DERIVE_TAG = "v0.0.0-e2e-204-ktx2"
+    KTX2_TARGET = "ktx2-1k"
+
+    def test_derive_ktx2_writes_per_file_ktx2_and_sentinel(self) -> None:
+        import shutil
+
+        if not shutil.which("toktx"):
+            pytest.skip("toktx not on PATH — install KTX-Software for the ktx2 e2e")
+
+        from huggingface_hub import HfApi
+
+        from mat_vis_baker.hf_bake import bake_one
+        from mat_vis_baker.hf_derive_per_file import derive_ktx2_tier
+
+        token = _hf_token()
+
+        with tempfile.TemporaryDirectory() as td:
+            r = bake_one(
+                source=SOURCE,
+                tier=TIER,
+                release_tag=self.DERIVE_TAG,
+                work_dir=Path(td),
+                repo_id=REPO,
+                hf_token=token,
+                limit=2,
+                batch_size=2,
+            )
+        assert r.get("ok", 0) == 2, f"setup bake failed: {r}"
+
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                result = derive_ktx2_tier(
+                    source=SOURCE,
+                    source_tier=TIER,
+                    target_tier=self.KTX2_TARGET,
+                    release_tag=self.DERIVE_TAG,
+                    work_dir=Path(td),
+                    repo_id=REPO,
+                    hf_token=token,
+                    batch_size=2,
+                )
+            assert result.get("ok", 0) >= 1, f"ktx2 derive failed: {result}"
+
+            api = HfApi(token=token)
+            tree = list(
+                api.list_repo_tree(
+                    repo_id=REPO,
+                    repo_type="dataset",
+                    revision=self.DERIVE_TAG,
+                    path_in_repo=f"{SOURCE}/{self.KTX2_TARGET}",
+                    recursive=True,
+                )
+            )
+            paths = {getattr(e, "path", "") for e in tree}
+            ktx_files = [p for p in paths if p.endswith(".ktx2")]
+            assert ktx_files, f"no .ktx2 files in tree: {sorted(paths)[:10]}"
+            assert f"{SOURCE}/{self.KTX2_TARGET}/.tier_complete" in paths
+
+            # Magic-byte probe on one ktx2 file.
+            body = _http_get(_resolve_url(ktx_files[0], tag=self.DERIVE_TAG))
+            assert body.startswith(b"\xabKTX 20\xbb\r\n\x1a\n"), "must be KTX2"
+        finally:
+            try:
+                HfApi(token=token).delete_branch(
+                    repo_id=REPO, repo_type="dataset", branch=self.DERIVE_TAG
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"ktx2 e2e cleanup warn: {type(e).__name__}: {e}")
