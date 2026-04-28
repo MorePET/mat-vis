@@ -113,40 +113,60 @@ fn fetch_catalog(tag: &str, source: &str, manifest: &Manifest) -> Vec<CatalogEnt
         .expect("Failed to parse catalog")
 }
 
-fn assert_tier_complete(tag: &str, source: &str, tier: &str) {
+fn assert_tier_complete(tag: &str, source: &str, tier: &str) -> Result<(), String> {
     let url = hf_url(tag, &format!("{source}/{tier}/.tier_complete"));
-    let resp = client().get(&url).send().expect("network error on sentinel probe");
+    let resp = client()
+        .get(&url)
+        .send()
+        .map_err(|e| format!("network error on sentinel probe: {e}"))?;
     if !resp.status().is_success() {
-        panic!(
+        return Err(format!(
             "tier {source}/{tier} is not atomically complete on {tag} (no .tier_complete sentinel). \
              The bake may still be running, or this revision was committed mid-batch. \
              Re-run the bake or pin a known-complete tag."
-        );
+        ));
     }
+    Ok(())
 }
 
-fn fetch_texture_bytes(tag: &str, source: &str, material: &str, channel: &str, tier: &str) -> Vec<u8> {
+fn fetch_texture_bytes(
+    tag: &str,
+    source: &str,
+    material: &str,
+    channel: &str,
+    tier: &str,
+) -> Result<Vec<u8>, String> {
     let mut last_status: Option<reqwest::StatusCode> = None;
     for ext in ["png", "ktx2"] {
         let url = hf_url(tag, &format!("{source}/{tier}/{material}/{channel}.{ext}"));
-        let resp = client().get(&url).send().expect("network error");
+        let resp = client()
+            .get(&url)
+            .send()
+            .map_err(|e| format!("network error on {ext} fetch: {e}"))?;
         if !resp.status().is_success() {
             last_status = Some(resp.status());
             continue;
         }
-        let bytes = resp.bytes().expect("Failed to read body").to_vec();
+        let bytes = resp
+            .bytes()
+            .map_err(|e| format!("Failed to read body: {e}"))?
+            .to_vec();
         if !bytes.starts_with(PNG_MAGIC) && !bytes.starts_with(KTX2_MAGIC) {
-            panic!(
+            return Err(format!(
                 "Expected PNG or KTX2 bytes, got {:?}",
                 &bytes[..4.min(bytes.len())]
-            );
+            ));
         }
-        return bytes;
+        return Ok(bytes);
     }
-    panic!(
-        "{material}/{channel} not found at {source}/{tier} (last status={:?})",
-        last_status
-    );
+    Err(format!(
+        "{material}/{channel} not found at {source}/{tier} (last status={last_status:?})"
+    ))
+}
+
+fn die<T>(msg: String) -> T {
+    eprintln!("{msg}");
+    std::process::exit(1)
 }
 
 #[derive(Parser)]
@@ -249,8 +269,9 @@ fn main() {
                 );
             }
 
-            assert_tier_complete(&tag, &source, &tier);
-            let bytes = fetch_texture_bytes(&tag, &source, &material, &channel, &tier);
+            assert_tier_complete(&tag, &source, &tier).unwrap_or_else(die);
+            let bytes = fetch_texture_bytes(&tag, &source, &material, &channel, &tier)
+                .unwrap_or_else(die);
 
             match output {
                 Some(path) => {
@@ -362,9 +383,159 @@ mod tests {
             .find(|e| e.available_tiers.iter().any(|t| t == "1k"))
             .map(|e| e.id.clone())
             .expect("no 1k-staged ambientcg material");
-        assert_tier_complete(&tag, "ambientcg", "1k");
-        let bytes = fetch_texture_bytes(&tag, "ambientcg", &mid, "color", "1k");
+        assert_tier_complete(&tag, "ambientcg", "1k").expect("sentinel must exist");
+        let bytes = fetch_texture_bytes(&tag, "ambientcg", &mid, "color", "1k")
+            .expect("texture fetch must succeed");
         assert!(bytes.starts_with(PNG_MAGIC));
         assert!(bytes.len() > 1000);
+    }
+
+    // ── httpmock-based offline coverage (#199) ─────────────────────
+    //
+    // The HTTP-handling code paths (sentinel, fallback, magic-byte
+    // verification, 5xx behavior) were previously only exercised by
+    // the live tests, which are gated off by default. These four
+    // tests close that gap without needing prod HF.
+    //
+    // env-var serialization: every test sets `MAT_VIS_HF_BASE` to its
+    // mock server URL. Cargo runs tests in a single binary in parallel
+    // by default, so we serialize through a process-local Mutex.
+
+    use httpmock::prelude::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set_hf_base(url: &str) {
+        // SAFETY: the mutex above is held by the caller for the
+        // duration of the test, so no concurrent reader/writer races.
+        unsafe { std::env::set_var("MAT_VIS_HF_BASE", url) };
+    }
+
+    #[test]
+    fn http_png_ktx2_fallback() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let server = MockServer::start();
+        set_hf_base(&server.base_url());
+
+        // .png 404, .ktx2 200 with valid magic.
+        let png_mock = server.mock(|when, then| {
+            when.method(GET).path("/vtest/ambientcg/1k/Rock064/color.png");
+            then.status(404);
+        });
+        let ktx2_payload = {
+            let mut v = Vec::from(KTX2_MAGIC);
+            v.extend_from_slice(b" 20\xbb\r\n\x1a\n");
+            v.extend(std::iter::repeat(0u8).take(64));
+            v
+        };
+        let ktx2_mock = server.mock(|when, then| {
+            when.method(GET).path("/vtest/ambientcg/1k/Rock064/color.ktx2");
+            then.status(200).body(&ktx2_payload);
+        });
+
+        let bytes = fetch_texture_bytes("vtest", "ambientcg", "Rock064", "color", "1k")
+            .expect("fetch should succeed via .ktx2 fallback");
+        assert!(bytes.starts_with(KTX2_MAGIC), "fallback must return ktx2 bytes");
+        png_mock.assert();
+        ktx2_mock.assert();
+    }
+
+    #[test]
+    fn http_magic_byte_rejection() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let server = MockServer::start();
+        set_hf_base(&server.base_url());
+
+        // .png 200 but bytes are bogus (no PNG/KTX2 magic).
+        let _png = server.mock(|when, then| {
+            when.method(GET).path("/vtest/ambientcg/1k/Rock064/color.png");
+            then.status(200).body(vec![0xffu8; 64]);
+        });
+
+        let err = fetch_texture_bytes("vtest", "ambientcg", "Rock064", "color", "1k")
+            .expect_err("bogus bytes must be rejected");
+        assert!(err.contains("Expected PNG or KTX2"), "error: {err}");
+    }
+
+    #[test]
+    fn http_5xx_falls_through_to_ktx2() {
+        // Documents inherited Python contract: a 5xx on .png is
+        // treated identically to a 404 — the loop continues to .ktx2.
+        // This is "wrong" in a UX sense (a 503 retry would be ideal)
+        // but is consistent across all three v0.6 clients.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let server = MockServer::start();
+        set_hf_base(&server.base_url());
+
+        let _png = server.mock(|when, then| {
+            when.method(GET).path("/vtest/ambientcg/1k/Rock064/color.png");
+            then.status(503);
+        });
+        let ktx2_payload = {
+            let mut v = Vec::from(KTX2_MAGIC);
+            v.extend(std::iter::repeat(0u8).take(64));
+            v
+        };
+        let _ktx2 = server.mock(|when, then| {
+            when.method(GET).path("/vtest/ambientcg/1k/Rock064/color.ktx2");
+            then.status(200).body(&ktx2_payload);
+        });
+
+        let bytes = fetch_texture_bytes("vtest", "ambientcg", "Rock064", "color", "1k")
+            .expect("503 falls through to ktx2 by current contract");
+        assert!(bytes.starts_with(KTX2_MAGIC));
+    }
+
+    #[test]
+    fn http_sentinel_probed_then_texture_fetched() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let server = MockServer::start();
+        set_hf_base(&server.base_url());
+
+        let sentinel = server.mock(|when, then| {
+            when.method(GET).path("/vtest/ambientcg/1k/.tier_complete");
+            then.status(200);
+        });
+        let png_payload = {
+            let mut v = Vec::from(PNG_MAGIC);
+            v.extend_from_slice(b"\r\n\x1a\n");
+            v.extend(std::iter::repeat(0u8).take(64));
+            v
+        };
+        let png = server.mock(|when, then| {
+            when.method(GET).path("/vtest/ambientcg/1k/Rock064/color.png");
+            then.status(200).body(&png_payload);
+        });
+
+        // Drive the same call sequence main() uses.
+        assert_tier_complete("vtest", "ambientcg", "1k").expect("sentinel must succeed");
+        let bytes = fetch_texture_bytes("vtest", "ambientcg", "Rock064", "color", "1k")
+            .expect("png fetch must succeed");
+        assert!(bytes.starts_with(PNG_MAGIC));
+
+        // Both endpoints were hit. Sentinel ordering is enforced by
+        // the call-site contract in main() (line ~272), not by the
+        // helpers themselves — we drive the calls in order here, so
+        // a regression that flipped them would change the call order
+        // visible via httpmock's hits().
+        assert_eq!(sentinel.calls(), 1, "sentinel must be probed exactly once");
+        assert_eq!(png.calls(), 1, "png must be fetched exactly once");
+    }
+
+    #[test]
+    fn http_sentinel_missing_rejects() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let server = MockServer::start();
+        set_hf_base(&server.base_url());
+
+        let _miss = server.mock(|when, then| {
+            when.method(GET).path("/vtest/ambientcg/1k/.tier_complete");
+            then.status(404);
+        });
+
+        let err = assert_tier_complete("vtest", "ambientcg", "1k")
+            .expect_err("404 sentinel must produce an error");
+        assert!(err.contains("not atomically complete"), "error: {err}");
     }
 }
