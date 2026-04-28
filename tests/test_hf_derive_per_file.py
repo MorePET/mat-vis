@@ -187,17 +187,29 @@ class TestDeriveSmallerTier:
         assert len(last_ops) == 1
         assert last_ops[0].path_in_repo == "polyhaven/512/.tier_complete"
 
-        # Catalog commit is the second-to-last.
+        # Catalog commit is the second-to-last; it now also bundles the
+        # release-manifest update (#207-style atomicity, parent_commit
+        # CAS-retry).
         catalog_ops = calls[-2].kwargs["operations"]
-        assert len(catalog_ops) == 1
-        assert catalog_ops[0].path_in_repo == "polyhaven.json"
+        catalog_paths = {op.path_in_repo for op in catalog_ops}
+        assert catalog_paths == {"polyhaven.json", "release-manifest.json"}, catalog_paths
+        assert "parent_commit" in calls[-2].kwargs
 
         # And the catalog body has the new tier appended.
-        catalog_bytes = catalog_ops[0].path_or_fileobj
+        catalog_bytes = next(
+            op.path_or_fileobj for op in catalog_ops if op.path_in_repo == "polyhaven.json"
+        )
         catalog = json.loads(catalog_bytes)
         for entry in catalog:
             if entry["id"] in {"mat_0", "mat_1"}:
                 assert "512" in entry["available_tiers"], entry
+
+        # Manifest body lists the derived tier under the source.
+        manifest_bytes = next(
+            op.path_or_fileobj for op in catalog_ops if op.path_in_repo == "release-manifest.json"
+        )
+        manifest = json.loads(manifest_bytes)
+        assert manifest["sources"]["polyhaven"]["tiers"]["512"] == {"complete": True}
 
         # Texture batch commits should land target-tier paths.
         texture_paths = [op.path_in_repo for c in calls[:-2] for op in c.kwargs["operations"]]
