@@ -14,11 +14,25 @@ import pytest
 from mat_vis_baker.audit_orphans import audit_orphans
 
 
-def _fake_lfs_blob(oid: str, filename: str = "x") -> SimpleNamespace:
-    """Mimic ``huggingface_hub.hf_api.LFSFileInfo`` enough for the auditor."""
+def _fake_lfs_blob(
+    oid: str,
+    filename: str = "x",
+    file_oid: str | None = None,
+) -> SimpleNamespace:
+    """Mimic ``huggingface_hub.hf_api.LFSFileInfo`` enough for the auditor.
+
+    On the real API these two are *different* hash functions:
+    - ``oid``       = 40-char Git SHA-1 of the pointer file
+    - ``file_oid``  = 64-char SHA-256 of the LFS blob content (matches
+      ``BlobLfsInfo.sha256`` from ``list_repo_tree``).
+
+    Tests that don't care about the distinction can pass a single string
+    for both; #221's regression tests pass them separately to prove the
+    auditor compares on ``file_oid``.
+    """
     return SimpleNamespace(
         oid=oid,
-        file_oid=oid,
+        file_oid=file_oid if file_oid is not None else oid,
         filename=filename,
         size=1,
         ref="main",
@@ -153,3 +167,48 @@ class TestAuditOrphans:
         # Both scratch patterns must pass without allow_prod.
         audit_orphans(repo_id="gerchowl/mat-vis-tst", api=api)
         audit_orphans(repo_id="gerchowl/mat-vis-pr-tst", api=api)
+
+    # --- #221 regression: oid (SHA-1 pointer) vs file_oid (SHA-256 content) ---
+
+    def test_compares_on_file_oid_not_oid(self) -> None:
+        """Single matching blob → no orphans, even though ``oid`` differs.
+
+        Bug #221: the auditor used to compare ``LFSFileInfo.oid`` (the
+        Git pointer SHA-1) against ``BlobLfsInfo.sha256`` (the LFS
+        content SHA-256). Different hash functions never match, so
+        every blob looked orphaned. The fix compares ``file_oid``
+        against ``sha256`` — both are the lowercased hex SHA-256.
+        """
+        sha256 = "b9218b28613580501254426b643cc43e9ecb7b2e5892125ee1a7cc977388e50a"
+        sha1_pointer = "f84bae448eb7b78de429072bdde9fddaa812f54f"
+        blobs = [_fake_lfs_blob(oid=sha1_pointer, file_oid=sha256)]
+        tree = [_fake_repo_file("a.png", sha256)]
+        api = _make_api(lfs_blobs=blobs, tree_entries=tree)
+
+        result = audit_orphans(repo_id="gerchowl/mat-vis-tst", api=api)
+
+        assert result["total_lfs"] == 1
+        assert result["referenced"] == 1
+        assert result["orphans"] == []
+
+    def test_oid_collision_does_not_falsely_mark_referenced(self) -> None:
+        """One real match, one truly orphan → exactly one orphan.
+
+        Belt-and-braces for #221: even if the comparison were wrong we
+        could get accidental "0 orphans"; this test ensures both the
+        match and the miss are detected on the right attribute.
+        """
+        sha256_kept = "a" * 64
+        sha256_orphan = "b" * 64
+        blobs = [
+            _fake_lfs_blob(oid="1" * 40, file_oid=sha256_kept, filename="kept.png"),
+            _fake_lfs_blob(oid="2" * 40, file_oid=sha256_orphan, filename="crashed.png"),
+        ]
+        tree = [_fake_repo_file("kept.png", sha256_kept)]
+        api = _make_api(lfs_blobs=blobs, tree_entries=tree)
+
+        result = audit_orphans(repo_id="gerchowl/mat-vis-tst", api=api)
+
+        assert result["total_lfs"] == 2
+        assert result["referenced"] == 1
+        assert result["orphans"] == [sha256_orphan]
