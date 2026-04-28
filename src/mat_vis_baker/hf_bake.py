@@ -107,6 +107,8 @@ def bake_one(
     hf_token: str | None = None,
     dry_run: bool = False,
     allow_prod: bool = False,
+    storage_tier: str | None = None,
+    _pre_manifest_hook=None,
 ) -> dict:
     """Bake one ``(source, tier)`` and commit to HF.
 
@@ -121,7 +123,14 @@ def bake_one(
 
     Pre-flight tree scan + batch commits (size ``batch_size``) make
     bakes resumable across crashes — see ``hf_bake_per_file`` for
-    detail."""
+    detail.
+
+    ``storage_tier`` (#230): test-only escape hatch — keeps ``tier``
+    as the upstream-fetch label while writing under a different path
+    key. Used by the #210 concurrency E2E to park N parallel writers
+    at distinct (source, tier) paths under the same release tag. Not
+    exposed on the CLI; production callers leave it ``None`` and get
+    today's behavior unchanged."""
     # Pre-flight: refuse (source, tier) combos with no upstream data.
     # Earlier code let these proceed, then produced 454-materials-failed
     # bake artifacts when every fetch returned no matching package.
@@ -162,4 +171,6 @@ def bake_one(
         batch_size=batch_size,
         batch_max_bytes=batch_max_bytes,
         dry_run=dry_run,
+        storage_tier=storage_tier,
+        _pre_manifest_hook=_pre_manifest_hook,
     )

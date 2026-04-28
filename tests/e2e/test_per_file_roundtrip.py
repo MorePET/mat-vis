@@ -607,12 +607,24 @@ class TestConcurrentBakesShareTag:
 
         # Worker entry — must be top-level / picklable, so we use a
         # module-level _worker_bake helper defined just below the class.
+        # #230: a Manager-backed Barrier lets every worker rendezvous
+        # at the same point (just before the manifest CAS commit) so
+        # contention happens regardless of upstream-fetch variance.
+        # Without this, fast workers finish before slow ones even
+        # arrive at the manifest commit, and cas_retries stays at 0.
         try:
-            with mp.get_context("spawn").Pool(processes=n_workers) as pool:
-                results = pool.starmap(
-                    _worker_bake,
-                    [(self.CONC_TAG, source, tier, token) for source, tier in plan],
-                )
+            ctx = mp.get_context("spawn")
+            with ctx.Manager() as mgr:
+                barrier = mgr.Barrier(n_workers, timeout=180)
+                with ctx.Pool(
+                    processes=n_workers,
+                    initializer=_worker_init,
+                    initargs=(barrier,),
+                ) as pool:
+                    results = pool.starmap(
+                        _worker_bake,
+                        [(self.CONC_TAG, source, tier, token) for source, tier in plan],
+                    )
 
             # Every worker must return ok>=1.
             for (source, tier), r in zip(plan, results, strict=True):
@@ -620,7 +632,27 @@ class TestConcurrentBakesShareTag:
                     f"{source}/{tier} bake failed: {r}"
                 )
 
-            # Final manifest must list every (source, tier) pair.
+            # #230: at least one worker must have observed contention
+            # — either a 412 CAS mismatch (parent_commit moved between
+            # our read and our commit) or a 409 per-repo write-lock
+            # collision. Both are observable counters the workers
+            # carry back across the multiprocessing pipe — no log
+            # scraping needed. Without this assertion the test was a
+            # manifest-merge smoke test, not the contention test the
+            # file's docstring promises.
+            total_cas_retries = sum(int(r.get("cas_retries", 0)) for r in results)
+            total_lock_retries = sum(int(r.get("lock_409_retries", 0)) for r in results)
+            assert total_cas_retries + total_lock_retries >= 1, (
+                "expected at least one contention retry across N "
+                f"concurrent writers; got cas_retries={total_cas_retries} "
+                f"lock_409_retries={total_lock_retries}. Per-worker: "
+                f"{[(s, t, r.get('cas_retries'), r.get('lock_409_retries')) for (s, t), r in zip(plan, results, strict=True)]}"
+            )
+
+            # Final manifest must list every (source, storage-tier) pair.
+            # Per #230 the slug is now passed through verbatim as the
+            # storage-tier key, so the worker's `1k-wN` slug is also
+            # the manifest tier name.
             manifest_url = (
                 f"https://huggingface.co/datasets/{REPO}/resolve/"
                 f"{self.CONC_TAG}/release-manifest.json"
@@ -640,34 +672,65 @@ class TestConcurrentBakesShareTag:
                 print(f"concurrent cleanup warn: {type(e).__name__}: {e}")
 
 
+# Per-worker globals populated by ``_worker_init`` (Pool initializer).
+# Spawn-method workers don't inherit module state from the parent, so
+# the Manager-backed Barrier has to be plumbed explicitly.
+_WORKER_BARRIER = None
+
+
+def _worker_init(barrier) -> None:
+    """Pool initializer: stash the cross-process Barrier proxy in a
+    module global so ``_worker_bake`` can hand it to ``bake_one`` as
+    the pre-manifest hook."""
+    global _WORKER_BARRIER
+    _WORKER_BARRIER = barrier
+
+
 def _worker_bake(release_tag: str, source: str, tier: str, token: str) -> dict:
     """Top-level so it's picklable for ``multiprocessing.spawn``.
 
-    Note: "tier" here is a slug per worker (``1k-w0`` etc.) — bake_one
-    will treat it as an unknown tier and route through the `1k` upstream
-    fetch but write to the slug path. We accept the slight contract
-    bend because this test is a CONCURRENCY test, not a tier-correctness
-    test — we only need each worker to produce one HF commit at a
-    distinct path that exercises the manifest merge."""
+    ``tier`` here is a per-worker slug (``1k-w0``, ``1k-w1``, ...).
+    Per #230 we feed it through the new ``storage_tier`` kwarg so it
+    becomes the path/manifest key, while ``tier="1k"`` continues to
+    drive the upstream fetcher. This keeps the production tier guard
+    intact (``bake_one`` still validates ``tier`` against the
+    upstream-supported set) and makes each worker's slug a
+    first-class manifest entry — which is what the original test
+    intent demanded.
+
+    The Manager-backed Barrier (set by ``_worker_init``) is wired to
+    ``bake_one``'s ``_pre_manifest_hook`` so all N workers rendezvous
+    just before the manifest commit — which forces the CAS retry
+    path to actually fire even when upstream fetch durations vary.
+    """
     import tempfile
 
     from mat_vis_baker.hf_bake import bake_one
 
-    # Bake at the real "1k" tier upstream so the fetch succeeds, then
-    # rewrite the release_tag's per-source slug so each worker has its
-    # own (source, tier) path. The simplest way: pass the slug as the
-    # tier name and let the per-file bake commit to <source>/<slug>/.
+    def _hook() -> None:
+        # Park here until every worker has finished its texture batch
+        # and is ready to commit the manifest. Then race together.
+        if _WORKER_BARRIER is not None:
+            _WORKER_BARRIER.wait()
+
     with tempfile.TemporaryDirectory() as td:
         try:
             return bake_one(
                 source=source,
-                tier=tier if tier in {"1k", "2k", "4k", "scalar"} else "1k",
+                # Always fetch at a real upstream tier; the slug only
+                # affects where files land + how the manifest names
+                # them. (Worker slugs share one upstream payload so
+                # contention happens on the manifest CAS, not the
+                # texture write paths.)
+                tier="1k",
+                storage_tier=tier,
                 release_tag=release_tag,
                 work_dir=Path(td),
                 repo_id=REPO,
                 hf_token=token,
                 limit=1,
                 batch_size=1,
+                _pre_manifest_hook=_hook,
             )
         except Exception as e:  # noqa: BLE001
             return {"error": f"{type(e).__name__}: {e}", "ok": 0, "failed": 1}
