@@ -1,9 +1,14 @@
-"""Regression gate for the Dagger ``bake()`` argv contract (#185).
+"""Regression gate for the Dagger ``bake()`` argv contract.
 
 The Dagger module lives outside the main package, so ``_bake_cli.py``
 holds the pure-Python helper that builds the ``mat-vis-baker hf-bake``
 argv list. Importing it via file path keeps this test runnable in the
 default ``uv run pytest`` invocation, no Dagger engine required.
+
+Per-file substrate (ADR-0012, #189): the ``--legacy-tar`` and shard
+flags were retired alongside the tar code. Today's argv contract is
+the simpler {source, tier, work_dir, --release-tag, --repo-id, --offset,
+--batch-size, [--limit], [--dry-run], [--allow-prod]} surface.
 """
 
 from __future__ import annotations
@@ -32,8 +37,8 @@ class TestBakeArgvContract:
     """Locks the CLI argv shape so future refactors don't silently
     change the surface ``dagger call bake`` produces."""
 
-    def test_default_per_file_no_shard(self, bake_argv):
-        """Per-file (default), no shard, no limit, scratch repo."""
+    def test_default_per_file_no_optional_flags(self, bake_argv):
+        """Per-file (default), no limit, scratch repo: no optional flags fire."""
         argv = bake_argv(
             source="polyhaven",
             tier="1k",
@@ -44,9 +49,6 @@ class TestBakeArgvContract:
             limit=0,
             dry_run=False,
             allow_prod=False,
-            legacy_tar=False,
-            shard_index=-1,
-            shard_total=-1,
         )
         assert argv[:6] == ["uv", "run", "mat-vis-baker", "hf-bake", "polyhaven", "1k"]
         assert "/tmp/bake" in argv
@@ -54,14 +56,7 @@ class TestBakeArgvContract:
         assert "--repo-id" in argv and "gerchowl/mat-vis-tst" in argv
         assert "--batch-size" in argv and "50" in argv
         # No optional flags fired.
-        for flag in (
-            "--limit",
-            "--dry-run",
-            "--allow-prod",
-            "--legacy-tar",
-            "--shard-index",
-            "--shard-total",
-        ):
+        for flag in ("--limit", "--dry-run", "--allow-prod"):
             assert flag not in argv, f"unexpected {flag} in default argv"
 
     def test_limit_emits_when_positive(self, bake_argv):
@@ -75,9 +70,6 @@ class TestBakeArgvContract:
             limit=2,
             dry_run=False,
             allow_prod=False,
-            legacy_tar=False,
-            shard_index=-1,
-            shard_total=-1,
         )
         i = argv.index("--limit")
         assert argv[i + 1] == "2"
@@ -93,62 +85,6 @@ class TestBakeArgvContract:
             limit=0,
             dry_run=True,
             allow_prod=True,
-            legacy_tar=False,
-            shard_index=-1,
-            shard_total=-1,
         )
         assert "--dry-run" in argv
         assert "--allow-prod" in argv
-
-    def test_legacy_tar_passthrough(self, bake_argv):
-        argv = bake_argv(
-            source="polyhaven",
-            tier="1k",
-            release_tag="v0.0.0-test",
-            repo_id="gerchowl/mat-vis-tst",
-            offset=0,
-            batch_size=50,
-            limit=0,
-            dry_run=False,
-            allow_prod=False,
-            legacy_tar=True,
-            shard_index=-1,
-            shard_total=-1,
-        )
-        assert "--legacy-tar" in argv
-
-    def test_shard_flags_pair(self, bake_argv):
-        """Both shard flags or neither — never one alone."""
-        argv_pair = bake_argv(
-            source="polyhaven",
-            tier="1k",
-            release_tag="v0.0.0-test",
-            repo_id="gerchowl/mat-vis-tst",
-            offset=0,
-            batch_size=50,
-            limit=0,
-            dry_run=False,
-            allow_prod=False,
-            legacy_tar=False,
-            shard_index=2,
-            shard_total=4,
-        )
-        assert "--shard-index" in argv_pair and "2" in argv_pair
-        assert "--shard-total" in argv_pair and "4" in argv_pair
-
-        argv_solo = bake_argv(
-            source="polyhaven",
-            tier="1k",
-            release_tag="v0.0.0-test",
-            repo_id="gerchowl/mat-vis-tst",
-            offset=0,
-            batch_size=50,
-            limit=0,
-            dry_run=False,
-            allow_prod=False,
-            legacy_tar=False,
-            shard_index=2,
-            shard_total=-1,
-        )
-        assert "--shard-index" not in argv_solo
-        assert "--shard-total" not in argv_solo

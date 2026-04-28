@@ -19,9 +19,6 @@ def bake_argv(
     limit: int,
     dry_run: bool,
     allow_prod: bool,
-    legacy_tar: bool,
-    shard_index: int,
-    shard_total: int,
 ) -> list[str]:
     """Build the ``mat-vis-baker hf-bake`` argv list.
 
@@ -29,12 +26,10 @@ def bake_argv(
     without spinning up a Dagger engine. The Dagger function is then
     a thin shell over this + container exec.
 
-    Sentinels:
-      - ``limit <= 0`` drops ``--limit``.
-      - Both ``shard_index < 0`` and ``shard_total < 0`` drops both
-        shard flags. Sharding is a no-op under per-file substrate
-        (#184 / ADR-0012); passthrough kept for ``legacy_tar=True``
-        callers only.
+    Sentinel: ``limit <= 0`` drops ``--limit``. Sharding flags were
+    retired with the legacy tar substrate (#189 / ADR-0012) — per-file
+    bakes use pre-flight tree scan + batch commits as the resumability
+    primitive instead of shard-N-of-K artifacts.
     """
     argv: list[str] = [
         "uv",
@@ -59,8 +54,4 @@ def bake_argv(
         argv.append("--dry-run")
     if allow_prod:
         argv.append("--allow-prod")
-    if legacy_tar:
-        argv.append("--legacy-tar")
-    if shard_index >= 0 and shard_total >= 0:
-        argv += ["--shard-index", str(shard_index), "--shard-total", str(shard_total)]
     return argv
