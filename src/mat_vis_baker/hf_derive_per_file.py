@@ -54,6 +54,7 @@ from PIL import Image
 
 from mat_vis_baker.common import CANONICAL_CHANNELS, TIER_TO_PX
 from mat_vis_baker.hf_bake_per_file import _guard_prod_target
+from mat_vis_baker.hf_retry import _create_commit_with_backoff
 from mat_vis_baker.progress import ProgressTracker, emit_bake_plan
 
 log = logging.getLogger("mat-vis-baker.hf_derive_per_file")
@@ -472,7 +473,12 @@ def _derive_driver(
             )
             sha = ""
         else:
-            commit = api.create_commit(
+            # #225: 429-aware. Per-batch derive commits are the busiest
+            # writers — phase-4 derive jobs against a freshly baked tier
+            # were the trigger for the original 429.
+            commit = _create_commit_with_backoff(
+                api,
+                source=source,
                 repo_id=repo_id,
                 repo_type="dataset",
                 operations=list(pending_ops),
@@ -604,7 +610,12 @@ def _derive_driver(
                     "utf-8"
                 )
                 try:
-                    commit = api.create_commit(
+                    # #225: 429-aware inside the CAS loop — same shape as
+                    # the bake-side catalog commit; helper re-raises 412
+                    # so the precondition matcher below still fires.
+                    commit = _create_commit_with_backoff(
+                        api,
+                        source=source,
                         repo_id=repo_id,
                         repo_type="dataset",
                         operations=[
@@ -655,7 +666,11 @@ def _derive_driver(
     if dry_run:
         log.info("%s dry-run: would commit sentinel %s", label, sentinel_path)
     else:
-        commit = api.create_commit(
+        # #225: 429-aware. The sentinel is the very last commit and the
+        # one that died in #225's stack trace — wrap it.
+        commit = _create_commit_with_backoff(
+            api,
+            source=source,
             repo_id=repo_id,
             repo_type="dataset",
             operations=[
