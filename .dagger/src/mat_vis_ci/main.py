@@ -18,6 +18,7 @@ Usage:
     dagger call test-client-shell    # bash tests for shell reference client
     dagger call test-client-rust     # cargo test for Rust reference client
     dagger call test-clients         # all 4 client tests in parallel
+    dagger call test-e2e             # nightly E2E against mat-vis-tst (#193)
     dagger call validate-release      # verify release assets are complete
     dagger call preflight            # verify GHCR auth before push
     dagger call push                 # preflight + build + push to GHCR
@@ -564,6 +565,73 @@ class MatVisCi:
             allow_prod=allow_prod,
         )
         return await ctr.with_exec(argv).stdout()
+
+    @function
+    async def test_e2e(
+        self,
+        hf_token: Annotated[dagger.Secret, Doc("HF write token for the round-trip bake")],
+        context: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        repo_id: Annotated[
+            str, Doc("Target HF dataset repo (must be a *-tst scratch namespace)")
+        ] = "gerchowl/mat-vis-tst",
+    ) -> str:
+        """Run the live MAT_VIS_E2E=1 round-trip suite against mat-vis-tst (#193).
+
+        Spins up a python:3.12-slim container, syncs project deps with
+        the baker + dev extras, installs the Python reference client, and
+        runs ``pytest tests/e2e/ -v`` with ``MAT_VIS_E2E=1`` and
+        ``HF_TOKEN`` injected from the Dagger secret. Returns stdout.
+
+        Refuses to run against any non-scratch ``repo_id`` — there is no
+        ``--allow-prod`` escape hatch here because the E2E suite makes
+        and deletes a throwaway tag (``v0.0.0-e2e-184-perfile``); doing
+        that on prod would churn the public dataset history. If you
+        need to E2E against prod, fork the suite into its own function.
+        """
+        if "/" in repo_id:
+            _owner, name = repo_id.rsplit("/", 1)
+            scratch = name == "mat-vis-tst" or (
+                name.startswith("mat-vis") and name.endswith("-tst")
+            )
+        else:
+            scratch = False
+        if not scratch:
+            raise ValueError(
+                f"test_e2e refuses to target non-scratch repo {repo_id!r}; "
+                "this function only runs against .../mat-vis-tst (or "
+                ".../mat-vis-*-tst). E2E bakes a throwaway tag and "
+                "deletes it on teardown — that's not safe on prod."
+            )
+
+        ctx = context or dag.host().directory(".")
+        uv_cache = dag.cache_volume("uv-cache")
+        apt_cache = dag.cache_volume("apt-cache")
+        return await (
+            dag.container()
+            .from_("python:3.12-slim")
+            .with_env_variable("DEBIAN_FRONTEND", "noninteractive")
+            .with_mounted_cache("/var/cache/apt", apt_cache)
+            .with_exec(["apt-get", "update", "-qq"])
+            .with_exec(["apt-get", "install", "-y", "-qq", "git", "curl", "ca-certificates"])
+            .with_exec(
+                [
+                    "sh",
+                    "-c",
+                    "curl -LsSf https://astral.sh/uv/install.sh | sh && "
+                    "install -m 0755 /root/.local/bin/uv /usr/local/bin/uv",
+                ]
+            )
+            .with_env_variable("PYTHONUNBUFFERED", "1")
+            .with_mounted_cache("/root/.cache/uv", uv_cache)
+            .with_mounted_directory("/app", ctx)
+            .with_workdir("/app")
+            .with_exec(["uv", "sync", "--all-extras"])
+            .with_exec(["uv", "pip", "install", "-e", "./clients/python"])
+            .with_secret_variable("HF_TOKEN", hf_token)
+            .with_env_variable("MAT_VIS_E2E", "1")
+            .with_exec(["uv", "run", "pytest", "tests/e2e/", "-v"])
+            .stdout()
+        )
 
     @function
     async def smoke_bake(
