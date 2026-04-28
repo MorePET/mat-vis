@@ -504,3 +504,147 @@ class TestCasRetryOnManifestCommit:
         assert attempts["n"] == 1, f"401 must not retry (got {attempts['n']} attempts)"
         assert fetch_mfst.call_count == 1, fetch_mfst.call_count
         assert exc is not None and "401" in str(exc), exc
+
+
+# ── #228: bytes-aware batching (first-of-N-or-bytes) ─────────────────
+
+
+PNG_HDR = b"\x89PNG\r\n\x1a\n"
+
+
+def _texture_commit_calls(api):
+    """Texture-batch commits only — strip the catalog + sentinel calls.
+
+    Per the substrate contract the trailing two commits are
+    catalog+manifest then sentinel, so anything before that is a
+    texture batch flush."""
+    return [
+        c
+        for c in api.create_commit.call_args_list
+        if not any(
+            op.path_in_repo
+            in {
+                "release-manifest.json",
+                "polyhaven.json",
+                "polyhaven/1k/.tier_complete",
+            }
+            for op in c.kwargs["operations"]
+        )
+    ]
+
+
+class TestBytesAwareBatching:
+    """#228: flush trips on first-of-N-or-bytes — whichever bound hits
+    first. Locks down both halves of the OR so a regression that drops
+    either ceiling fails fast."""
+
+    def test_count_ceiling_flushes_when_bytes_below_max(self, tmp_path):
+        """Many tiny materials → bytes is far below ceiling → count
+        ceiling (batch_size) drives the flush. With batch_size=2 across
+        5 materials we expect 3 texture-batch commits (2 + 2 + 1)."""
+        # Each material is tiny (~108 bytes per channel) — well below
+        # any reasonable bytes ceiling.
+        small = PNG_HDR + b"\x00" * 100
+        fake_records = [_fake_record(f"mat_{i}", {"color": small}, tmp_path) for i in range(5)]
+
+        api = _bake_with_records(
+            fake_records,
+            tmp_path,
+            batch_size=2,
+            batch_max_bytes=10 * 1024 * 1024,  # 10 MiB — far above any single material
+        )
+
+        texture_calls = _texture_commit_calls(api)
+        assert len(texture_calls) == 3, (
+            f"expected 3 texture-batch commits (2+2+1, count-driven); got {len(texture_calls)}"
+        )
+
+    def test_bytes_ceiling_flushes_when_count_below_max(self, tmp_path):
+        """Few large materials → count is below ceiling → bytes ceiling
+        (batch_max_bytes) drives the flush. Each material's payload
+        already exceeds the ceiling, so every append immediately
+        crosses it and flushes — one material per commit despite
+        ``batch_size`` being far above 1."""
+        # Each material is "large": ~5 MiB per channel; the ceiling
+        # at 4 MiB is below a single material's payload so the very
+        # first append crosses the bound and triggers the flush.
+        big_payload = PNG_HDR + b"\x00" * (5 * 1024 * 1024)
+        fake_records = [
+            _fake_record(f"mat_{i}", {"color": big_payload}, tmp_path) for i in range(3)
+        ]
+
+        api = _bake_with_records(
+            fake_records,
+            tmp_path,
+            batch_size=300,  # high — count must NOT be the binding constraint
+            batch_max_bytes=4 * 1024 * 1024,  # below one material's payload
+        )
+
+        texture_calls = _texture_commit_calls(api)
+        # Each material's 5 MiB payload exceeds 4 MiB on the very
+        # first append → 3 materials = 3 texture commits.
+        assert len(texture_calls) == 3, (
+            f"expected 3 texture commits (bytes-driven, one material each); "
+            f"got {len(texture_calls)}"
+        )
+
+    def test_preflight_skip_still_works_under_bytes_aware_batching(self, tmp_path):
+        """The preflight skip primitive must keep working: of N=5
+        materials with M=2 already-committed, only 3 should reach
+        the bake/commit path. Bytes ceiling high so the count ceiling
+        bounds batches predictably."""
+        fake_records = [
+            _fake_record(f"mat_{i}", {"color": PNG_HDR + b"\x00" * 200}, tmp_path) for i in range(5)
+        ]
+
+        # Pretend mat_0 + mat_1 already on HF.
+        from huggingface_hub.hf_api import RepoFile
+
+        existing_files = [
+            RepoFile(path=f"polyhaven/1k/mat_{i}/color.png", size=80, oid="x") for i in range(2)
+        ]
+
+        bake_calls: list[str] = []
+
+        def track_bake(rec, *a, **k):
+            bake_calls.append(rec.id)
+            return rec
+
+        with (
+            patch("mat_vis_baker.hf_bake_per_file._get_fetcher") as fetcher,
+            patch("mat_vis_baker.hf_bake_per_file.HfApi") as api_cls,
+            patch(
+                "mat_vis_baker.hf_bake_per_file.bake_material",
+                side_effect=track_bake,
+            ),
+        ):
+
+            def _sliced(tier, textures_dir, *, limit=None, offset=0, **kw):
+                end = None if limit is None else offset + limit
+                return fake_records[offset:end]
+
+            fetcher.return_value = _sliced
+            api = api_cls.return_value
+            api.list_repo_tree.return_value = existing_files
+
+            result = bake_one_per_file(
+                source="polyhaven",
+                tier="1k",
+                release_tag="v0.0.0-test",
+                work_dir=tmp_path,
+                hf_token="t",
+                repo_id="gerchowl/mat-vis-tst",
+                batch_size=2,  # 3 unskipped → 2 then 1 → 2 texture commits
+                batch_max_bytes=10 * 1024 * 1024,
+            )
+
+        # Only the 3 unskipped materials reached bake_material.
+        assert bake_calls == ["mat_2", "mat_3", "mat_4"], bake_calls
+        assert result["ok"] == 3
+        assert result["skipped_preflight"] == 2
+
+        texture_calls = _texture_commit_calls(api)
+        assert len(texture_calls) == 2, (
+            f"expected 2 texture commits across 3 unskipped materials "
+            f"(batch_size=2); got {len(texture_calls)}"
+        )
