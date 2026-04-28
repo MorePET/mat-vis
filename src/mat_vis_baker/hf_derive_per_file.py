@@ -544,36 +544,77 @@ def _derive_driver(
             "skipped_preflight": 0,
         }
 
-    # ── catalog update ────────────────────────────────────────
+    # ── catalog + manifest update (atomic, CAS-retried) ──────
+    # Mirror the bake's #207 fix: single commit covers catalog +
+    # release-manifest.json with parent_commit guarding against
+    # matrix-write races (multiple derives may run on the same tag).
+    from mat_vis_baker.hf_bake_per_file import (
+        _fetch_manifest_with_parent,
+        _merge_manifest_for_source,
+    )
+
     catalog = _fetch_catalog(repo_id, release_tag, source, hf_token)
     if catalog:
         _extend_available_tiers(catalog, derived_ids, target_tier)
         catalog_bytes = (json.dumps(catalog, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
         if dry_run:
             log.info(
-                "%s dry-run: would commit updated %s.json (%d entries touched)",
+                "%s dry-run: would commit updated %s.json + manifest (%d entries touched)",
                 label,
                 source,
                 len(derived_ids),
             )
         else:
-            commit = api.create_commit(
-                repo_id=repo_id,
-                repo_type="dataset",
-                operations=[
-                    CommitOperationAdd(
-                        path_in_repo=f"{source}.json",
-                        path_or_fileobj=catalog_bytes,
+            max_retries = 6
+            for attempt in range(max_retries):
+                manifest, parent_sha = _fetch_manifest_with_parent(api, repo_id, release_tag)
+                merged = _merge_manifest_for_source(manifest, source, target_tier, release_tag)
+                manifest_bytes = (json.dumps(merged, indent=2, ensure_ascii=False) + "\n").encode(
+                    "utf-8"
+                )
+                try:
+                    commit = api.create_commit(
+                        repo_id=repo_id,
+                        repo_type="dataset",
+                        operations=[
+                            CommitOperationAdd(
+                                path_in_repo=f"{source}.json",
+                                path_or_fileobj=catalog_bytes,
+                            ),
+                            CommitOperationAdd(
+                                path_in_repo="release-manifest.json",
+                                path_or_fileobj=manifest_bytes,
+                            ),
+                        ],
+                        commit_message=(
+                            f"feat(data): {release_tag} — {source} catalog + manifest "
+                            f"({target_tier} added)"
+                        ),
+                        revision=release_tag,
+                        parent_commit=parent_sha,
                     )
-                ],
-                commit_message=(
-                    f"feat(data): {release_tag} — {source}.json + available_tiers += {target_tier}"
-                ),
-                revision=release_tag,
-            )
-            last_commit_sha = (
-                getattr(commit, "oid", "") or getattr(commit, "commit_oid", "") or last_commit_sha
-            )
+                    last_commit_sha = (
+                        getattr(commit, "oid", "")
+                        or getattr(commit, "commit_oid", "")
+                        or last_commit_sha
+                    )
+                    break
+                except Exception as e:  # noqa: BLE001
+                    msg = str(e).lower()
+                    if "412" in msg or "precondition" in msg or "parent_commit" in msg:
+                        if attempt + 1 == max_retries:
+                            log.error(
+                                "%s manifest CAS exhausted after %d retries", label, max_retries
+                            )
+                            raise
+                        log.warning(
+                            "%s manifest CAS retry %d/%d — concurrent writer detected",
+                            label,
+                            attempt + 1,
+                            max_retries,
+                        )
+                        continue
+                    raise
     else:
         log.info("%s: no catalog fetched (empty or missing); skipping catalog update", label)
 
