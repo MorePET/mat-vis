@@ -1,71 +1,228 @@
 /**
- * Tests for the JavaScript reference client against live release data.
+ * Tests for the JavaScript reference client.
+ *
+ * Two test modes:
+ *   1. Structural tests — always run. Verify URL contract, magic-byte
+ *      parsing, and v3 manifest shape using a stubbed `fetch()`.
+ *   2. Live tests — gated on MAT_VIS_LIVE_TESTS=1. Hit the prod HF
+ *      dataset; default-skipped because v0.6 dropped tar support and
+ *      prod isn't rebaked under the per-file substrate yet (see #179).
  *
  * Uses Node's built-in test runner (node:test) — zero dependencies.
  * Run with: node --test test_client.mjs
  */
 
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { MatVisClient } from './mat-vis-client.mjs';
 
-const TAG = process.env.MAT_VIS_TAG || 'v2026.04.0';
-const client = new MatVisClient({ tag: TAG });
+// ── stubbed-fetch structural tests ─────────────────────────────────
 
-describe('manifest', () => {
-  it('fetches manifest with schema_version field', async () => {
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+
+function stubFetch(routes) {
+  return async (url, _opts) => {
+    for (const [pattern, handler] of routes) {
+      if (typeof pattern === 'string' && url.includes(pattern)) return handler(url);
+      if (pattern instanceof RegExp && pattern.test(url)) return handler(url);
+    }
+    return {
+      ok: false,
+      status: 404,
+      async json() { return {}; },
+      async arrayBuffer() { return new ArrayBuffer(0); },
+    };
+  };
+}
+
+function jsonResp(obj) {
+  return {
+    ok: true,
+    status: 200,
+    async json() { return obj; },
+    async arrayBuffer() { return new ArrayBuffer(0); },
+  };
+}
+
+function bytesResp(u8) {
+  return {
+    ok: true,
+    status: 200,
+    async json() { throw new Error('not json'); },
+    async arrayBuffer() {
+      return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+    },
+  };
+}
+
+const MOCK_MANIFEST = {
+  schema_version: 3,
+  release_tag: 'vtest',
+  sources: {
+    ambientcg: { catalog: 'ambientcg.json', tiers: { '1k': { complete: true } } },
+  },
+};
+const MOCK_CATALOG = [
+  {
+    id: 'Rock064',
+    source: 'ambientcg',
+    mat_vis: { name: 'Rock064', category: 'stone' },
+    available_tiers: ['1k'],
+    maps: ['color', 'normal'],
+  },
+];
+
+describe('structural', () => {
+  let originalFetch;
+
+  before(() => {
+    originalFetch = globalThis.fetch;
+  });
+  after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('fetchTexture builds a per-file URL and returns PNG bytes', async () => {
+    const calledUrls = [];
+    globalThis.fetch = stubFetch([
+      ['/release-manifest.json', () => jsonResp(MOCK_MANIFEST)],
+      ['/ambientcg.json', () => jsonResp(MOCK_CATALOG)],
+      [
+        '/.tier_complete',
+        (url) => {
+          calledUrls.push(url);
+          return jsonResp({});
+        },
+      ],
+      [
+        '/Rock064/color.png',
+        (url) => {
+          calledUrls.push(url);
+          return bytesResp(PNG);
+        },
+      ],
+    ]);
+    const client = new MatVisClient({ tag: 'vtest' });
+    const buf = await client.fetchTexture('ambientcg', 'Rock064', 'color', '1k');
+    assert.ok(buf.byteLength > 0, 'should return non-empty bytes');
+    const head = new Uint8Array(buf, 0, 4);
+    assert.deepStrictEqual([...head], [0x89, 0x50, 0x4e, 0x47]);
+    assert.ok(
+      calledUrls.some((u) => u.endsWith('/ambientcg/1k/.tier_complete')),
+      'must probe sentinel before fetch',
+    );
+    assert.ok(
+      calledUrls.some((u) => u.endsWith('/ambientcg/1k/Rock064/color.png')),
+      'must hit per-file URL',
+    );
+  });
+
+  it('fetchTexture falls back to .ktx2 when .png 404s', async () => {
+    globalThis.fetch = stubFetch([
+      ['/release-manifest.json', () => jsonResp(MOCK_MANIFEST)],
+      ['/ambientcg.json', () => jsonResp(MOCK_CATALOG)],
+      ['/.tier_complete', () => jsonResp({})],
+      [
+        '/color.png',
+        () => ({
+          ok: false,
+          status: 404,
+          async json() { return {}; },
+          async arrayBuffer() { return new ArrayBuffer(0); },
+        }),
+      ],
+      [
+        '/color.ktx2',
+        () =>
+          bytesResp(
+            new Uint8Array([
+              0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a, 0,
+            ]),
+          ),
+      ],
+    ]);
+    const client = new MatVisClient({ tag: 'vtest' });
+    const buf = await client.fetchTexture('ambientcg', 'Rock064', 'color', '1k');
+    const head = new Uint8Array(buf, 0, 4);
+    assert.deepStrictEqual([...head], [0xab, 0x4b, 0x54, 0x58]);
+  });
+
+  it('fetchTexture rejects when sentinel is missing', async () => {
+    globalThis.fetch = stubFetch([
+      ['/release-manifest.json', () => jsonResp(MOCK_MANIFEST)],
+      ['/ambientcg.json', () => jsonResp(MOCK_CATALOG)],
+      // intentionally NO route for .tier_complete → 404
+    ]);
+    const client = new MatVisClient({ tag: 'vtest' });
+    await assert.rejects(
+      () => client.fetchTexture('ambientcg', 'Rock064', 'color', '1k'),
+      /not atomically complete/,
+    );
+  });
+
+  it('manifest rejects pre-v3 schema', async () => {
+    globalThis.fetch = stubFetch([
+      ['/release-manifest.json', () => jsonResp({ schema_version: 2, sources: {} })],
+    ]);
+    const client = new MatVisClient({ tag: 'vtest' });
+    await assert.rejects(() => client.manifest(), /schema_version=2/);
+  });
+
+  it('materials filters by available_tiers', async () => {
+    globalThis.fetch = stubFetch([
+      ['/release-manifest.json', () => jsonResp(MOCK_MANIFEST)],
+      [
+        '/ambientcg.json',
+        () =>
+          jsonResp([
+            ...MOCK_CATALOG,
+            { id: 'Wood001', available_tiers: ['2k'], maps: ['color'] },
+          ]),
+      ],
+    ]);
+    const client = new MatVisClient({ tag: 'vtest' });
+    const mats = await client.materials('ambientcg', '1k');
+    assert.deepStrictEqual(mats, ['Rock064']);
+  });
+
+  it('channels reads from catalog maps array', async () => {
+    globalThis.fetch = stubFetch([
+      ['/release-manifest.json', () => jsonResp(MOCK_MANIFEST)],
+      ['/ambientcg.json', () => jsonResp(MOCK_CATALOG)],
+    ]);
+    const client = new MatVisClient({ tag: 'vtest' });
+    const chs = await client.channels('ambientcg', 'Rock064', '1k');
+    assert.deepStrictEqual(chs, ['color', 'normal']);
+  });
+});
+
+// ── live tests ──────────────────────────────────────────────────────
+
+const LIVE_ENABLED = process.env.MAT_VIS_LIVE_TESTS === '1';
+const LIVE_TAG = process.env.MAT_VIS_LIVE_TAG || 'v2026.04.1';
+
+const liveDescribe = LIVE_ENABLED ? describe : describe.skip;
+
+liveDescribe('live (set MAT_VIS_LIVE_TESTS=1; needs per-file prod tag)', () => {
+  const client = new MatVisClient({ tag: LIVE_TAG });
+
+  it('manifest is v3', async () => {
     const m = await client.manifest();
-    assert.strictEqual(m.schema_version, 1);
-    assert.ok(m.tiers, 'manifest should have tiers');
+    assert.strictEqual(m.schema_version, 3);
+    assert.ok(m.sources, 'manifest should have sources block');
   });
 
-  it('lists tiers including 1k', async () => {
+  it('lists 1k tier', async () => {
     const tiers = await client.tiers();
-    assert.ok(tiers.includes('1k'), 'tiers should include 1k');
+    assert.ok(tiers.includes('1k'));
   });
 
-  it('lists sources including ambientcg', async () => {
-    const sources = await client.sources('1k');
-    assert.ok(sources.includes('ambientcg'), 'sources should include ambientcg');
-  });
-});
-
-describe('rowmap', () => {
-  it('fetches rowmap with materials', async () => {
-    const rm = await client.rowmap('ambientcg', '1k');
-    assert.ok(rm.materials, 'rowmap should have materials');
-    assert.ok(Object.keys(rm.materials).length > 0, 'materials should be non-empty');
-  });
-
-  it('lists material IDs', async () => {
+  it('returns valid PNG bytes via per-file URL', async () => {
     const mats = await client.materials('ambientcg', '1k');
-    assert.ok(mats.length > 0, 'should have materials');
-    assert.ok(mats.every((m) => typeof m === 'string'), 'all IDs should be strings');
-  });
-
-  it('lists channels for first material', async () => {
-    const mats = await client.materials('ambientcg', '1k');
-    const channels = await client.channels('ambientcg', mats[0], '1k');
-    assert.ok(channels.includes('color'), 'channels should include color');
-  });
-});
-
-describe('fetch texture', () => {
-  it('returns valid PNG bytes via range read', async () => {
-    const mats = await client.materials('ambientcg', '1k');
+    assert.ok(mats.length > 0);
     const buf = await client.fetchTexture('ambientcg', mats[0], 'color', '1k');
     const magic = new Uint8Array(buf, 0, 4);
-    assert.strictEqual(magic[0], 0x89);
-    assert.strictEqual(magic[1], 0x50); // P
-    assert.strictEqual(magic[2], 0x4e); // N
-    assert.strictEqual(magic[3], 0x47); // G
-    assert.ok(buf.byteLength > 1000, 'PNG should not be trivially small');
-  });
-
-  it('throws on nonexistent material', async () => {
-    await assert.rejects(
-      () => client.fetchTexture('ambientcg', 'NONEXISTENT_XYZ', 'color', '1k'),
-      /not found/i,
-    );
+    assert.deepStrictEqual([...magic], [0x89, 0x50, 0x4e, 0x47]);
+    assert.ok(buf.byteLength > 1000);
   });
 });
