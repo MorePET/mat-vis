@@ -1,7 +1,7 @@
 {
   "name": "mat-vis-client",
-  "version": "0.1.0",
-  "description": "Pure JavaScript client for mat-vis PBR textures — HTTP range reads, zero deps, browser + Node 18+",
+  "version": "0.6.0",
+  "description": "Pure JavaScript client for mat-vis PBR textures — per-file HF dataset, zero deps, browser + Node 18+",
   "type": "module",
   "main": "mat-vis-client.mjs",
   "exports": {
