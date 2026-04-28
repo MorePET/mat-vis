@@ -83,11 +83,15 @@ clean-artifacts:
 # MAT_VIS_LIVE_TESTS=1 opts in to live tests; skipped by default since
 # v0.6 (per-file substrate, ADR-0012) — prod isn't rebaked yet.
 # Two invocations because the two `tests/` dirs both have __init__.py
-# and pytest's rootdir discovery conflates them in a single run.
+# and pytest's rootdir discovery conflates them in one run.
+# `--with clients/python` adds the mat-vis-client wheel to the same
+# env (tests/test_version_sync.py imports it). `--reinstall-package`
+# forces a rebuild from clients/python/ even when the cached archive
+# is stale, so signature drift catches pre-CI.
 [group('test')]
 test-all *args:
     MAT_VIS_LIVE_TESTS=1 uv run --reinstall-package mat-vis-client \
-        --with clients/python --with pytest pytest tests/ {{ args }}
+        --with clients/python pytest tests/ {{ args }}
     MAT_VIS_LIVE_TESTS=1 uv run --reinstall-package mat-vis-client \
         --with clients/python --with pytest pytest clients/python {{ args }}
 
@@ -95,7 +99,7 @@ test-all *args:
 [group('test')]
 test-fast *args:
     uv run --reinstall-package mat-vis-client \
-        --with clients/python --with pytest pytest tests/ {{ args }}
+        --with clients/python pytest tests/ {{ args }}
     uv run --reinstall-package mat-vis-client \
         --with clients/python --with pytest pytest clients/python {{ args }}
 

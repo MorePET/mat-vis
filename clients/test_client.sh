@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
-# Tests for the shell reference client against live release data.
+# Tests for the shell reference client.
 #
-# Requires: curl, jq, xxd (usually in vim or xxd package)
+# Two modes:
+#   1. Structural — always run. Stubs HF behind a local file:// tree
+#      and exercises mat-vis.sh end-to-end. No network.
+#   2. Live — gated on MAT_VIS_LIVE_TESTS=1. Hits prod HF; default-skipped
+#      because v0.6 dropped tar support and prod isn't rebaked under
+#      the per-file substrate yet (#179).
+#
+# Requires: curl, jq, od (tested on macOS + alpine).
 # Run with: bash test_client.sh
 
 set -euo pipefail
@@ -9,80 +16,242 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLIENT="$SCRIPT_DIR/mat-vis.sh"
 
-export MAT_VIS_TAG="${MAT_VIS_TAG:-v2026.04.0}"
-export MAT_VIS_CACHE
-MAT_VIS_CACHE="$(mktemp -d)"
-
-trap 'rm -rf "$MAT_VIS_CACHE"' EXIT
-
 PASS=0
 FAIL=0
 
-assert_ok() {
-    local desc="$1"; shift
-    if "$@" >/dev/null 2>&1; then
+assert_eq() {
+    local desc="$1" actual="$2" expected="$3"
+    if [ "$actual" = "$expected" ]; then
         echo "  PASS $desc"
         PASS=$((PASS + 1))
     else
-        echo "  FAIL $desc"
+        echo "  FAIL $desc — expected '$expected', got '$actual'"
         FAIL=$((FAIL + 1))
     fi
 }
 
 assert_contains() {
     local desc="$1" output="$2" needle="$3"
-    if echo "$output" | grep -q "$needle"; then
+    if echo "$output" | grep -q -- "$needle"; then
         echo "  PASS $desc"
         PASS=$((PASS + 1))
     else
-        echo "  FAIL $desc — expected '$needle' in output"
+        printf "  FAIL %s — expected '%s' in output:\n%s\n" "$desc" "$needle" "$output"
         FAIL=$((FAIL + 1))
     fi
 }
 
-echo "=== manifest ==="
+assert_fails() {
+    local desc="$1"; shift
+    if "$@" >/dev/null 2>&1; then
+        echo "  FAIL $desc — expected non-zero exit"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PASS $desc"
+        PASS=$((PASS + 1))
+    fi
+}
 
-LIST_OUTPUT=$("$CLIENT" list)
-assert_contains "list includes 1k tier" "$LIST_OUTPUT" "1k"
-assert_contains "list includes ambientcg" "$LIST_OUTPUT" "ambientcg"
+# ── structural: stub HF behind a file:// tree ──────────────────────
 
-echo "=== materials ==="
+setup_mock_hf() {
+    local root=$1 tag=$2
+    local td="$root/$tag"
+    mkdir -p "$td/ambientcg/1k/Rock064"
 
-MATERIALS=$("$CLIENT" materials ambientcg 1k)
-MAT_COUNT=$(echo "$MATERIALS" | wc -l | tr -d ' ')
-FIRST_MAT=$(echo "$MATERIALS" | head -1)
+    cat > "$td/release-manifest.json" <<EOF
+{
+  "schema_version": 3,
+  "release_tag": "$tag",
+  "sources": {
+    "ambientcg": {
+      "catalog": "ambientcg.json",
+      "tiers": { "1k": { "complete": true } }
+    }
+  }
+}
+EOF
+    cat > "$td/ambientcg.json" <<'EOF'
+[
+  {
+    "id": "Rock064",
+    "source": "ambientcg",
+    "mat_vis": { "name": "Rock064", "category": "stone" },
+    "available_tiers": ["1k"],
+    "maps": ["color", "normal"]
+  }
+]
+EOF
+    # PNG: 8-byte magic + 1.5KiB filler so it clears 'wc -c > 1000' checks
+    {
+        printf '\x89PNG\r\n\x1a\n'
+        head -c 1500 /dev/zero
+    } > "$td/ambientcg/1k/Rock064/color.png"
+    : > "$td/ambientcg/1k/.tier_complete"
+}
 
-if [ "$MAT_COUNT" -gt 0 ] && [ -n "$FIRST_MAT" ]; then
-    echo "  PASS materials list non-empty ($MAT_COUNT materials)"
+structural_tests() {
+    echo "=== structural (stubbed HF tree) ==="
+    local mockroot
+    mockroot=$(mktemp -d)
+    local cache
+    cache=$(mktemp -d)
+    trap 'rm -rf "$mockroot" "$cache"' RETURN
+
+    local TAG="vtest"
+    setup_mock_hf "$mockroot" "$TAG"
+
+    export MAT_VIS_HF_BASE="file://$mockroot"
+    export MAT_VIS_TAG="$TAG"
+    export MAT_VIS_CACHE="$cache"
+
+    # list
+    local list_out
+    list_out=$("$CLIENT" list)
+    assert_contains "list shows 1k tier" "$list_out" "1k"
+    assert_contains "list includes ambientcg" "$list_out" "ambientcg"
+
+    # materials
+    local mats
+    mats=$("$CLIENT" materials ambientcg 1k)
+    assert_eq "materials returns Rock064" "$mats" "Rock064"
+
+    # fetch — stdout
+    local fetched_size
+    "$CLIENT" fetch ambientcg Rock064 color 1k > "$cache/out.png"
+    fetched_size=$(wc -c < "$cache/out.png" | tr -d ' ')
+    if [ "$fetched_size" -gt 100 ]; then
+        echo "  PASS fetch wrote PNG bytes ($fetched_size B)"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL fetch produced too-small file ($fetched_size B)"
+        FAIL=$((FAIL + 1))
+    fi
+    local magic
+    magic=$(head -c4 "$cache/out.png" | od -An -tx1 | tr -d ' \n')
+    assert_eq "fetch emits PNG magic" "$magic" "89504e47"
+
+    # cache hit on second fetch
+    "$CLIENT" fetch ambientcg Rock064 color 1k > "$cache/out2.png"
+    if cmp -s "$cache/out.png" "$cache/out2.png"; then
+        echo "  PASS cache hit yields identical bytes"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL cache hit yields different bytes"
+        FAIL=$((FAIL + 1))
+    fi
+
+    # missing-sentinel rejection
+    rm -rf "$cache"
+    cache=$(mktemp -d)
+    export MAT_VIS_CACHE="$cache"
+    rm -f "$mockroot/$TAG/ambientcg/1k/.tier_complete"
+    assert_fails "missing sentinel rejects fetch" \
+        "$CLIENT" fetch ambientcg Rock064 color 1k
+
+    : > "$mockroot/$TAG/ambientcg/1k/.tier_complete"
+
+    # KTX2 fallback: serve a 404 on .png by removing it; .ktx2 must take over.
+    rm -rf "$cache"
+    cache=$(mktemp -d)
+    export MAT_VIS_CACHE="$cache"
+    rm -f "$mockroot/$TAG/ambientcg/1k/Rock064/color.png"
+    {
+        printf '\xab\x4b\x54\x58\x20\x32\x30\xbb\r\n\x1a\n'
+        head -c 1500 /dev/zero
+    } > "$mockroot/$TAG/ambientcg/1k/Rock064/color.ktx2"
+    "$CLIENT" fetch ambientcg Rock064 color 1k > "$cache/ktx2.out"
+    local k_magic
+    k_magic=$(head -c4 "$cache/ktx2.out" | od -An -tx1 | tr -d ' \n')
+    assert_eq "fetch falls back to .ktx2 when .png 404s" "$k_magic" "ab4b5458"
+    # restore for further tests
+    rm -f "$mockroot/$TAG/ambientcg/1k/Rock064/color.ktx2"
+    {
+        printf '\x89PNG\r\n\x1a\n'
+        head -c 1500 /dev/zero
+    } > "$mockroot/$TAG/ambientcg/1k/Rock064/color.png"
+
+    # Magic-byte rejection: .png served with bogus magic must be rejected.
+    rm -rf "$cache"
+    cache=$(mktemp -d)
+    export MAT_VIS_CACHE="$cache"
+    head -c 64 /dev/zero > "$mockroot/$TAG/ambientcg/1k/Rock064/color.png"
+    assert_fails "bogus magic rejected" \
+        "$CLIENT" fetch ambientcg Rock064 color 1k
+    {
+        printf '\x89PNG\r\n\x1a\n'
+        head -c 1500 /dev/zero
+    } > "$mockroot/$TAG/ambientcg/1k/Rock064/color.png"
+
+    # Pre-v3 manifest must be rejected loudly — the v0.6 client doesn't speak tar.
+    rm -rf "$cache"
+    cache=$(mktemp -d)
+    export MAT_VIS_CACHE="$cache"
+    cat > "$mockroot/$TAG/release-manifest.json" <<EOF
+{ "schema_version": 2, "release_tag": "$TAG", "tiers": { "1k": { "base_url": "https://example/" } } }
+EOF
+    assert_fails "pre-v3 manifest rejected" "$CLIENT" list
+    cat > "$mockroot/$TAG/release-manifest.json" <<EOF
+{
+  "schema_version": 3,
+  "release_tag": "$TAG",
+  "sources": {
+    "ambientcg": {
+      "catalog": "ambientcg.json",
+      "tiers": { "1k": { "complete": true } }
+    }
+  }
+}
+EOF
+
+    unset MAT_VIS_HF_BASE MAT_VIS_TAG MAT_VIS_CACHE
+}
+
+# ── live: opt-in via MAT_VIS_LIVE_TESTS=1 ──────────────────────────
+
+live_tests() {
+    if [ "${MAT_VIS_LIVE_TESTS:-0}" != "1" ]; then
+        echo "=== live (skipped; set MAT_VIS_LIVE_TESTS=1 + a per-file MAT_VIS_LIVE_TAG) ==="
+        return
+    fi
+    echo "=== live (HF round-trip) ==="
+    export MAT_VIS_TAG="${MAT_VIS_LIVE_TAG:-v2026.04.1}"
+    local cache
+    cache=$(mktemp -d)
+    export MAT_VIS_CACHE="$cache"
+    trap 'rm -rf "$cache"' RETURN
+
+    local list_out
+    list_out=$("$CLIENT" list)
+    assert_contains "list includes 1k tier" "$list_out" "1k"
+    assert_contains "list includes ambientcg" "$list_out" "ambientcg"
+
+    local mats first
+    mats=$("$CLIENT" materials ambientcg 1k)
+    first=$(echo "$mats" | head -1)
+    [ -n "$first" ] || { echo "  FAIL materials list empty"; FAIL=$((FAIL + 1)); return; }
+    echo "  PASS materials list non-empty (first=$first)"
     PASS=$((PASS + 1))
-else
-    echo "  FAIL materials list empty"
-    FAIL=$((FAIL + 1))
-fi
 
-echo "=== fetch texture ==="
+    local out="$cache/test_output.png"
+    "$CLIENT" fetch ambientcg "$first" color 1k -o "$out"
+    if [ -f "$out" ] && [ "$(wc -c < "$out" | tr -d ' ')" -gt 1000 ]; then
+        echo "  PASS fetch wrote file ($(wc -c < "$out" | tr -d ' ') bytes)"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL fetch did not produce valid file"
+        FAIL=$((FAIL + 1))
+    fi
+    local magic
+    magic=$(head -c4 "$out" | od -An -tx1 | tr -d ' \n')
+    case "$magic" in
+        89504e47|ab4b5458) echo "  PASS PNG/KTX2 magic verified ($magic)"; PASS=$((PASS + 1)) ;;
+        *) echo "  FAIL unexpected magic: $magic"; FAIL=$((FAIL + 1)) ;;
+    esac
+}
 
-TEXTURE_FILE="$MAT_VIS_CACHE/test_output.png"
-"$CLIENT" fetch ambientcg "$FIRST_MAT" color 1k -o "$TEXTURE_FILE"
-
-# Verify file exists and is non-trivial
-if [ -f "$TEXTURE_FILE" ] && [ "$(wc -c < "$TEXTURE_FILE")" -gt 1000 ]; then
-    echo "  PASS fetch wrote file ($(wc -c < "$TEXTURE_FILE") bytes)"
-    PASS=$((PASS + 1))
-else
-    echo "  FAIL fetch did not produce valid file"
-    FAIL=$((FAIL + 1))
-fi
-
-# Verify PNG magic bytes
-MAGIC=$(head -c4 "$TEXTURE_FILE" | xxd -p)
-if [ "$MAGIC" = "89504e47" ]; then
-    echo "  PASS PNG magic bytes verified"
-    PASS=$((PASS + 1))
-else
-    echo "  FAIL expected PNG magic 89504e47, got $MAGIC"
-    FAIL=$((FAIL + 1))
-fi
+structural_tests
+live_tests
 
 echo ""
 echo "$PASS passed, $FAIL failed"
