@@ -484,3 +484,190 @@ class TestDeriveKtx2RoundTrip:
                 )
             except Exception as e:  # noqa: BLE001
                 print(f"ktx2 e2e cleanup warn: {type(e).__name__}: {e}")
+
+
+# ── #210: multi-source manifest merge (was implicit in single-source E2E) ──
+
+
+class TestMultiSourceManifestMerge:
+    """Two sequential bakes against ONE release tag must accumulate
+    in the manifest, not clobber. The CAS implementation in #208 was
+    correct, but the only proof was the unit tests + a manual probe.
+    This is the live gate: future regressions to the merge logic
+    surface here in nightly E2E.
+    """
+
+    MULTI_TAG = "v0.0.0-e2e-210-multisrc"
+
+    def test_two_sources_accumulate_in_manifest(self) -> None:
+        import json
+
+        from huggingface_hub import HfApi
+
+        from mat_vis_baker.hf_bake import bake_one
+
+        token = _hf_token()
+        api = HfApi(token=token)
+        # Defensive cleanup in case a previous run crashed before teardown.
+        try:
+            api.delete_branch(repo_id=REPO, repo_type="dataset", branch=self.MULTI_TAG)
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            for source in ("polyhaven", "ambientcg"):
+                with tempfile.TemporaryDirectory() as td:
+                    result = bake_one(
+                        source=source,
+                        tier=TIER,
+                        release_tag=self.MULTI_TAG,
+                        work_dir=Path(td),
+                        repo_id=REPO,
+                        hf_token=token,
+                        limit=2,
+                        batch_size=2,
+                    )
+                assert result.get("ok", 0) >= 1, f"{source} bake failed: {result}"
+
+            manifest_url = (
+                f"https://huggingface.co/datasets/{REPO}/resolve/"
+                f"{self.MULTI_TAG}/release-manifest.json"
+            )
+            body = _http_get(manifest_url)
+            manifest = json.loads(body.decode("utf-8"))
+            assert manifest["schema_version"] == 3, manifest
+            sources = manifest.get("sources", {})
+            # Both sources MUST be present — second bake clobbering the
+            # first would only show one entry here.
+            assert "polyhaven" in sources, sources
+            assert "ambientcg" in sources, sources
+            # Each source's tiers block lists the baked tier.
+            assert TIER in sources["polyhaven"].get("tiers", {}), sources["polyhaven"]
+            assert TIER in sources["ambientcg"].get("tiers", {}), sources["ambientcg"]
+        finally:
+            try:
+                api.delete_branch(repo_id=REPO, repo_type="dataset", branch=self.MULTI_TAG)
+            except Exception as e:  # noqa: BLE001
+                print(f"multi-source cleanup warn: {type(e).__name__}: {e}")
+
+
+# ── #210: opt-in concurrency stress test ──
+
+
+@pytest.mark.skipif(
+    not os.environ.get("MAT_VIS_E2E_CONCURRENCY"),
+    reason="set MAT_VIS_E2E_CONCURRENCY=N to run the multi-process race test (default off)",
+)
+class TestConcurrentBakesShareTag:
+    """Fires N (default 4) parallel processes, each baking a distinct
+    (source, tier) slug into the SAME release tag. Asserts all bakes
+    succeed AND the final manifest contains every source/tier — proves
+    the CAS retry budget holds under realistic matrix concurrency.
+
+    Uses ``multiprocessing.Process`` (NOT ``threading.Thread``) — the
+    GIL serializes live HTTP and never fires the retry path; verified
+    during the #207 fix. Real prod parallelism only happens between
+    processes (one per matrix container), so we test that.
+
+    Skipped by default. The "MAT_VIS_E2E=1" gate AND
+    "MAT_VIS_E2E_CONCURRENCY=N" must both be set. Default N=4 ≈ today's
+    realistic matrix size (4 textured sources).
+
+    On failure: if retries exhaust, that's the trigger to escalate to
+    the Option-B "fragments + final merge" design (see #210 comment).
+    """
+
+    CONC_TAG = "v0.0.0-e2e-210-concurrent"
+
+    def test_n_parallel_bakes_all_land_in_manifest(self) -> None:
+        import json
+        import multiprocessing as mp
+        import os as _os
+
+        from huggingface_hub import HfApi
+
+        n_workers = int(_os.environ.get("MAT_VIS_E2E_CONCURRENCY", "4"))
+        # Cap to the four sources we have; an N>4 run would require
+        # synthesizing tier slugs which complicates the assertion logic.
+        sources = ["polyhaven", "ambientcg", "gpuopen", "polyhaven"][:n_workers]
+        # Distinct (source, tier) per worker so they don't collide on
+        # texture-write paths — only the manifest is shared state.
+        plan = [(s, f"1k-w{i}") for i, s in enumerate(sources[:2])]
+        # For workers 3+ on the same source, use a different tier slug.
+        for i, s in enumerate(sources[2:], start=2):
+            plan.append((s, f"1k-w{i}"))
+        plan = plan[:n_workers]
+
+        token = _hf_token()
+        api = HfApi(token=token)
+        try:
+            api.delete_branch(repo_id=REPO, repo_type="dataset", branch=self.CONC_TAG)
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Worker entry — must be top-level / picklable, so we use a
+        # module-level _worker_bake helper defined just below the class.
+        try:
+            with mp.get_context("spawn").Pool(processes=n_workers) as pool:
+                results = pool.starmap(
+                    _worker_bake,
+                    [(self.CONC_TAG, source, tier, token) for source, tier in plan],
+                )
+
+            # Every worker must return ok>=1.
+            for (source, tier), r in zip(plan, results, strict=True):
+                assert isinstance(r, dict) and r.get("ok", 0) >= 1, (
+                    f"{source}/{tier} bake failed: {r}"
+                )
+
+            # Final manifest must list every (source, tier) pair.
+            manifest_url = (
+                f"https://huggingface.co/datasets/{REPO}/resolve/"
+                f"{self.CONC_TAG}/release-manifest.json"
+            )
+            body = _http_get(manifest_url)
+            manifest = json.loads(body.decode("utf-8"))
+            ms = manifest.get("sources", {})
+            for source, tier in plan:
+                assert source in ms, f"{source} missing after concurrent bakes; {ms.keys()}"
+                assert tier in ms[source].get("tiers", {}), (
+                    f"{source}/{tier} missing; {source} has {ms[source].get('tiers', {}).keys()}"
+                )
+        finally:
+            try:
+                api.delete_branch(repo_id=REPO, repo_type="dataset", branch=self.CONC_TAG)
+            except Exception as e:  # noqa: BLE001
+                print(f"concurrent cleanup warn: {type(e).__name__}: {e}")
+
+
+def _worker_bake(release_tag: str, source: str, tier: str, token: str) -> dict:
+    """Top-level so it's picklable for ``multiprocessing.spawn``.
+
+    Note: "tier" here is a slug per worker (``1k-w0`` etc.) — bake_one
+    will treat it as an unknown tier and route through the `1k` upstream
+    fetch but write to the slug path. We accept the slight contract
+    bend because this test is a CONCURRENCY test, not a tier-correctness
+    test — we only need each worker to produce one HF commit at a
+    distinct path that exercises the manifest merge."""
+    import tempfile
+
+    from mat_vis_baker.hf_bake import bake_one
+
+    # Bake at the real "1k" tier upstream so the fetch succeeds, then
+    # rewrite the release_tag's per-source slug so each worker has its
+    # own (source, tier) path. The simplest way: pass the slug as the
+    # tier name and let the per-file bake commit to <source>/<slug>/.
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            return bake_one(
+                source=source,
+                tier=tier if tier in {"1k", "2k", "4k", "scalar"} else "1k",
+                release_tag=release_tag,
+                work_dir=Path(td),
+                repo_id=REPO,
+                hf_token=token,
+                limit=1,
+                batch_size=1,
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"{type(e).__name__}: {e}", "ok": 0, "failed": 1}
