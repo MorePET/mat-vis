@@ -10,6 +10,8 @@ Usage:
     dagger call smoke-baker          # verify baker container (#135)
     dagger call bake                 # per-file hf-bake → atomic HF commit (#136 / ADR-0012)
     dagger call smoke-bake           # dry-run bake against gerchowl/mat-vis-tst (#136)
+    dagger call derive               # per-file hf-derive (resize) (#204)
+    dagger call derive-ktx2          # per-file hf-derive-ktx2 (#204)
     dagger call integration-test     # local end-to-end per-file bake + verify
     dagger call probe-sources        # verify upstream API connectivity
     dagger call test-all             # lint + test + smoke + probe
@@ -463,13 +465,14 @@ class MatVisCi:
         self,
         context: dagger.Directory,
         hf_token: dagger.Secret | None = None,
+        with_ktx2: bool = False,
     ) -> dagger.Container:
-        """Baker container for hf-bake (#135).
+        """Baker container for hf-bake / hf-derive / hf-derive-ktx2 (#135 / #204).
 
         Parity target: Linux x86_64, Python 3.12, ``uv sync --all-extras``
-        on the repo. The legacy KTX2 tooling install was retired with
-        the tar derive pipeline in #189; per-file KTX2 derives will be
-        re-introduced under their own future issue.
+        on the repo. With ``with_ktx2=True``, KTX-Software 4.4.0 ``.deb``
+        is installed so ``toktx`` is on ``PATH`` — needed for the
+        ``hf-derive-ktx2`` leg of the per-file derive pipeline (#204).
 
         Env:
           - ``PYTHONUNBUFFERED=1`` — heartbeat / OTLP logs flush live
@@ -497,6 +500,23 @@ class MatVisCi:
                 ]
             )
         )
+
+        if with_ktx2:
+            # Khronos KTX-Software 4.4.0 .deb — same URL the legacy
+            # derive.yml used so toktx output is byte-identical across
+            # the v0.5/v0.6 cutover.
+            ctr = ctr.with_exec(
+                [
+                    "sh",
+                    "-c",
+                    "apt-get install -y -qq libgomp1 && "
+                    "curl -fsSL -o /tmp/ktx.deb "
+                    "https://github.com/KhronosGroup/KTX-Software/releases/download/"
+                    "v4.4.0/KTX-Software-4.4.0-Linux-x86_64.deb && "
+                    "dpkg -i /tmp/ktx.deb && rm /tmp/ktx.deb && "
+                    "toktx --version",
+                ]
+            )
 
         ctr = (
             ctr.with_env_variable("PYTHONUNBUFFERED", "1")
@@ -680,6 +700,131 @@ class MatVisCi:
         top = await ctr.with_exec(["uv", "run", "mat-vis-baker", "--help"]).stdout()
         bake = await ctr.with_exec(["uv", "run", "mat-vis-baker", "hf-bake", "--help"]).stdout()
         return f"=== mat-vis-baker --help ===\n{top}\n=== mat-vis-baker hf-bake --help ===\n{bake}"
+
+    # ── per-file derive pipeline (#204) ─────────────────────────────
+
+    @function
+    async def derive(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        source: Annotated[str, Doc("Upstream (ambientcg/polyhaven/gpuopen)")],
+        target_tier: Annotated[str, Doc("Smaller tier to derive, e.g. 1k")],
+        source_tier: Annotated[str, Doc("Existing per-file tier to resize from, e.g. 4k")],
+        release_tag: Annotated[str, Doc("Calver release tag, e.g. v2026.05.0")],
+        hf_token: Annotated[dagger.Secret, Doc("HF API token for atomic commits")],
+        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis-tst",
+        allow_prod: Annotated[
+            bool, Doc("Opt-in flag required to target any non-*-tst repo")
+        ] = False,
+        limit: Annotated[int, Doc("Max materials (0 = no limit)")] = 0,
+        batch_size: Annotated[int, Doc("Materials per atomic commit batch")] = 50,
+        dry_run: Annotated[bool, Doc("Skip the HF push; build locally")] = False,
+    ) -> str:
+        """Per-file derive: resize an existing per-file tier into a smaller one (#204).
+
+        Wraps ``mat-vis-baker hf-derive`` in the slim baker container
+        (no KTX2 toolchain — ``with_ktx2=False``). Reads source channels
+        via plain HTTPS GET, runs PIL LANCZOS resize, writes per-file
+        PNGs back to HF. Updates ``<source>.json`` and writes a
+        ``.tier_complete`` sentinel as the final commit.
+
+        Safety: defaults to ``gerchowl/mat-vis-tst``; any other target
+        requires ``--allow-prod=true``.
+        """
+        self._guard_prod_target(repo_id, allow_prod)
+        ctr = self._baker_container(context, with_ktx2=False, hf_token=hf_token)
+        cmd = [
+            "uv",
+            "run",
+            "mat-vis-baker",
+            "hf-derive",
+            "--source",
+            source,
+            "--source-tier",
+            source_tier,
+            "--target-tier",
+            target_tier,
+            "--release-tag",
+            release_tag,
+            "--work-dir",
+            "/tmp/derive",
+            "--repo-id",
+            repo_id,
+            "--hf-token",
+            "env:HF_TOKEN",
+            "--batch-size",
+            str(batch_size),
+        ]
+        if limit > 0:
+            cmd += ["--limit", str(limit)]
+        if dry_run:
+            cmd.append("--dry-run")
+        if allow_prod:
+            cmd.append("--allow-prod")
+        return await ctr.with_exec(cmd).stdout()
+
+    @function
+    async def derive_ktx2(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        source: Annotated[str, Doc("Upstream (ambientcg/polyhaven/gpuopen)")],
+        source_tier: Annotated[str, Doc("Existing per-file PNG tier to transcode from")],
+        release_tag: Annotated[str, Doc("Calver release tag")],
+        hf_token: Annotated[dagger.Secret, Doc("HF API token for atomic commits")],
+        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis-tst",
+        allow_prod: Annotated[
+            bool, Doc("Opt-in flag required to target any non-*-tst repo")
+        ] = False,
+        target_tier: Annotated[str, Doc("KTX2 target tier label; empty = ktx2-<source-tier>")] = "",
+        limit: Annotated[int, Doc("Max materials (0 = no limit)")] = 0,
+        batch_size: Annotated[int, Doc("Materials per atomic commit batch")] = 50,
+        dry_run: Annotated[bool, Doc("Skip the HF push; build locally")] = False,
+    ) -> str:
+        """Per-file derive: transcode an existing per-file PNG tier to KTX2 (#204).
+
+        Wraps ``mat-vis-baker hf-derive-ktx2`` in the baker container
+        with toktx installed (``with_ktx2=True``). Reads source PNG
+        channels via plain GET, runs ``toktx --encode uastc --genmipmap
+        --t2``, writes per-file ``.ktx2`` back to HF.
+
+        ``target_tier=""`` is the "use the CLI default" sentinel —
+        Dagger can't express "omit this arg", so we only pass
+        ``--target-tier`` when the operator supplied a non-empty value.
+
+        Safety: defaults to ``gerchowl/mat-vis-tst``; any other target
+        requires ``--allow-prod=true``.
+        """
+        self._guard_prod_target(repo_id, allow_prod)
+        ctr = self._baker_container(context, with_ktx2=True, hf_token=hf_token)
+        cmd = [
+            "uv",
+            "run",
+            "mat-vis-baker",
+            "hf-derive-ktx2",
+            "--source",
+            source,
+            "--source-tier",
+            source_tier,
+            "--release-tag",
+            release_tag,
+            "--work-dir",
+            "/tmp/derive",
+            "--repo-id",
+            repo_id,
+            "--hf-token",
+            "env:HF_TOKEN",
+            "--batch-size",
+            str(batch_size),
+        ]
+        if target_tier:
+            cmd += ["--target-tier", target_tier]
+        if limit > 0:
+            cmd += ["--limit", str(limit)]
+        if dry_run:
+            cmd.append("--dry-run")
+        if allow_prod:
+            cmd.append("--allow-prod")
+        return await ctr.with_exec(cmd).stdout()
 
     @function
     async def probe_sources(

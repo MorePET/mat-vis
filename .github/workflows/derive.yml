@@ -1,0 +1,175 @@
+---
+# Per-file derive workflow (#204) — resize a smaller PNG tier or
+# KTX2-transcode an existing per-file tier on HF.
+#
+# Shape:
+#   setup   — derives target-tier label + tags the matrix list
+#   derive  — matrix[source] runs the Dagger `derive` or `derive-ktx2`
+#             function (which wraps mat-vis-baker hf-derive{,-ktx2}).
+#             Each material batch is an atomic HF commit; a sentinel
+#             `.tier_complete` file lands as the final commit per
+#             (source, target_tier) so clients can probe atomicity
+#             with one HEAD request.
+#   report  — notify-on-failure if any earlier job failed
+#
+# Why no merge step (vs. legacy v0.5.x derive.yml): the per-file
+# substrate (ADR-0012) makes each batch commit a durable checkpoint —
+# resume comes from pre-flight HEAD probes, not from reassembling
+# shard tars. The shard / merge plumbing the legacy workflow needed
+# was deleted in #189 along with the tar code.
+
+name: Derive
+
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: 'Derivation kind'
+        required: true
+        default: 'resize'
+        type: choice
+        options:
+          - resize
+          - ktx2
+      source:
+        description: 'Source (upstream)'
+        required: true
+        default: 'polyhaven'
+        type: choice
+        options:
+          - ambientcg
+          - polyhaven
+          - gpuopen
+      source-tier:
+        description: 'Source tier to derive from (existing per-file tier on HF)'
+        required: true
+        default: '4k'
+        type: choice
+        options:
+          - 128
+          - 256
+          - 512
+          - 1k
+          - 2k
+          - 4k
+          - 8k
+      target-tier:
+        description: 'Target tier (resize only; e.g. 1k). Ignored for ktx2.'
+        required: false
+        default: '1k'
+        type: string
+      release-tag:
+        description: 'Calver data release tag (e.g. v2026.05.0)'
+        required: true
+        default: 'v2026.05.0'
+        type: string
+      repo-id:
+        description: 'HF dataset repo'
+        required: false
+        default: 'gerchowl/mat-vis-tst'
+        type: string
+      allow-prod:
+        description: 'Required to target any non-*-tst HF repo (e.g. gerchowl/mat-vis)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  issues: write          # needed by notify-on-failure composite action
+
+# Serialise dispatches on (release, source, source-tier, kind, target).
+# Two parallel dispatches against the same target tier would race on
+# the .tier_complete sentinel commit — order is observable to clients.
+concurrency:
+  group: >-
+    derive-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ inputs.source }}
+    -${{ inputs.source-tier }}-${{ inputs.kind }}
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    name: setup (target-tier)
+    runs-on: ubuntu-latest
+    outputs:
+      target-tier: ${{ steps.plan.outputs.target-tier }}
+    steps:
+      - id: plan
+        run: |
+          set -euo pipefail
+          kind="${{ inputs.kind }}"
+
+          if [ "$kind" = "resize" ]; then
+            tier="${{ inputs.target-tier }}"
+            if [ -z "$tier" ]; then
+              echo "::error::resize requires target-tier"
+              exit 1
+            fi
+          else
+            tier="ktx2-${{ inputs.source-tier }}"
+          fi
+
+          {
+            echo "target-tier=$tier"
+          } >>"$GITHUB_OUTPUT"
+          echo "Plan: kind=$kind target-tier=$tier"
+
+  derive:
+    needs: setup
+    name: >-
+      ${{ inputs.kind }}
+      ${{ inputs.source }}
+      ${{ inputs.source-tier }}
+      → ${{ needs.setup.outputs.target-tier }}
+    runs-on: ubuntu-latest
+    # Per-file derive against a full source × tier (~2k materials × 7
+    # channels) tops out around 1-2 h on average; 350 min keeps headroom.
+    timeout-minutes: 350
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dagger shell-safety lint (#61)
+        run: python3 scripts/check-dagger-shell-safety.py
+
+      - name: Derive (per-file substrate, ADR-0012)
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          verb: call
+          module: .dagger
+          args: >-
+            ${{ inputs.kind == 'resize' && 'derive' || 'derive-ktx2' }}
+            --context=.
+            --source=${{ inputs.source }}
+            ${{ inputs.kind == 'resize' && format('--target-tier={0}', inputs.target-tier) || '' }}
+            --source-tier=${{ inputs.source-tier }}
+            --release-tag=${{ inputs.release-tag }}
+            --repo-id=${{ inputs.repo-id }}
+            --hf-token=env:HF_TOKEN
+            --allow-prod=${{ inputs.allow-prod }}
+
+  report:
+    needs: [setup, derive]
+    if: >-
+      always() &&
+      (needs.setup.result == 'failure' ||
+       needs.derive.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Notify on failure
+        uses: ./.github/actions/notify-on-failure
+        with:
+          label-prefix: "[derive-failed]"
+          workflow-name: "derive"
+          target: >-
+            ${{ inputs.kind }} ${{ inputs.source }}/${{ inputs.source-tier }}
+            → ${{ needs.setup.outputs.target-tier }}
+            @ ${{ inputs.release-tag }}
+          context: >-
+            Per-file derive (ADR-0012). Each batch commit is atomic on
+            HF, so succeeded materials are already on the substrate.
+            Recovery: re-dispatch the same workflow_dispatch — the
+            pre-flight HEAD probe skips already-derived materials, so
+            re-runs are bytes-free for everything that succeeded.
