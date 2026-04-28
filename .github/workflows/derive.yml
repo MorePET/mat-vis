@@ -73,6 +73,16 @@ on:  # yamllint disable-line rule:truthy
         required: false
         default: false
         type: boolean
+      batch-size:
+        description: 'Materials per atomic commit (count ceiling, #228). 300 is a safe overshoot — bytes is the binding constraint at typical content.'
+        required: false
+        default: '300'
+        type: string
+      batch-max-bytes:
+        description: 'Bytes per atomic commit (#228). 734003200 = 700 MiB; HF caps at 1 GiB/commit.'
+        required: false
+        default: '734003200'
+        type: string
 
 permissions:
   contents: read
@@ -157,6 +167,8 @@ jobs:
             --repo-id=${{ inputs.repo-id }}
             --hf-token=env:HF_TOKEN
             --allow-prod=${{ inputs.allow-prod }}
+            --batch-size=${{ inputs.batch-size }}
+            --batch-max-bytes=${{ inputs.batch-max-bytes }}
 
   report:
     needs: [setup, derive]

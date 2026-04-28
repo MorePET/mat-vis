@@ -46,9 +46,14 @@ on:  # yamllint disable-line rule:truthy
         default: '0'
         type: string
       batch-size:
-        description: 'Materials per streaming batch'
+        description: 'Materials per atomic commit (count ceiling). #228: bytes is the binding constraint at typical content; 300 is a safe overshoot.'
         required: false
-        default: '50'
+        default: '300'
+        type: string
+      batch-max-bytes:
+        description: 'Bytes per atomic commit (#228). 734003200 = 700 MiB; HF caps at 1 GiB/commit, leaving headroom for catalog + manifest + sentinel.'
+        required: false
+        default: '734003200'
         type: string
       release-tag:
         description: 'Calver data release tag (e.g. v2026.04.1)'
@@ -134,6 +139,7 @@ jobs:
             --limit=${{ inputs.limit }}
             --offset=${{ inputs.offset }}
             --batch-size=${{ inputs.batch-size }}
+            --batch-max-bytes=${{ inputs.batch-max-bytes }}
             ${{ inputs.dry-run == true && '--dry-run=true' || '' }}
 
       # ADR-0011 / mat-vis#152 phase-c: lock the Layer-2 upstream mirror

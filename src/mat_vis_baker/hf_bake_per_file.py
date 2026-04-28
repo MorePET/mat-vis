@@ -51,7 +51,16 @@ from mat_vis_baker.source_tiers import is_supported, unsupported_tier_message
 
 log = logging.getLogger("mat-vis-baker.hf_bake_per_file")
 
-DEFAULT_BATCH_SIZE = 50
+# #228: bytes-aware batching. HF caps per-commit at 1 GiB and 25k files,
+# rate-limits at 128 commits/hr/repo. Old default of 50 materials ran
+# 4-70× under the per-commit caps, burning the rate budget on
+# mostly-empty commits. Now: flush on whichever bound trips first
+# (count >= batch_size OR pending_bytes >= batch_max_bytes), so commits
+# self-tune to per-commit headroom and we use ~5× fewer commits. The
+# count default rises to 300 — at typical 1k content (~1.5 MiB/material)
+# 300 materials = ~450 MiB, comfortably under the 700 MiB byte cap.
+DEFAULT_BATCH_SIZE = 300
+DEFAULT_BATCH_MAX_BYTES = 700 * 1024 * 1024  # 700 MiB
 
 
 def _guard_prod_target(repo_id: str, allow_prod: bool) -> None:
@@ -231,6 +240,7 @@ def bake_one_per_file(
     limit: int | None = None,
     offset: int = 0,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
     dry_run: bool = False,
 ) -> dict:
     """Bake one (source, tier) into per-file HF commits.
@@ -239,12 +249,14 @@ def bake_one_per_file(
     the last commit SHA on success. Pre-flight tree scan populates
     ``skipped``; actual bake work populates ``ok`` + ``failed``.
 
-    Caller responsibility: batch_size and the overall wall-clock
-    should stay within HF's commit-rate budget (~10-20/hr/user).
-    Default batch_size=50 across ~2000 materials = 40 commits =
-    over-budget for one user in one hour. Use shards if needed, or
-    increase batch_size (trades commit count for per-commit wall
-    time — a 10k-file commit takes ~90 s by empirical probe)."""
+    Batching: flushes on first-of-N-or-bytes — whichever bound trips
+    first. ``batch_size`` (default 300) caps materials per commit;
+    ``batch_max_bytes`` (default 700 MiB) caps payload size,
+    well under HF's 1 GiB hard cap and leaves headroom for the
+    catalog + manifest + sentinel commits on the same hour budget.
+    The rate-cap binding constraint flips from count to bytes for
+    typical 1k content (~1.5 MiB/material), giving ~5× fewer commits
+    per source vs the old count-only batching (#228)."""
     if not is_supported(source, tier):
         raise ValueError(unsupported_tier_message(source, tier))
     _guard_prod_target(repo_id, allow_prod)
@@ -294,12 +306,14 @@ def bake_one_per_file(
     last_commit_sha = ""
 
     log.info(
-        "=== hf-bake-per-file %s %s → %s@%s (batch_size=%d, already_committed=%d) ===",
+        "=== hf-bake-per-file %s %s → %s@%s "
+        "(batch_size=%d, batch_max_bytes=%d, already_committed=%d) ===",
         source,
         tier,
         repo_id,
         release_tag,
         batch_size,
+        batch_max_bytes,
         len(already),
     )
 
@@ -327,9 +341,14 @@ def bake_one_per_file(
         kind="bake",
     )
 
-    pending_batch: list[MaterialRecord] = []
+    # #228: pending_batch holds (rec, ops) — ops are computed at append
+    # time so we can accumulate pending_bytes against batch_max_bytes
+    # without a second disk read at flush. Caching ops also avoids the
+    # `_build_commit_ops_for_record` recomputation that the old flush did.
+    pending_batch: list[tuple[MaterialRecord, list]] = []
+    pending_bytes = 0
 
-    def _flush_batch(batch: list[MaterialRecord]) -> str:
+    def _flush_batch(batch: list[tuple[MaterialRecord, list]]) -> str:
         """Upload every baked record's files as one atomic commit, then
         free the local texture bytes for that batch. Keeping the wipe
         coupled to the flush bounds peak disk at one batch — a crash
@@ -337,8 +356,8 @@ def bake_one_per_file(
         re-upload free on the next run."""
         nonlocal last_commit_sha, n_ok
         ops = []
-        for rec in batch:
-            ops.extend(_build_commit_ops_for_record(rec, source, tier))
+        for _rec, rec_ops in batch:
+            ops.extend(rec_ops)
         if not ops:
             return last_commit_sha
         # Account bytes by reading the same in-memory payload the
@@ -380,7 +399,7 @@ def bake_one_per_file(
         progress.record_batch(materials=len(batch), bytes_added=batch_bytes)
         progress.emit_progress()
         # Free per-rec files now the commit is durable.
-        for rec in batch:
+        for rec, _rec_ops in batch:
             for p in list(rec.texture_paths.values()):
                 try:
                     Path(p).unlink(missing_ok=True)
@@ -412,16 +431,23 @@ def bake_one_per_file(
                     hash_textures(rec)
 
         # Commit: add every successfully-baked record to the pending batch;
-        # when it reaches batch_size, flush.
+        # flush on whichever bound trips first — count >= batch_size
+        # OR pending_bytes >= batch_max_bytes (#228).
         for rec in to_bake:
             if rec.status != "ok":
                 n_failed += 1
                 continue
-            pending_batch.append(rec)
+            rec_ops = _build_commit_ops_for_record(rec, source, tier)
+            rec_bytes = sum(
+                len(op.path_or_fileobj) for op in rec_ops if isinstance(op.path_or_fileobj, bytes)
+            )
+            pending_batch.append((rec, rec_ops))
+            pending_bytes += rec_bytes
             n_ok += 1
-            if len(pending_batch) >= batch_size:
+            if len(pending_batch) >= batch_size or pending_bytes >= batch_max_bytes:
                 last_commit_sha = _flush_batch(pending_batch)
                 pending_batch.clear()
+                pending_bytes = 0
                 # Local cleanup: textures / baked dirs get wiped every
                 # cursor advance below, bounding peak disk.
 
@@ -436,6 +462,7 @@ def bake_one_per_file(
     if pending_batch:
         last_commit_sha = _flush_batch(pending_batch)
         pending_batch.clear()
+        pending_bytes = 0
 
     if n_ok == 0 and n_skipped_preflight == 0:
         return {"error": "no materials", "ok": 0, "failed": n_failed}

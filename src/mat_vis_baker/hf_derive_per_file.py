@@ -64,7 +64,13 @@ log = logging.getLogger("mat-vis-baker.hf_derive_per_file")
 # accept the canonical override so test/staging fixtures can stub it.
 HF_RESOLVE_BASE = "https://huggingface.co/datasets"
 
-DEFAULT_BATCH_SIZE = 50
+# #228: count default raised to 300; bytes ceiling becomes the real
+# binding constraint at typical 1k content (~1.5 MiB/material × 7
+# channels). Default batch_max_bytes 700 MiB stays well under HF's
+# 1 GiB per-commit cap and keeps headroom for catalog + manifest +
+# sentinel commits on the 128/hr/repo budget.
+DEFAULT_BATCH_SIZE = 300
+DEFAULT_BATCH_MAX_BYTES = 700 * 1024 * 1024  # 700 MiB
 
 # PNG / KTX2 magic — matches ``hf_bake_per_file._channel_ext``. Used by
 # the magic-byte verification in :func:`_verify_png` / :func:`_verify_ktx2`.
@@ -395,25 +401,31 @@ def _derive_driver(
     allow_prod: bool,
     limit: int | None,
     batch_size: int,
+    batch_max_bytes: int,
     on_progress: Callable[[dict], None] | None,
 ) -> dict:
     """Shared driver behind :func:`derive_smaller_tier` and
     :func:`derive_ktx2_tier`. Single code path so the sentinel-last,
     catalog-update, and batching invariants only need to live in one
-    place."""
+    place.
+
+    Batching: first-of-N-or-bytes — flush on whichever bound trips
+    first (count >= ``batch_size`` OR pending payload bytes >=
+    ``batch_max_bytes``). #228."""
     _guard_prod_target(repo_id, allow_prod)
     work_dir.mkdir(parents=True, exist_ok=True)
     api = HfApi(token=hf_token)
 
     t0 = time.monotonic()
     log.info(
-        "=== %s %s/%s → %s @ %s (batch_size=%d, dry_run=%s) ===",
+        "=== %s %s/%s → %s @ %s (batch_size=%d, batch_max_bytes=%d, dry_run=%s) ===",
         label,
         source,
         source_tier,
         target_tier,
         release_tag,
         batch_size,
+        batch_max_bytes,
         dry_run,
     )
 
@@ -454,6 +466,8 @@ def _derive_driver(
 
     pending_ops: list[CommitOperationAdd] = []
     pending_mids: list[str] = []
+    # #228: bytes accumulator drives the bytes-aware flush bound.
+    pending_bytes = 0
 
     def _flush_batch() -> str:
         nonlocal last_commit_sha
@@ -551,6 +565,11 @@ def _derive_driver(
         derived_ids.add(mid)
         pending_ops.extend(ops)
         pending_mids.append(mid)
+        # #228: byte-account at append-time so the flush check below can
+        # short-circuit on bytes ceiling without re-reading payloads.
+        pending_bytes += sum(
+            len(op.path_or_fileobj) for op in ops if isinstance(op.path_or_fileobj, bytes)
+        )
         if on_progress is not None:
             on_progress(
                 {
@@ -562,16 +581,20 @@ def _derive_driver(
                 }
             )
 
-        if len(pending_mids) >= batch_size:
+        # #228: first-of-N-or-bytes — count >= batch_size OR pending
+        # bytes >= batch_max_bytes triggers a flush.
+        if len(pending_mids) >= batch_size or pending_bytes >= batch_max_bytes:
             last_commit_sha = _flush_batch()
             pending_ops.clear()
             pending_mids.clear()
+            pending_bytes = 0
 
     # Final partial batch.
     if pending_mids:
         last_commit_sha = _flush_batch()
         pending_ops.clear()
         pending_mids.clear()
+        pending_bytes = 0
 
     if n_ok == 0 and n_skipped == 0:
         return {
@@ -722,6 +745,7 @@ def derive_smaller_tier(
     allow_prod: bool = False,
     limit: int | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
     on_progress: Callable[[dict], None] | None = None,
 ) -> dict:
     """Resize every channel from ``source_tier`` (PNG) into ``target_tier``
@@ -770,6 +794,7 @@ def derive_smaller_tier(
         allow_prod=allow_prod,
         limit=limit,
         batch_size=batch_size,
+        batch_max_bytes=batch_max_bytes,
         on_progress=on_progress,
     )
 
@@ -787,6 +812,7 @@ def derive_ktx2_tier(
     allow_prod: bool = False,
     limit: int | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
     on_progress: Callable[[dict], None] | None = None,
 ) -> dict:
     """Transcode every channel from ``source_tier`` (PNG) into
@@ -824,5 +850,6 @@ def derive_ktx2_tier(
         allow_prod=allow_prod,
         limit=limit,
         batch_size=batch_size,
+        batch_max_bytes=batch_max_bytes,
         on_progress=on_progress,
     )

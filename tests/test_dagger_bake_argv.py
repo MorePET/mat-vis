@@ -55,9 +55,31 @@ class TestBakeArgvContract:
         assert "--release-tag" in argv and "v0.0.0-test" in argv
         assert "--repo-id" in argv and "gerchowl/mat-vis-tst" in argv
         assert "--batch-size" in argv and "50" in argv
+        # #228: --batch-max-bytes always emitted; default tracks the
+        # 700 MiB ceiling.
+        assert "--batch-max-bytes" in argv
+        idx = argv.index("--batch-max-bytes")
+        assert argv[idx + 1] == str(700 * 1024 * 1024)
         # No optional flags fired.
         for flag in ("--limit", "--dry-run", "--allow-prod"):
             assert flag not in argv, f"unexpected {flag} in default argv"
+
+    def test_batch_max_bytes_propagates(self, bake_argv):
+        """Custom byte ceiling makes it through to the CLI argv (#228)."""
+        argv = bake_argv(
+            source="polyhaven",
+            tier="1k",
+            release_tag="v0.0.0-test",
+            repo_id="gerchowl/mat-vis-tst",
+            offset=0,
+            batch_size=300,
+            batch_max_bytes=512 * 1024 * 1024,
+            limit=0,
+            dry_run=False,
+            allow_prod=False,
+        )
+        idx = argv.index("--batch-max-bytes")
+        assert argv[idx + 1] == str(512 * 1024 * 1024)
 
     def test_limit_emits_when_positive(self, bake_argv):
         argv = bake_argv(

@@ -35,7 +35,10 @@ from mat_vis_baker.index_builder import build_index
 log = logging.getLogger("mat-vis-baker.hf_bake")
 
 DEFAULT_REPO_ID = "gerchowl/mat-vis"
-DEFAULT_BATCH_SIZE = 50
+# #228: count default raised to 300 to mirror per-file driver. Bytes
+# becomes the binding constraint for typical-sized content.
+DEFAULT_BATCH_SIZE = 300
+DEFAULT_BATCH_MAX_BYTES = 700 * 1024 * 1024  # 700 MiB
 
 
 def _get_fetcher(source: str):
@@ -100,6 +103,7 @@ def bake_one(
     limit: int | None = None,
     offset: int = 0,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
     hf_token: str | None = None,
     dry_run: bool = False,
     allow_prod: bool = False,
@@ -156,5 +160,6 @@ def bake_one(
         limit=limit,
         offset=offset,
         batch_size=batch_size,
+        batch_max_bytes=batch_max_bytes,
         dry_run=dry_run,
     )
