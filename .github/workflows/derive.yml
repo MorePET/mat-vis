@@ -3,7 +3,7 @@
 # KTX2-transcode an existing per-file tier on HF.
 #
 # Shape:
-#   setup   — derives target-tier label + tags the matrix list
+#   plan    — emits matrix sources (#233) + derives target-tier label
 #   derive  — matrix[source] runs the Dagger `derive` or `derive-ktx2`
 #             function (which wraps mat-vis-baker hf-derive{,-ktx2}).
 #             Each material batch is an atomic HF commit; a sentinel
@@ -17,6 +17,13 @@
 # resume comes from pre-flight HEAD probes, not from reassembling
 # shard tars. The shard / merge plumbing the legacy workflow needed
 # was deleted in #189 along with the tar code.
+#
+# #233: matrix workflow_dispatch. A single dispatch can target N
+# sources (`-f sources=ambientcg,polyhaven,gpuopen` or `-f sources=all`)
+# and they run sequentially under a job-level concurrency group, so
+# the repo-budget concurrency from #225/#227 no longer drops middle
+# dispatches when N>2 are queued in quick succession. `physicallybased`
+# is bake-only (scalar tier) and is never part of a derive matrix.
 
 name: Derive
 
@@ -31,15 +38,24 @@ on:  # yamllint disable-line rule:truthy
         options:
           - resize
           - ktx2
+      sources:
+        description: >-
+          Comma-separated sources, or "all". "all" expands to
+          ambientcg,polyhaven,gpuopen. physicallybased is bake-only
+          (scalar tier) and is never expanded for derive.
+        required: false
+        default: 'all'
+        type: string
       source:
-        description: 'Source (upstream)'
-        required: true
-        default: 'polyhaven'
-        type: choice
-        options:
-          - ambientcg
-          - polyhaven
-          - gpuopen
+        description: >-
+          DEPRECATED (#233) — single-source legacy input; use `sources`.
+          When `sources` is left at its default and `source` is set,
+          `source` is treated as a 1-element matrix. Accepts the same
+          values as the old choice list: ambientcg|polyhaven|gpuopen.
+          Remove after one milestone.
+        required: false
+        default: ''
+        type: string
       source-tier:
         description: 'Source tier to derive from (existing per-file tier on HF)'
         required: true
@@ -88,32 +104,51 @@ permissions:
   contents: read
   issues: write          # needed by notify-on-failure composite action
 
-# #225: serialise *every* dispatch against a given HF repo. The matrix
-# of phase-3 bakes + phase-4 derives in the same hour tripped HF's
-# 128-commits/hr repo-wide cap, killing the gpuopen derive at its
-# final manifest commit. Repo-scoped concurrency keeps one writer at
-# a time, well under the budget.
-#
-# Trade-off: derives that previously ran in parallel for different
-# (source-tier, kind) combos now serialize. Wallclock grows roughly
-# linearly with the number of derive flavours; given derives are
-# already cheap (~1-2h per source × tier), the reliability win
-# dominates. Narrower group noted below as a future option once
-# telemetry shows the budget is no longer biting.
-concurrency:
-  group: derive-${{ inputs.repo-id }}-budget
-  cancel-in-progress: false
-  # Future option (when 429 backoff makes per-target serialization safe):
-  # group: derive-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ inputs.source }}-${{ inputs.source-tier }}-${{ inputs.kind }}
-
 jobs:
-  setup:
-    name: setup (target-tier)
+  plan:
+    name: plan (matrix expansion + target-tier)
     runs-on: ubuntu-latest
     outputs:
-      target-tier: ${{ steps.plan.outputs.target-tier }}
+      sources: ${{ steps.expand.outputs.sources }}
+      target-tier: ${{ steps.tier.outputs.target-tier }}
     steps:
-      - id: plan
+      - id: expand
+        env:
+          SOURCES_INPUT: ${{ inputs.sources }}
+          SOURCE_LEGACY: ${{ inputs.source }}
+        run: |
+          set -euo pipefail
+          # #233: resolve effective sources list.
+          #   - `sources` wins when both are set.
+          #   - bare legacy `source` (with default `sources=all`) is
+          #     promoted to a 1-element matrix for back-compat.
+          #   - "all" expands to the textured trio. physicallybased is
+          #     bake-scalar-only and is never expanded for derive.
+          sources="$SOURCES_INPUT"
+          if [ -n "$SOURCE_LEGACY" ] && [ "$sources" = "all" ]; then
+            sources="$SOURCE_LEGACY"
+          fi
+
+          python3 - "$sources" <<'PY' >>"$GITHUB_OUTPUT"
+          import json, sys
+          raw = sys.argv[1]
+          if raw == "all":
+              expanded = ["ambientcg", "polyhaven", "gpuopen"]
+          else:
+              expanded = [s.strip() for s in raw.split(",") if s.strip()]
+          if not expanded:
+              raise SystemExit("error: empty sources list after expansion")
+          for s in expanded:
+              if s == "physicallybased":
+                  raise SystemExit(
+                      "error: physicallybased is bake-only (scalar tier); "
+                      "remove it from `sources` for derive dispatches"
+                  )
+          print(f"sources={json.dumps(expanded)}")
+          PY
+          echo "Plan: sources=$(tail -n1 "$GITHUB_OUTPUT")"
+
+      - id: tier
         run: |
           set -euo pipefail
           kind="${{ inputs.kind }}"
@@ -134,16 +169,39 @@ jobs:
           echo "Plan: kind=$kind target-tier=$tier"
 
   derive:
-    needs: setup
+    needs: plan
     name: >-
       ${{ inputs.kind }}
-      ${{ inputs.source }}
+      ${{ matrix.source }}
       ${{ inputs.source-tier }}
-      → ${{ needs.setup.outputs.target-tier }}
+      → ${{ needs.plan.outputs.target-tier }}
     runs-on: ubuntu-latest
     # Per-file derive against a full source × tier (~2k materials × 7
     # channels) tops out around 1-2 h on average; 350 min keeps headroom.
     timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        source: ${{ fromJson(needs.plan.outputs.sources) }}
+    # #225: serialise *every* dispatch against a given HF repo. The matrix
+    # of phase-3 bakes + phase-4 derives in the same hour tripped HF's
+    # 128-commits/hr repo-wide cap, killing the gpuopen derive at its
+    # final manifest commit. Repo-scoped concurrency keeps one writer at
+    # a time, well under the budget.
+    #
+    # #233: moved from workflow level to job level so a single dispatch
+    # can fan out N matrix jobs that all queue under the same group
+    # without GH's "one pending per group" rule cancelling siblings.
+    # Trade-off remains: derives that previously ran in parallel for
+    # different (source-tier, kind) combos now serialize. Wallclock
+    # grows roughly linearly with the number of derive flavours; given
+    # derives are already cheap (~1-2h per source × tier), the
+    # reliability win dominates.
+    concurrency:
+      group: derive-${{ inputs.repo-id }}-budget
+      cancel-in-progress: false
+      # Future option (when 429 backoff makes per-target serialization safe):
+      # group: derive-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ matrix.source }}-${{ inputs.source-tier }}-${{ inputs.kind }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
@@ -160,7 +218,7 @@ jobs:
           args: >-
             ${{ inputs.kind == 'resize' && 'derive' || 'derive-ktx2' }}
             --context=.
-            --source=${{ inputs.source }}
+            --source=${{ matrix.source }}
             ${{ inputs.kind == 'resize' && format('--target-tier={0}', inputs.target-tier) || '' }}
             --source-tier=${{ inputs.source-tier }}
             --release-tag=${{ inputs.release-tag }}
@@ -171,10 +229,10 @@ jobs:
             --batch-max-bytes=${{ inputs.batch-max-bytes }}
 
   report:
-    needs: [setup, derive]
+    needs: [plan, derive]
     if: >-
       always() &&
-      (needs.setup.result == 'failure' ||
+      (needs.plan.result == 'failure' ||
        needs.derive.result == 'failure')
     runs-on: ubuntu-latest
     steps:
@@ -185,8 +243,8 @@ jobs:
           label-prefix: "[derive-failed]"
           workflow-name: "derive"
           target: >-
-            ${{ inputs.kind }} ${{ inputs.source }}/${{ inputs.source-tier }}
-            → ${{ needs.setup.outputs.target-tier }}
+            ${{ inputs.kind }} ${{ inputs.sources }}/${{ inputs.source-tier }}
+            → ${{ needs.plan.outputs.target-tier }}
             @ ${{ inputs.release-tag }}
           context: >-
             Per-file derive (ADR-0012). Each batch commit is atomic on
