@@ -94,6 +94,16 @@ permissions:
   contents: read
   issues: write          # needed by notify-on-failure composite action
 
+# #235 hotfix: workflow-level budget — serialise *every* dispatch
+# against a given HF repo. Previously this was at workflow level, then
+# moved to job level by #233 to support matrix fan-out. The job-level
+# group conflicted with matrix siblings (one-pending-per-group cancels
+# mid-matrix). Reverted here to workflow level; serialization within
+# one dispatch is now done by `matrix.max-parallel: 1` below.
+concurrency:
+  group: bake-${{ inputs.repo-id }}-budget
+  cancel-in-progress: false
+
 jobs:
   plan:
     name: plan (matrix expansion)
@@ -143,26 +153,16 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
+      # #235 hotfix: serialise the matrix siblings WITHIN one dispatch
+      # via matrix.max-parallel. Job-level concurrency-group serialization
+      # (added in #233) doesn't work for matrix siblings — GH's "one
+      # pending slot per group" rule cancels every sibling beyond the
+      # second within the same run, killing #214 phase-7 polyhaven on
+      # the first prod-derive matrix dispatch. matrix.max-parallel is
+      # the correct within-run primitive.
+      max-parallel: 1
       matrix:
         source: ${{ fromJson(needs.plan.outputs.sources) }}
-    # #225: serialise *every* dispatch against a given HF repo. Previously
-    # the group was (repo, release, source, tier), which let parallel
-    # matrix bakes (different sources / tiers) saturate HF's 128-commits/hr
-    # repo-wide cap and 429 the in-flight job at its final manifest commit.
-    # A single repo-scoped writer keeps us safely under that cap.
-    #
-    # #233: moved from workflow level to job level so a single dispatch
-    # can fan out N matrix jobs that all queue under the same group
-    # without GH's "one pending per group" rule cancelling siblings.
-    # Trade-off remains: bakes that previously fanned out across
-    # sources now serialize. The narrower (repo, release, source, tier)
-    # grouping remains the right model once the helper's 429 backoff
-    # (#225) absorbs the residual contention.
-    concurrency:
-      group: bake-${{ inputs.repo-id }}-budget
-      cancel-in-progress: false
-      # Future option (when 429 backoff makes per-tier serialization safe):
-      # group: bake-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ matrix.source }}-${{ inputs.tier }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:

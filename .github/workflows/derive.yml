@@ -104,6 +104,13 @@ permissions:
   contents: read
   issues: write          # needed by notify-on-failure composite action
 
+# #235 hotfix: workflow-level budget — see the matching block in
+# bake.yml. Job-level concurrency in #233 conflicted with matrix
+# siblings; reverted to workflow level + matrix.max-parallel: 1 below.
+concurrency:
+  group: derive-${{ inputs.repo-id }}-budget
+  cancel-in-progress: false
+
 jobs:
   plan:
     name: plan (matrix expansion + target-tier)
@@ -181,27 +188,11 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
+      # #235 hotfix: serialise the matrix siblings WITHIN one dispatch
+      # via matrix.max-parallel. See the matching comment in bake.yml.
+      max-parallel: 1
       matrix:
         source: ${{ fromJson(needs.plan.outputs.sources) }}
-    # #225: serialise *every* dispatch against a given HF repo. The matrix
-    # of phase-3 bakes + phase-4 derives in the same hour tripped HF's
-    # 128-commits/hr repo-wide cap, killing the gpuopen derive at its
-    # final manifest commit. Repo-scoped concurrency keeps one writer at
-    # a time, well under the budget.
-    #
-    # #233: moved from workflow level to job level so a single dispatch
-    # can fan out N matrix jobs that all queue under the same group
-    # without GH's "one pending per group" rule cancelling siblings.
-    # Trade-off remains: derives that previously ran in parallel for
-    # different (source-tier, kind) combos now serialize. Wallclock
-    # grows roughly linearly with the number of derive flavours; given
-    # derives are already cheap (~1-2h per source × tier), the
-    # reliability win dominates.
-    concurrency:
-      group: derive-${{ inputs.repo-id }}-budget
-      cancel-in-progress: false
-      # Future option (when 429 backoff makes per-target serialization safe):
-      # group: derive-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ matrix.source }}-${{ inputs.source-tier }}-${{ inputs.kind }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
