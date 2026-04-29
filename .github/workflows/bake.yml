@@ -5,22 +5,36 @@
 # mat-vis-baker hf-bake in a python:3.12-slim container. Container
 # bootstraps inside Dagger — no separate install steps here.
 # Reproduce locally with: dagger call bake --source=... --tier=1k ...
+#
+# #233: matrix workflow_dispatch. A single dispatch can target N
+# sources (`-f sources=ambientcg,polyhaven,gpuopen` or `-f sources=all`)
+# and they run sequentially under a job-level concurrency group, so the
+# repo-budget concurrency from #225/#227 no longer drops middle
+# dispatches when N>2 are queued in quick succession.
 
 name: Bake
 
 on:  # yamllint disable-line rule:truthy
   workflow_dispatch:
     inputs:
+      sources:
+        description: >-
+          Comma-separated sources, or "all". "all" expands to
+          ambientcg,polyhaven,gpuopen for textured tiers, and adds
+          physicallybased only when tier=scalar.
+        required: false
+        default: 'all'
+        type: string
       source:
-        description: 'Source to bake'
-        required: true
-        default: 'ambientcg'
-        type: choice
-        options:
-          - ambientcg
-          - polyhaven
-          - gpuopen
-          - physicallybased
+        description: >-
+          DEPRECATED (#233) — single-source legacy input; use `sources`.
+          When `sources` is left at its default and `source` is set,
+          `source` is treated as a 1-element matrix. Accepts the same
+          values as the old choice list: ambientcg|polyhaven|gpuopen|
+          physicallybased. Remove after one milestone.
+        required: false
+        default: ''
+        type: string
       tier:
         description: 'Resolution tier (scalar for physicallybased)'
         required: true
@@ -80,32 +94,75 @@ permissions:
   contents: read
   issues: write          # needed by notify-on-failure composite action
 
-# #225: serialise *every* dispatch against a given HF repo. Previously
-# the group was (repo, release, source, tier), which let parallel
-# matrix bakes (different sources / tiers) saturate HF's 128-commits/hr
-# repo-wide cap and 429 the in-flight job at its final manifest commit.
-# A single repo-scoped writer keeps us safely under that cap.
-#
-# Trade-off: slower wallclock — bakes that previously fanned out
-# across 3-4 sources now serialize. The reliability win is worth it
-# under a hard external rate limit. The narrower (repo, release,
-# source, tier) grouping remains the right model once the helper's
-# 429 backoff (#225) absorbs the residual contention; it's noted as a
-# future option below for when we have telemetry showing the budget
-# is no longer biting.
-concurrency:
-  group: bake-${{ inputs.repo-id }}-budget
-  cancel-in-progress: false
-  # Future option (when 429 backoff makes per-tier serialization safe):
-  # group: bake-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ inputs.source }}-${{ inputs.tier }}
-
 jobs:
+  plan:
+    name: plan (matrix expansion)
+    runs-on: ubuntu-latest
+    outputs:
+      sources: ${{ steps.expand.outputs.sources }}
+    steps:
+      - id: expand
+        env:
+          SOURCES_INPUT: ${{ inputs.sources }}
+          SOURCE_LEGACY: ${{ inputs.source }}
+          TIER: ${{ inputs.tier }}
+        run: |
+          set -euo pipefail
+          # #233: resolve effective sources list.
+          #   - `sources` wins when both are set.
+          #   - bare legacy `source` (with default `sources=all`) is
+          #     promoted to a 1-element matrix for back-compat.
+          #   - "all" expands to the textured trio; physicallybased is
+          #     scalar-only and joins the matrix only when tier=scalar.
+          sources="$SOURCES_INPUT"
+          if [ -n "$SOURCE_LEGACY" ] && [ "$sources" = "all" ]; then
+            sources="$SOURCE_LEGACY"
+          fi
+
+          python3 - "$sources" "$TIER" <<'PY' >>"$GITHUB_OUTPUT"
+          import json, sys
+          raw, tier = sys.argv[1], sys.argv[2]
+          if raw == "all":
+              expanded = ["ambientcg", "polyhaven", "gpuopen"]
+              if tier == "scalar":
+                  expanded.append("physicallybased")
+          else:
+              expanded = [s.strip() for s in raw.split(",") if s.strip()]
+          if not expanded:
+              raise SystemExit("error: empty sources list after expansion")
+          print(f"sources={json.dumps(expanded)}")
+          PY
+          echo "Plan: tier=$TIER sources=$(tail -n1 "$GITHUB_OUTPUT")"
+
   bake:
-    name: hf-bake ${{ inputs.source }} ${{ inputs.tier }}
+    needs: plan
+    name: hf-bake ${{ matrix.source }} ${{ inputs.tier }}
     runs-on: ubuntu-latest
     # GH-hosted runners hard-cap at 360 min; 350 leaves headroom for
     # the post-step log upload and any slack in the scheduler.
     timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        source: ${{ fromJson(needs.plan.outputs.sources) }}
+    # #225: serialise *every* dispatch against a given HF repo. Previously
+    # the group was (repo, release, source, tier), which let parallel
+    # matrix bakes (different sources / tiers) saturate HF's 128-commits/hr
+    # repo-wide cap and 429 the in-flight job at its final manifest commit.
+    # A single repo-scoped writer keeps us safely under that cap.
+    #
+    # #233: moved from workflow level to job level so a single dispatch
+    # can fan out N matrix jobs that all queue under the same group
+    # without GH's "one pending per group" rule cancelling siblings.
+    # Trade-off remains: bakes that previously fanned out across
+    # sources now serialize. The narrower (repo, release, source, tier)
+    # grouping remains the right model once the helper's 429 backoff
+    # (#225) absorbs the residual contention.
+    concurrency:
+      group: bake-${{ inputs.repo-id }}-budget
+      cancel-in-progress: false
+      # Future option (when 429 backoff makes per-tier serialization safe):
+      # group: bake-${{ inputs.repo-id }}-${{ inputs.release-tag }}-${{ matrix.source }}-${{ inputs.tier }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
@@ -130,7 +187,7 @@ jobs:
           args: >-
             bake
             --context=.
-            --source=${{ inputs.source }}
+            --source=${{ matrix.source }}
             --tier=${{ inputs.tier }}
             --release-tag=${{ inputs.release-tag }}
             --repo-id=${{ inputs.repo-id }}
@@ -151,8 +208,8 @@ jobs:
         if: inputs.dry-run != true
         run: |
           uv run python scripts/check_upstream_schema_drift.py \
-            --source "${{ inputs.source }}" \
-            --candidate "https://huggingface.co/datasets/${{ inputs.repo-id }}/resolve/${{ inputs.release-tag }}/${{ inputs.source }}.json"
+            --source "${{ matrix.source }}" \
+            --candidate "https://huggingface.co/datasets/${{ inputs.repo-id }}/resolve/${{ inputs.release-tag }}/${{ matrix.source }}.json"
 
       - name: Notify on failure
         if: failure()
@@ -160,7 +217,7 @@ jobs:
         with:
           label-prefix: "[bake-failed]"
           workflow-name: "bake"
-          target: "${{ inputs.source }}/${{ inputs.tier }} @ ${{ inputs.release-tag }}"
+          target: "${{ matrix.source }}/${{ inputs.tier }} @ ${{ inputs.release-tag }}"
           context: >-
             Likely causes: upstream API transient (rate-limit or 5xx),
             runner disk filled during fetch, or HF push auth/size error.
