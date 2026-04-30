@@ -9,9 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Downstream `promote-release.yml` workflow** ([#463](https://github.com/vig-os/devcontainer/issues/463))
-  - Template at `.github/workflows/promote-release.yml`: validate draft release and release PR, publish release, merge to `main`, best-effort git RC tag cleanup
-
 ### Changed
 
 ### Deprecated
@@ -22,57 +19,168 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-## mat-vis-client 0.6.0
+## mat-vis-client 0.6.2
 
-Substrate migration. Data hosting moved from GitHub Releases + Parquet to
-Hugging Face Datasets + tar archives ([ADR-0007](docs/decisions/0007-substrate-move-to-hf-datasets-and-tar-container.md)).
-Structural fix for four recurring bug classes (#79, #82, #98, #99) via
-atomic multi-file commits + immutable revisions.
-
-Also ships the **v3 index-schema** rollout — curated `mat_vis` block +
-verbatim `upstream` mirror per [ADR-0011](docs/decisions/0011-mat-vis-curated-plus-upstream-mirror.md)
-(mat-vis#152). Clean break: all semantic fields move under `mat_vis.*`;
-consumers must update accessor paths. A v3 client pointed at a v2 catalog
-raises `MatVisError` early with an upgrade hint, not silent empty results.
-
-### Added
-
-- Reads from Hugging Face Datasets (`gerchowl/mat-vis`) by default.
-  `MAT_VIS_HF_BASE` overrides the resolve URL for mirrors / tests.
-- `release-manifest.json` schema v2 (`docs/specs/release-manifest-schema-v2.json`):
-  per-source entries with `catalog` + `materials_count` + optional `tiers`
-  map keyed by tier to `{tar, rowmap}`. Scalar sources omit `tiers`.
-- First tagged release on the new substrate: `v2026.04.1` —
-  4 sources (ambientcg 1965, polyhaven 753, gpuopen 2254, physicallybased 86).
-- **`mat_vis` curated block** on every catalog entry (ADR-0011 Layer 1):
-  `name`, `category`, `tags`, `description`, `physical.{dimensions_m, max_resolution_px}`,
-  `pbr.{color_rgb, roughness, metalness, ior, specular_f0, transmission, complex_ior}`,
-  `attribution.{authors, license_spdx, source_url}`, `dates.{published, updated}`,
-  `upstream_id`. Stable key set — missing upstream values are `null`, never absent.
-- **`upstream` verbatim mirror** per source (Layer 2): `{source, schema_version,
-  fetched_at, raw}`. `raw` is the allowlisted upstream response. Explicitly
-  **unstable** — not covered by semver. Stripped from every `index()` /
-  `search()` return value; access via `client.upstream(source, material_id)`
-  only.
-- `MatVisClient.upstream(source, material_id, tier="1k")` typed accessor.
-  Returns `{}` when the entry carries no upstream block (pre-rebake tags);
-  raises `UnknownMaterialError` on unknown ids; accepts name-lookup per
-  mat-vis#143.
-- CI schema-diff gate: `scripts/check_upstream_schema_drift.py` runs on
-  every bake, compares the candidate catalog's per-record key-set against
-  the previous HF release. New keys warn; removed canonical keys or
-  `mat_vis.*` presence regressions >5% fail the workflow.
-- `index-schema.json` bumped to v3 + `mat-vis-block-v3.json` sub-schema.
+Out-of-the-box-usable defaults across all four reference clients. With no
+`tag` argument, every client now resolves to the just-shipped per-file
+CalVer release instead of HF's empty `main` baseline branch — `pip install
+mat-vis-client && python -c "from mat_vis_client import index; print(len(index()))"`
+works without any env-var override.
 
 ### Changed
 
-- `fetch_texture(source, mid, channel, tier)` range-reads the tar directly.
-  Offsets point at the first byte past the 512-byte tar header; length is
-  the PNG/KTX2 payload size.
-- `sources()`, `tiers()`, `categories()`, `rowmap()`, `materials()`,
-  `channels()`, `index()`, `rowmap_entry()` rewritten against the v2 shape.
-  One rowmap per `(source, tier)`; no per-category partitioning (ADR-0007
-  drops that dimension — category lives on each catalog entry instead).
+- All four reference clients (Python, JS, Rust, shell) default to
+  `tag="v2026.04.2"` instead of `"main"` when no tag is provided
+  ([#243](https://github.com/MorePET/mat-vis/pull/243), fixes
+  [#242](https://github.com/MorePET/mat-vis/issues/242)). The HF dataset's
+  `main` branch is an empty baseline — every release lives on a CalVer
+  branch — so the prior default 404'd on every fetch. Hoisted to a
+  module-level `DEFAULT_TAG` constant in each client for one-line bumps
+  next cycle. The standalone Python client's `_revision()` manifest
+  fallback gets the same treatment.
+- All four client package versions aligned to **0.6.2**: Python 0.6.1 →
+  0.6.2 (patch — behaviour change, not API break), JS 0.6.0 → 0.6.2, Rust
+  0.6.0 → 0.6.2, shell UA literal `0.6.0` → `0.6.2`. Keeps the four
+  lockstep even though it's a 2-patch jump for JS/Rust.
+
+## mat-vis-client 0.6.1
+
+Single bug fix to make the Python client survive at production scale.
+
+### Fixed
+
+- `MatVisClient` now reads `release-manifest.json` directly instead of
+  reconstructing it from the HF tree-listing API
+  ([#239](https://github.com/MorePET/mat-vis/pull/239), fixes
+  [#238](https://github.com/MorePET/mat-vis/issues/238)). The HF tree API
+  caps responses at 1000 entries per page; the per-file substrate's
+  per-source listings exceed that at 1k+ tier — silently returning a
+  truncated manifest. The catalog walker is replaced by a single GET on
+  the manifest emitted by the baker (#208/#209). No API surface change.
+
+## mat-vis-client 0.6.0
+
+**Substrate rewrite** — data hosting moved from GitHub Releases + Parquet
+to **per-file commits on Hugging Face Datasets**
+([ADR-0012](docs/decisions/0012-per-file-substrate-drop-tar.md),
+[#183](https://github.com/MorePET/mat-vis/pull/183)). Each `(source, tier,
+material, channel)` is one file at
+`gerchowl/mat-vis/resolve/<tag>/<source>/<tier>/<material>/<channel>.png`;
+clients fetch with a plain `GET`. The atomic unit is one HF commit per
+batch of materials (configurable, bytes-aware), not one tar per tier. Peak
+local disk drops from O(full tar) — the staging bake hit ~70 GB on
+ambientcg 2k ([#179](https://github.com/MorePET/mat-vis/issues/179)) — to
+O(one batch).
+
+**ADR-0007's tar substrate was deleted before the first per-file release
+shipped** ([#203](https://github.com/MorePET/mat-vis/pull/203)); no public
+tag ever served tar archives. Pre-shipped scaffolding (#108–#119, #146,
+#164) exists in commit history but never reached an end user.
+
+Also ships the **v3 index schema** rollout — curated `mat_vis` block +
+verbatim `upstream` mirror per
+[ADR-0011](docs/decisions/0011-mat-vis-curated-plus-upstream-mirror.md)
+([#166](https://github.com/MorePET/mat-vis/pull/166),
+[#170](https://github.com/MorePET/mat-vis/pull/170)). Clean break: all
+semantic fields move under `mat_vis.*`; consumers must update accessor
+paths.
+
+### Added
+
+- **Per-file HF substrate** (ADR-0012,
+  [#183](https://github.com/MorePET/mat-vis/pull/183)). Textured sources
+  route through `bake_one_per_file` by default
+  ([#194](https://github.com/MorePET/mat-vis/pull/194)). Pre-flight HF
+  tree scan skips already-committed materials → resumable mid-bake by
+  construction. Each batch = one `HfApi.create_commit` with up to
+  `batch_size × channels` `CommitOperationAdd` entries; subdirectory-per-
+  material layout fits HF's 10k-files-per-directory cap with headroom.
+- **Per-file derive pipeline**
+  ([#206](https://github.com/MorePET/mat-vis/pull/206)) — resize + KTX2
+  stages read individual PNGs and write the resulting tier's PNGs back as
+  a per-file commit. `release-manifest.json` is updated in the same
+  commit ([#208](https://github.com/MorePET/mat-vis/pull/208),
+  [#209](https://github.com/MorePET/mat-vis/pull/209)) so JS/shell/Rust
+  clients see a coherent state.
+- **`release-manifest.json` schema v3** — `{schema_version: 3, sources:
+  {<src>: {catalog, materials_count, tiers: {<tier>: {complete: bool}}}}}`.
+  No `tar` / `rowmap` keys; per-tier completeness is a single boolean.
+- **First per-file CalVer**: `v2026.04.2` — 4 sources × 4 tiers (1k, 512,
+  256, 128). Supersedes `v2026.04.1`, which was an interim tag never
+  fully derived under the per-file substrate.
+- **Reference clients ported to per-file fetch** — Python
+  ([#196](https://github.com/MorePET/mat-vis/pull/196)) and JS / Rust /
+  shell ([#200](https://github.com/MorePET/mat-vis/pull/200)). The shell
+  client is now a one-line `curl` for a single texture.
+- **`mat_vis` curated block** on every catalog entry (ADR-0011 Layer 1,
+  [#166](https://github.com/MorePET/mat-vis/pull/166)): `name`,
+  `category`, `tags`, `description`, `physical.{dimensions_m,
+  max_resolution_px}`, `pbr.{color_rgb, roughness, metalness, ior,
+  specular_f0, transmission, complex_ior}`,
+  `attribution.{authors, license_spdx, source_url}`,
+  `dates.{published, updated}`, `upstream_id`. Stable key set — missing
+  upstream values are `null`, never absent.
+- **`upstream` verbatim mirror** per source (Layer 2,
+  [#170](https://github.com/MorePET/mat-vis/pull/170)): `{source,
+  schema_version, fetched_at, raw}`. `raw` is the allowlisted upstream
+  response. Explicitly **unstable** — not covered by semver. Stripped
+  from every `index()` / `search()` return value; access via
+  `client.upstream(source, material_id)` only.
+- **CI schema-diff gate**: `scripts/check_upstream_schema_drift.py` runs
+  on every bake, compares the candidate catalog's per-record key-set
+  against the previous HF release. New keys warn; removed canonical keys
+  or `mat_vis.*` presence regressions >5% fail the workflow.
+- **Streaming bake/derive progress**
+  ([#220](https://github.com/MorePET/mat-vis/pull/220), closes
+  [#217](https://github.com/MorePET/mat-vis/issues/217)) — live
+  `is/should/ETA` lines flushed per batch instead of one terminal log line
+  per tier; CI logs are now usable while a 6-hour bake is running.
+- **Bytes-aware batching**
+  ([#229](https://github.com/MorePET/mat-vis/pull/229), closes
+  [#228](https://github.com/MorePET/mat-vis/issues/228)) — `batch_size` is
+  superseded by `first-of-N-or-bytes`: a batch closes at either the
+  configured material count or a configured uncompressed-byte ceiling,
+  whichever hits first. Keeps each commit under HF's per-commit headroom
+  on heavy tiers.
+- **Bounded HF 429 backoff**
+  ([#227](https://github.com/MorePET/mat-vis/pull/227), closes
+  [#225](https://github.com/MorePET/mat-vis/issues/225)) — bake retries on
+  HF's commit-rate ceiling with bounded exponential backoff instead of
+  failing the whole tier.
+- **`mat-vis-baker audit-orphans`** subcommand
+  ([#202](https://github.com/MorePET/mat-vis/pull/202)) — finds LFS blobs
+  uploaded by a crashed mid-batch run that have no corresponding tree
+  entry. Matches on `file_oid` SHA-256
+  ([#222](https://github.com/MorePET/mat-vis/pull/222)) so the listing
+  and tree comparison agree.
+- **Matrix `workflow_dispatch`** for `bake.yml` + `derive.yml`
+  ([#235](https://github.com/MorePET/mat-vis/pull/235), closes
+  [#233](https://github.com/MorePET/mat-vis/issues/233)) — `sources=all`
+  fans out one job per source under a single dispatch.
+- **Within-run serialisation** via `matrix.max-parallel: 1`
+  ([#236](https://github.com/MorePET/mat-vis/pull/236)) — keeps the four
+  source jobs from racing the HF commit-rate budget; complements the
+  per-bake retry/backoff in #227.
+- `index-schema.json` bumped to v3 + `mat-vis-block-v3.json` sub-schema.
+- **`MatVisClient.upstream(source, material_id, tier="1k")`** typed
+  accessor. Returns `{}` when the entry carries no upstream block;
+  raises `UnknownMaterialError` on unknown ids; accepts name-lookup
+  (mat-vis#143).
+- **`TestConcurrentBakesShareTag`**
+  ([#231](https://github.com/MorePET/mat-vis/pull/231)) exercises real CAS
+  retry on a shared tag via a `multiprocessing.Manager`-backed barrier
+  plus observable `cas_retries` / `lock_409_retries` counters; arbitrary
+  tier slugs are now plumbed through `bake_one` so the test isn't lying
+  about what it's measuring.
+
+### Changed
+
+- `fetch_texture(source, mid, channel, tier)` is a plain `GET` on the
+  per-file resolve URL. No HTTP Range, no rowmap lookup, no tar header
+  arithmetic.
+- `sources()`, `tiers()`, `categories()`, `materials()`, `channels()`,
+  `index()` rewritten against the per-file shape. No per-category
+  partitioning (category lives on each catalog entry).
 - `tiers()` accepts an optional `source` to list just one source's tiers.
 - `sources(tier=None)` returns all sources when `tier` is omitted; with
   `tier`, restricts to sources that published that tier.
@@ -80,36 +188,50 @@ raises `MatVisError` early with an upgrade hint, not silent empty results.
 - gpuopen `mat_vis.attribution.license_spdx` now reflects upstream
   per-record `license` via `normalize_spdx`
   (`"MIT Public Domain" → "MIT"`); unknown strings fall back to
-  `"NOASSERTION"` (#168).
+  `"NOASSERTION"`
+  ([#174](https://github.com/MorePET/mat-vis/pull/174)).
 
 ### Fixed
 
-- `client.search(source="physicallybased")` now returns scalar-only entries
-  regardless of the `tier` filter — previously returned `[]` because
-  physicallybased advertises no textures
-  ([#167](https://github.com/MorePET/mat-vis/issues/167)). The tier filter
+- `client.search(source="physicallybased")` now returns scalar-only
+  entries regardless of the `tier` filter — previously returned `[]`
+  because physicallybased advertises no textures
+  ([#173](https://github.com/MorePET/mat-vis/pull/173), closes
+  [#167](https://github.com/MorePET/mat-vis/issues/167)). The tier filter
   treats missing/empty `available_tiers` as tier-independent; textured
   sources are still gated to the requested tier. Behavioural change: any
-  caller that relied on the silent-empty behavior will now see results.
+  caller that relied on the silent-empty behaviour will now see results.
 
 ### Removed
 
-- `COMPATIBLE_SCHEMA_VERSIONS` drops `1`; only `2` is accepted. A cached
-  v1 manifest raises with an upgrade hint. Consumers on the frozen
-  `v2026.04.0` GitHub Release should stay on `mat-vis-client 0.5.x`.
+- **Tar substrate** — `src/mat_vis_baker/tar_writer.py` (99 LOC),
+  `src/mat_vis_baker/merge_shards.py` (289 LOC), the
+  `mat-vis-baker merge-shards` CLI subcommand, and the rowmap JSON format
+  - tests are all deleted
+  ([#203](https://github.com/MorePET/mat-vis/pull/203)). ADR-0007 is
+  superseded by ADR-0012 in part. The original sharded-tar plan
+  (ADR-0010) is likewise retired for the disk-pressure reason it existed.
+  HTTP Range support is gone from all four clients.
+- `rowmap()` and `rowmap_entry()` removed from `MatVisClient`. There is
+  no rowmap under per-file; the URL is constructed directly from
+  `(source, tier, material, channel)`.
+- `COMPATIBLE_SCHEMA_VERSIONS` drops `1`; manifest schemas `2` and `3`
+  are accepted. A cached v1 manifest raises with an upgrade hint.
+  Consumers on the frozen `v2026.04.0` GitHub Release should stay on
+  `mat-vis-client 0.5.x`.
 - GitHub-specific URL machinery: `GITHUB_RELEASES`, `GITHUB_RAW`,
   `LATEST_MANIFEST_URL`, `_redirect_cache`, `_resolved_url`,
   `_cache_resolved`, the signed-URL stale-retry branch, and the
-  `MAT_VIS_USE_HF` env flag (Phase 2 scaffolding).
-- `rowmap_entry()` returns `{offset, length, tar_file}` — the `parquet_file`
-  key is gone.
+  `MAT_VIS_USE_HF` env flag.
 
 ### Upgrade notes
 
 ```python
-# 0.5.x → 0.6.0: passing tag is now effectively required (no "latest"
-# alias on HF). Pin the data release explicitly.
-client = MatVisClient(tag="v2026.04.1")
+# 0.5.x → 0.6.x: pin a data release explicitly. 0.6.2+ defaults to
+# v2026.04.2 if no tag is passed; earlier 0.6.x will 404 against HF's
+# empty "main" baseline and need an explicit tag.
+from mat_vis_client import MatVisClient
+client = MatVisClient(tag="v2026.04.2")
 ```
 
 **Index schema v2 → v3 migration** (breaking; ADR-0011 / mat-vis#152):
@@ -138,12 +260,12 @@ Adapters (`to_threejs`, `to_gltf`, `export_mtlx`) still accept a flat
 `entry["mat_vis"]["pbr"]` shape (convert `color_rgb` → hex with
 `"#{:02X}{:02X}{:02X}".format(*[int(c*255) for c in rgb])`).
 
-**Pin `tag="v2026.04.1"` or newer.** The earlier `v2026.04.0` catalogs
-predate the v3 schema; running 0.6.0 against that tag raises with an
-upgrade hint rather than silently returning empty results. Consumers that
-cannot re-pin should stay on `mat-vis-client 0.5.x`.
+**Pin `tag="v2026.04.2"` or newer.** Earlier `v2026.04.x` catalogs were
+emitted under the abandoned tar substrate or never finished a full
+derive pass under per-file. Consumers that cannot re-pin should stay on
+`mat-vis-client 0.5.x`.
 
-The installable (`pip install mat-vis-client==0.6.0`) and the zero-deps
+The installable (`pip install mat-vis-client`) and the zero-deps
 standalone (`clients/python/mat_vis_client_standalone.py`) expose the
 same surface.
 
