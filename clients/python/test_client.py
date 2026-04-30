@@ -1279,7 +1279,7 @@ live = pytest.mark.skipif(
 )
 
 
-LIVE_TAG = os.environ.get("MAT_VIS_LIVE_TAG", "v2026.04.1")
+LIVE_TAG = os.environ.get("MAT_VIS_LIVE_TAG", "v2026.04.2")
 LIVE_SOURCE = "polyhaven"
 LIVE_TIER = "1k"
 
@@ -1358,9 +1358,14 @@ class TestLiveFetchTexture:
 
 @live
 def test_proof_phase_2_fetch_physicallybased_index_from_hf():
-    """Scalar catalog for physicallybased is fetchable from HF substrate."""
+    """Scalar catalog for physicallybased is fetchable from HF substrate.
+
+    Uses ``LIVE_TAG`` (env-overridable) so this stays current as
+    the prod release tag rolls forward; #250 surfaced a hardcoded
+    v2026.04.1 here that broke once that tag was sunset.
+    """
     with tempfile.TemporaryDirectory() as tmp:
-        client = MatVisClient(tag="v2026.04.1", cache_dir=Path(tmp))
+        client = MatVisClient(tag=LIVE_TAG, cache_dir=Path(tmp))
         idx = client.index("physicallybased")
     assert len(idx) >= 50, f"expected ≥50 PB entries, got {len(idx)}"
     assert all("id" in e and "source" in e for e in idx)
