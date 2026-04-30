@@ -14,6 +14,7 @@ Two ADR-0004 gaps are closed here:
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -95,21 +96,23 @@ def test_cache_true_is_default(tmp_cache):
 
 
 def test_cache_false_does_not_write_manifest_to_disk(tmp_cache):
-    """With cache=False, fetching manifest must not create a .manifest.json."""
+    """With cache=False, fetching manifest must not create .manifest.{json,etag}."""
     c = MatVisClient(cache_dir=tmp_cache, tag="v2026.04.0", cache=False)
-    # Post mat-vis#238: the client fetches release-manifest.json directly,
-    # so _get_json returns the manifest dict verbatim.
-    with patch("mat_vis_client.client._get_json", return_value=MOCK_MANIFEST_FETCH):
+    # Post mat-vis#258: the client fetches release-manifest.json via a
+    # conditional GET; _get_with_etag returns (body_bytes, etag).
+    body = json.dumps(MOCK_MANIFEST_FETCH).encode()
+    with patch("mat_vis_client.client._get_with_etag", return_value=(body, '"x"')):
         _ = c.manifest
-    # No cached manifest anywhere under tmp_cache
-    matches = list(tmp_cache.rglob(".manifest.json"))
+    # No cached manifest body or etag anywhere under tmp_cache
+    matches = list(tmp_cache.rglob(".manifest.json")) + list(tmp_cache.rglob(".manifest.etag"))
     assert matches == [], f"expected no manifest cache, found: {matches}"
 
 
 def test_cache_false_fetches_manifest_every_time(tmp_cache):
     """With cache=False, manifest is fetched on every .manifest access."""
     c = MatVisClient(cache_dir=tmp_cache, tag="v2026.04.0", cache=False)
-    with patch("mat_vis_client.client._get_json", return_value=MOCK_MANIFEST_FETCH) as mock_get:
+    body = json.dumps(MOCK_MANIFEST_FETCH).encode()
+    with patch("mat_vis_client.client._get_with_etag", return_value=(body, '"x"')) as mock_get:
         _ = c.manifest
         # Re-reset the in-memory cache to force another fetch
         c._manifest = None

@@ -167,10 +167,16 @@ def mock_client():
     """Client with mocked HTTP and temp cache."""
     with tempfile.TemporaryDirectory() as tmp:
         client = MatVisClient(tag="v2026.04.1", cache_dir=Path(tmp))
-        # Pre-populate manifest cache at the tag-scoped path.
+        # Pre-populate manifest cache at the tag-scoped path. Issue #258
+        # added an ETag sibling — without it the conditional GET on
+        # first .manifest access would fall back to an unconditional
+        # fetch and clobber our test mocks. Pre-set the in-memory
+        # _manifest too so no HTTP is issued at all.
         cache_path = Path(tmp) / "v2026.04.1" / ".manifest.json"
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(MOCK_MANIFEST))
+        (Path(tmp) / "v2026.04.1" / ".manifest.etag").write_text('"mock"')
+        client._manifest = MOCK_MANIFEST
         # Suppress the background update-check HTTP calls that would
         # otherwise consume our mocked _get_json side_effect iterations.
         client._update_warned = True
@@ -193,6 +199,8 @@ def mock_search_client():
         cache_path = Path(tmp) / "v2026.04.1" / ".manifest.json"
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(rich_manifest))
+        (Path(tmp) / "v2026.04.1" / ".manifest.etag").write_text('"mock"')
+        client._manifest = rich_manifest
         client._update_warned = True
         yield client
 
@@ -240,11 +248,15 @@ class TestClientManifest:
 def _fresh_client(cache_dir: Path) -> MatVisClient:
     """Client with MOCK_MANIFEST pre-cached but the update-check flag
     NOT suppressed — lets tests exercise the TTY / env-var gating path.
+    Issue #258: pair the cached body with an ETag; the tests below
+    additionally patch ``_get_with_etag`` to return 304-equivalent so
+    the conditional GET on first ``manifest`` access doesn't escape.
     """
     client = MatVisClient(tag="v2026.04.1", cache_dir=cache_dir)
     scoped = cache_dir / "v2026.04.1"
     scoped.mkdir(parents=True, exist_ok=True)
     (scoped / ".manifest.json").write_text(json.dumps(MOCK_MANIFEST))
+    (scoped / ".manifest.etag").write_text('"mock"')
     return client
 
 
@@ -268,6 +280,12 @@ class TestUpdateCheckLogging:
                 with (
                     patch.object(mc, "UPDATE_CHECK_DISABLED", False),
                     patch.object(mc, "UPDATE_CHECK_FORCED", False),
+                    # Issue #258: 304-equivalent stub so the conditional
+                    # GET in `manifest` doesn't escape to real HTTP.
+                    patch(
+                        "mat_vis_client.client._get_with_etag",
+                        return_value=(None, '"mock"'),
+                    ),
                     patch.object(
                         client,
                         "check_updates",
@@ -302,6 +320,10 @@ class TestUpdateCheckLogging:
                 patch("sys.stderr.isatty", return_value=True),
                 patch.object(mc, "UPDATE_CHECK_DISABLED", False),
                 patch.object(mc, "UPDATE_CHECK_FORCED", False),
+                patch(
+                    "mat_vis_client.client._get_with_etag",
+                    return_value=(None, '"mock"'),
+                ),
                 patch.object(
                     client,
                     "check_updates",
@@ -336,6 +358,10 @@ class TestUpdateCheckLogging:
                 patch("sys.stderr.isatty", return_value=False),
                 patch.object(mc, "UPDATE_CHECK_DISABLED", False),
                 patch.object(mc, "UPDATE_CHECK_FORCED", True),
+                patch(
+                    "mat_vis_client.client._get_with_etag",
+                    return_value=(None, '"mock"'),
+                ),
                 patch.object(
                     client,
                     "check_updates",
@@ -369,6 +395,10 @@ class TestUpdateCheckLogging:
                 patch("sys.stderr.isatty", return_value=True),
                 patch.object(mc, "UPDATE_CHECK_DISABLED", True),
                 patch.object(mc, "UPDATE_CHECK_FORCED", True),
+                patch(
+                    "mat_vis_client.client._get_with_etag",
+                    return_value=(None, '"mock"'),
+                ),
                 patch.object(client, "check_updates") as mock_chk,
                 caplog.at_level("INFO", logger="mat-vis-client"),
             ):
@@ -391,6 +421,11 @@ class TestSchemaVersionStrict:
         scoped.mkdir(parents=True, exist_ok=True)
         mf = scoped / ".manifest.json"
         mf.write_text(json.dumps(data))
+        # Issue #258: pair the body with an ETag so the manifest
+        # property's conditional GET can short-circuit (304) instead of
+        # falling back to an unconditional refetch and clobbering our
+        # poisoned-payload test fixture.
+        (scoped / ".manifest.etag").write_text('"mock"')
         return mf
 
     def test_rejects_manifest_without_schema_version(self):
@@ -400,16 +435,24 @@ class TestSchemaVersionStrict:
             legacy = {k: v for k, v in MOCK_MANIFEST.items() if k != "schema_version"}
             assert "schema_version" not in legacy
             self._write_manifest(tmp, legacy)
-            with pytest.raises(RuntimeError, match="schema_version"):
-                _ = client.manifest
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(None, '"mock"'),
+            ):
+                with pytest.raises(RuntimeError, match="schema_version"):
+                    _ = client.manifest
 
     def test_error_message_mentions_cache_clear(self):
         """Recovery path is surfaced in the error message."""
         with tempfile.TemporaryDirectory() as tmp:
             client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
             self._write_manifest(tmp, {"version": 1})
-            with pytest.raises(RuntimeError) as excinfo:
-                _ = client.manifest
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(None, '"mock"'),
+            ):
+                with pytest.raises(RuntimeError) as excinfo:
+                    _ = client.manifest
             msg = str(excinfo.value)
             assert "cache clear" in msg
             assert ".manifest.json" in msg
@@ -420,8 +463,12 @@ class TestSchemaVersionStrict:
             client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
             future = {**MOCK_MANIFEST, "schema_version": 99}
             self._write_manifest(tmp, future)
-            with pytest.raises(RuntimeError, match="does not support"):
-                _ = client.manifest
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(None, '"mock"'),
+            ):
+                with pytest.raises(RuntimeError, match="does not support"):
+                    _ = client.manifest
 
 
 class TestClientCatalogQueries:
@@ -1396,6 +1443,10 @@ class TestFetchTextureMagicAccepts:
         client = MatVisClient(tag="test", cache_dir=tmp)
         (tmp / "test").mkdir(parents=True, exist_ok=True)
         (tmp / "test" / ".manifest.json").write_text(json.dumps(manifest))
+        (tmp / "test" / ".manifest.etag").write_text('"mock"')
+        # Skip the conditional GET in `manifest` (#258) by pre-setting
+        # the in-memory cache.
+        client._manifest = manifest
         client._update_warned = True
         # Pre-load the in-memory catalog so _resolve_material_id finds "M".
         client._indexes["polyhaven"] = [
