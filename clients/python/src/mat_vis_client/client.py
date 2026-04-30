@@ -529,11 +529,13 @@ class MatVisClient:
 
     @property
     def manifest(self) -> dict:
-        """Return the v2 manifest for the pinned revision.
+        """Return the v3 manifest for the pinned revision.
 
-        Derived from the HF dataset tree listing — zero cross-run
-        shared writable state on the baker side (ADR-0007). Cached
-        per-tag scope on disk.
+        Read directly from the authoritative ``release-manifest.json``
+        file at the dataset root — one HTTP GET, no tree-listing
+        reconstruction (the HF tree API caps at 1000 entries per page,
+        which prod bakes blow past easily, see #238). Cached per-tag
+        scope on disk so repeat calls in the same process are free.
         """
         if self._manifest is None:
             cache_path = self._cache_scope / ".manifest.json"
@@ -541,57 +543,11 @@ class MatVisClient:
             if cached is not None:
                 self._manifest = json.loads(cached)
             else:
-                self._manifest = self._build_manifest_from_tree()
+                self._manifest = _get_json(self._manifest_url)
                 self._cache_write_text(cache_path, json.dumps(self._manifest, indent=2))
             self._check_schema_version(self._manifest)
             self._maybe_warn_updates()
         return self._manifest
-
-    def _build_manifest_from_tree(self) -> dict:
-        """Build the manifest in memory from the HF tree listing.
-
-        Single HTTPS GET — no bake-time shared state to race on. Per-
-        file substrate (#186 / ADR-0012): ``<src>.json`` catalogs at
-        root, ``<src>/<tier>/.tier_complete`` sentinels mark which
-        tiers are atomically complete. Each material × channel file
-        lives at ``<src>/<tier>/<mid>/<channel>.{png,ktx2}`` but the
-        manifest only enumerates (source, tier) pairs — material lists
-        come from the catalog.
-        """
-        rev = self._tag or "main"
-        tree_url = f"https://huggingface.co/api/datasets/{HF_DATASET}/tree/{rev}?recursive=true"
-        tree = _get_json(tree_url)
-        paths = [e["path"] for e in tree if e.get("type") == "file"]
-
-        sources: dict[str, dict] = {}
-
-        # 1) Discover per-source catalogs at repo root.
-        for path in paths:
-            if (
-                path.endswith(".json")
-                and "-rowmap" not in path  # legacy bakes still co-exist on old tags
-                and "/" not in path
-                and path != "release-manifest.json"
-            ):
-                src = path[:-5]
-                sources.setdefault(src, {"catalog": path, "tiers": {}})
-
-        # 2) Discover completed tiers via .tier_complete sentinels.
-        for path in paths:
-            if not path.endswith("/.tier_complete"):
-                continue
-            parts = path.split("/")
-            if len(parts) != 3:
-                continue
-            src, tier, _sentinel = parts
-            sources.setdefault(src, {"catalog": f"{src}.json", "tiers": {}})
-            sources[src]["tiers"][tier] = {"complete": True}
-
-        return {
-            "schema_version": 3,
-            "release_tag": rev,
-            "sources": sources,
-        }
 
     # ── update checks ──────────────────────────────────────────
 
