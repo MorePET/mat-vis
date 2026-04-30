@@ -185,10 +185,19 @@ def mock_client():
     with tempfile.TemporaryDirectory() as tmp:
         client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
         # Pre-populate manifest cache so no HTTP needed (tag-scoped path).
-        cache_path = Path(tmp) / "v2026.04.0" / ".manifest.json"
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(MOCK_MANIFEST))
-        yield client
+        # Issue #258: pair the cache body with an ETag so the conditional
+        # GET in `manifest` would short-circuit — but tests below patch
+        # `_get_with_etag` directly to assert no HTTP escapes either way.
+        scope = Path(tmp) / "v2026.04.0"
+        scope.mkdir(parents=True, exist_ok=True)
+        (scope / ".manifest.json").write_text(json.dumps(MOCK_MANIFEST))
+        (scope / ".manifest.etag").write_text('"mock-etag"')
+        # Patch _get_with_etag so any unintended manifest probe surfaces
+        # cleanly (304-equivalent against the cached body) instead of
+        # hitting real HTTP. Tests that exercise the cold path patch
+        # this themselves with a 200-equivalent return value.
+        with patch("mat_vis_client.client._get_with_etag", return_value=(None, '"mock-etag"')):
+            yield client
 
 
 # ── Helper tests ────────────────────────────────────────────────
@@ -228,28 +237,39 @@ class TestClientManifest:
 
     def test_manifest_fetches_release_manifest_directly(self):
         """Cold cache: ``manifest`` fetches release-manifest.json verbatim
-        via a single GET (mat-vis#238). No tree-listing reconstruction."""
+        via a single conditional GET (#258). No tree-listing reconstruction."""
         with tempfile.TemporaryDirectory() as tmp:
             client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
-            with patch("mat_vis_client.client._get_json", return_value=MOCK_MANIFEST) as mock_get:
+            body = json.dumps(MOCK_MANIFEST).encode()
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(body, '"abc123"'),
+            ) as mock_get:
                 m = client.manifest
             # Returned verbatim
             assert m == MOCK_MANIFEST
-            # Single fetch, against the release-manifest.json URL
+            # Single fetch, against the release-manifest.json URL, no ETag yet
             assert mock_get.call_count == 1
-            (url,), _ = mock_get.call_args
+            args, kwargs = mock_get.call_args
+            url = args[0]
             assert url.endswith("/v2026.04.0/release-manifest.json")
-            # Cached on disk under the tag scope
-            cached = Path(tmp) / "v2026.04.0" / ".manifest.json"
-            assert cached.exists()
-            assert json.loads(cached.read_text()) == MOCK_MANIFEST
+            assert kwargs.get("etag") is None
+            # Body + etag both cached under tag scope
+            cached_body = Path(tmp) / "v2026.04.0" / ".manifest.json"
+            cached_etag = Path(tmp) / "v2026.04.0" / ".manifest.etag"
+            assert cached_body.exists()
+            assert json.loads(cached_body.read_text()) == MOCK_MANIFEST
+            assert cached_etag.read_text() == '"abc123"'
 
     def test_manifest_rejects_unsupported_schema(self):
         """``_check_schema_version`` still gates the fetched manifest."""
         with tempfile.TemporaryDirectory() as tmp:
             client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
             bad = {**MOCK_MANIFEST, "schema_version": 99}
-            with patch("mat_vis_client.client._get_json", return_value=bad):
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(json.dumps(bad).encode(), '"x"'),
+            ):
                 with pytest.raises(RuntimeError, match="schema_version=99"):
                     _ = client.manifest
 
@@ -258,9 +278,137 @@ class TestClientManifest:
         with tempfile.TemporaryDirectory() as tmp:
             client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
             bad = {k: v for k, v in MOCK_MANIFEST.items() if k != "schema_version"}
-            with patch("mat_vis_client.client._get_json", return_value=bad):
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(json.dumps(bad).encode(), '"x"'),
+            ):
                 with pytest.raises(RuntimeError, match="missing 'schema_version'"):
                     _ = client.manifest
+
+
+class TestManifestEtagCache:
+    """Issue #258 — manifest cache validates against the origin per
+    client lifecycle via a conditional GET, instead of trusting disk
+    forever. Covers cold start, in-process memoization, fresh-process
+    304 (server unchanged), fresh-process 200 (server moved), and the
+    no-ETag-from-server defensive path.
+    """
+
+    def test_first_fetch_no_cache(self):
+        """Cold cache: a single GET populates manifest + ETag side-by-side."""
+        with tempfile.TemporaryDirectory() as tmp:
+            client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+            body = json.dumps(MOCK_MANIFEST).encode()
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(body, '"v1"'),
+            ) as mock_get:
+                m = client.manifest
+            assert m == MOCK_MANIFEST
+            assert mock_get.call_count == 1
+            # First call has no etag (cold cache).
+            _, kwargs = mock_get.call_args
+            assert kwargs.get("etag") is None
+            scope = Path(tmp) / "v2026.04.0"
+            assert (scope / ".manifest.json").exists()
+            assert (scope / ".manifest.etag").read_text() == '"v1"'
+
+    def test_repeat_access_no_http(self):
+        """Second access in the same process is in-memory only, no HTTP."""
+        with tempfile.TemporaryDirectory() as tmp:
+            client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+            body = json.dumps(MOCK_MANIFEST).encode()
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(body, '"v1"'),
+            ) as mock_get:
+                _ = client.manifest
+                _ = client.manifest
+                _ = client.manifest
+            # Memoized after first call.
+            assert mock_get.call_count == 1
+
+    def test_fresh_process_server_unchanged_304(self):
+        """Fresh client + same cache_dir + 304: cached body served, no body refetch."""
+        with tempfile.TemporaryDirectory() as tmp:
+            # Seed cache from a "previous" lifecycle.
+            scope = Path(tmp) / "v2026.04.0"
+            scope.mkdir(parents=True, exist_ok=True)
+            (scope / ".manifest.json").write_text(json.dumps(MOCK_MANIFEST))
+            (scope / ".manifest.etag").write_text('"v1"')
+
+            client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(None, '"v1"'),  # 304: body=None, etag echoed
+            ) as mock_get:
+                m = client.manifest
+
+            assert m == MOCK_MANIFEST  # served from cached body
+            assert mock_get.call_count == 1
+            _, kwargs = mock_get.call_args
+            assert kwargs.get("etag") == '"v1"'
+            # Cache untouched.
+            assert (scope / ".manifest.etag").read_text() == '"v1"'
+
+    def test_fresh_process_server_mutated_200(self):
+        """Fresh client + same cache_dir + 200 with new body: cache replaced."""
+        with tempfile.TemporaryDirectory() as tmp:
+            scope = Path(tmp) / "v2026.04.0"
+            scope.mkdir(parents=True, exist_ok=True)
+            (scope / ".manifest.json").write_text(json.dumps(MOCK_MANIFEST))
+            (scope / ".manifest.etag").write_text('"v1"')
+
+            new_manifest = {**MOCK_MANIFEST, "release_tag": "v2026.04.99"}
+            new_body = json.dumps(new_manifest).encode()
+
+            client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(new_body, '"v2"'),
+            ) as mock_get:
+                m = client.manifest
+
+            assert m == new_manifest
+            assert mock_get.call_count == 1
+            _, kwargs = mock_get.call_args
+            assert kwargs.get("etag") == '"v1"'  # sent the prior etag
+            # Cache replaced atomically.
+            assert json.loads((scope / ".manifest.json").read_text()) == new_manifest
+            assert (scope / ".manifest.etag").read_text() == '"v2"'
+
+    def test_no_etag_from_server_does_not_crash(self):
+        """Defensive: 200 without ETag stores body but no etag file.
+
+        Next lifecycle behaves like cold start (forces unconditional
+        refetch) rather than crashing on missing-etag.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+            body = json.dumps(MOCK_MANIFEST).encode()
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(body, None),
+            ):
+                m = client.manifest
+            assert m == MOCK_MANIFEST
+            scope = Path(tmp) / "v2026.04.0"
+            assert (scope / ".manifest.json").exists()
+            # No etag file written → next lifecycle fetches unconditionally.
+            assert not (scope / ".manifest.etag").exists()
+
+            # Simulate next lifecycle — fresh client, same cache.
+            client2 = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+            new_body = json.dumps(MOCK_MANIFEST).encode()
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(new_body, '"now-with-etag"'),
+            ) as mock_get2:
+                _ = client2.manifest
+            # Called with etag=None (cold-start equivalent).
+            _, kwargs = mock_get2.call_args
+            assert kwargs.get("etag") is None
+            assert (scope / ".manifest.etag").read_text() == '"now-with-etag"'
 
 
 class TestClientCatalogQueries:

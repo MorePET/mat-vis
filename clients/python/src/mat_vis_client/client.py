@@ -411,6 +411,71 @@ def _get_json(url: str) -> dict | list:
     return json.loads(_get(url))
 
 
+def _get_with_etag(url: str, etag: str | None = None) -> tuple[bytes | None, str | None]:
+    """Conditional GET. Returns ``(body, response_etag)``.
+
+    Issue #258: replaces the never-invalidated manifest disk cache with a
+    cheap conditional GET per client lifecycle. When ``etag`` is non-empty
+    we send ``If-None-Match: <etag>``; HF responds 304 Not Modified when
+    the dataset hasn't moved on that revision (which on an immutable
+    release tag is always — see ADR-0007 / immutable-tag policy):
+
+    - 304 → ``(None, etag)``, caller serves the cached body.
+    - 200 → ``(body, response_etag)``; ``response_etag`` may be None
+      when the origin / mirror omits ``ETag`` — body still cached, but
+      next lifecycle re-fetches unconditionally (defensive cold-start).
+
+    Mirrors ``_get``'s retry/backoff envelope by reusing the same loop
+    structure: 429 / 503 / network failures retry with exponential
+    backoff and Retry-After honored; 304 short-circuits before the
+    rate-limit handler sees it; other HTTP errors raise typed
+    ``HTTPFetchError`` like ``_get``.
+    """
+    hdrs = {"User-Agent": USER_AGENT}
+    if etag:
+        hdrs["If-None-Match"] = etag
+
+    last_err: Exception | None = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            req = urllib.request.Request(url, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = resp.read()
+                return data, resp.headers.get("ETag")
+        except urllib.error.HTTPError as e:
+            if e.code == 304:
+                # Not Modified — caller's cached body is authoritative.
+                return None, etag
+            last_err = e
+            if not _is_rate_limited(e):
+                raise HTTPFetchError(url, e.code, e.reason or "") from e
+            if attempt >= MAX_RETRIES:
+                wait = _parse_retry_after(e.headers, int(BACKOFF_BASE_SECONDS * (2**attempt)))
+                raise RateLimitError(
+                    url, wait, f"Rate limited on {url} after {MAX_RETRIES} retries."
+                ) from e
+            wait = _parse_retry_after(e.headers, int(BACKOFF_BASE_SECONDS * (2**attempt)))
+            print(
+                f"mat-vis-client: rate limited (HTTP {e.code}), "
+                f"retry {attempt + 1}/{MAX_RETRIES} in {wait}s",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+        except urllib.error.URLError as e:
+            last_err = e
+            if attempt >= MAX_RETRIES:
+                raise NetworkError(url, str(e.reason)) from e
+            wait = min(int(BACKOFF_BASE_SECONDS * (2**attempt)), RETRY_MAX_WAIT_SECONDS)
+            print(
+                f"mat-vis-client: network error ({e.reason}), "
+                f"retry {attempt + 1}/{MAX_RETRIES} in {wait}s",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+
+    raise MatVisError(f"exhausted {MAX_RETRIES} retries for {url}") from last_err
+
+
 def _in_range(value: float | None, lo: float, hi: float) -> bool:
     """Check if a value falls within [lo, hi]. None values never match."""
     if value is None:
@@ -536,6 +601,44 @@ class MatVisClient:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
 
+    def _cache_read_manifest_with_etag(self) -> tuple[str | None, str | None]:
+        """Return the cached manifest body + ETag, or ``(None, None)``.
+
+        Issue #258: pairs the on-disk manifest cache with its ETag so a
+        conditional GET can validate against the remote without
+        refetching the body. Bare ``.manifest.json`` without
+        ``.manifest.etag`` is treated as etag-less (forces an
+        unconditional GET next lifecycle, then we adopt whatever ETag
+        the server hands back).
+        """
+        body = self._cache_read_text(self._cache_scope / ".manifest.json")
+        if body is None:
+            return None, None
+        etag = self._cache_read_text(self._cache_scope / ".manifest.etag")
+        return body, (etag or None)
+
+    def _cache_write_manifest(self, body: str | bytes, etag: str | None) -> None:
+        """Persist manifest body + ETag side-by-side.
+
+        ``body`` accepts bytes (raw response) or str (already-decoded);
+        we always store as text. The ETag file is only written when the
+        server provided one — absent ``.manifest.etag`` signals "next
+        lifecycle, refetch unconditionally" (defensive cold-start).
+        """
+        if isinstance(body, bytes):
+            body = body.decode("utf-8")
+        self._cache_write_text(self._cache_scope / ".manifest.json", body)
+        etag_path = self._cache_scope / ".manifest.etag"
+        if etag:
+            self._cache_write_text(etag_path, etag)
+        elif etag_path.exists():
+            # Stale etag from a prior lifecycle would falsely 304 us
+            # against a manifest we no longer have. Clear it.
+            try:
+                etag_path.unlink()
+            except OSError:
+                pass
+
     @property
     def manifest(self) -> dict:
         """Return the v3 manifest for the pinned revision.
@@ -543,17 +646,34 @@ class MatVisClient:
         Read directly from the authoritative ``release-manifest.json``
         file at the dataset root — one HTTP GET, no tree-listing
         reconstruction (the HF tree API caps at 1000 entries per page,
-        which prod bakes blow past easily, see #238). Cached per-tag
-        scope on disk so repeat calls in the same process are free.
+        which prod bakes blow past easily, see #238).
+
+        Cache strategy (#258): one conditional GET per client lifecycle.
+        On the first access we send ``If-None-Match: <cached etag>``;
+        the server responds 304 if the manifest hasn't moved (which on
+        an immutable release tag is always — see README's immutable-tag
+        note) and we serve the cached body. On 200 we replace both body
+        and ETag. Repeat accesses in the same process hit the in-memory
+        cache and never touch HTTP.
         """
         if self._manifest is None:
-            cache_path = self._cache_scope / ".manifest.json"
-            cached = self._cache_read_text(cache_path)
-            if cached is not None:
-                self._manifest = json.loads(cached)
+            cached_body, cached_etag = self._cache_read_manifest_with_etag()
+            body, new_etag = _get_with_etag(self._manifest_url, etag=cached_etag)
+            if body is None:
+                # 304 Not Modified — cached body is still authoritative.
+                # cached_body is guaranteed non-None here because
+                # _get_with_etag only returns body=None when an
+                # If-None-Match was sent, which requires cached_etag,
+                # which requires we had a cached body alongside it.
+                assert cached_body is not None
+                self._manifest = json.loads(cached_body)
             else:
-                self._manifest = _get_json(self._manifest_url)
-                self._cache_write_text(cache_path, json.dumps(self._manifest, indent=2))
+                if isinstance(body, bytes):
+                    body_text = body.decode("utf-8")
+                else:
+                    body_text = body
+                self._manifest = json.loads(body_text)
+                self._cache_write_manifest(body_text, etag=new_etag)
             self._check_schema_version(self._manifest)
             self._maybe_warn_updates()
         return self._manifest
@@ -1552,7 +1672,9 @@ class MatVisClient:
                     elif keep_set and file_tag and file_tag not in keep_set:
                         f.unlink(missing_ok=True)
 
-            # Manifest is current-tag only — drop if not in keep_tags
+            # Manifest is current-tag only — drop if not in keep_tags.
+            # The sibling .manifest.etag (#258) goes with it; a stray
+            # etag without a body would falsely 304 us against nothing.
             mf = self._cache_dir / ".manifest.json"
             if mf.exists() and (keep_set or tag):
                 try:
@@ -1561,6 +1683,7 @@ class MatVisClient:
                     mtag = None
                 if (tag and mtag == tag) or (keep_set and mtag and mtag not in keep_set):
                     mf.unlink(missing_ok=True)
+                    (self._cache_dir / ".manifest.etag").unlink(missing_ok=True)
 
         return before - self.cache_size()
 

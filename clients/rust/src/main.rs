@@ -84,16 +84,77 @@ fn validate_schema(m: &Manifest) -> Result<(), String> {
     Ok(())
 }
 
+fn cache_root() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("MAT_VIS_CACHE") {
+        return Some(PathBuf::from(v));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Some(PathBuf::from(home).join(".cache").join("mat-vis"));
+    }
+    None
+}
+
+/// Issue #258 — manifest cache validates against the origin per
+/// invocation via a conditional GET. Body + ETag are stored side-by-
+/// side under ``$MAT_VIS_CACHE/<tag>/.manifest.{json,etag}``; on 304
+/// the cached body is served, on 200 both are replaced atomically.
+/// Cache is a no-op when no cache dir resolves (e.g. ``HOME`` unset
+/// inside a hermetic build) — the GET still works, it just falls back
+/// to unconditional every invocation.
+fn read_cached_manifest(tag: &str) -> Option<(String, Option<String>)> {
+    let dir = cache_root()?.join(tag);
+    let body = fs::read_to_string(dir.join(".manifest.json")).ok()?;
+    let etag = fs::read_to_string(dir.join(".manifest.etag")).ok();
+    Some((body, etag))
+}
+
+fn write_cached_manifest(tag: &str, body: &str, etag: Option<&str>) {
+    let Some(dir) = cache_root() else { return };
+    let dir = dir.join(tag);
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let _ = fs::write(dir.join(".manifest.json"), body);
+    let etag_path = dir.join(".manifest.etag");
+    match etag {
+        Some(e) => {
+            let _ = fs::write(&etag_path, e);
+        }
+        None => {
+            // Stale etag would falsely 304 us against nothing — clear it.
+            let _ = fs::remove_file(&etag_path);
+        }
+    }
+}
+
 fn fetch_manifest(tag: &str) -> Manifest {
     let url = hf_url(tag, "release-manifest.json");
-    let m: Manifest = client()
-        .get(&url)
-        .send()
-        .expect("Failed to fetch manifest")
-        .error_for_status()
-        .expect("Failed to fetch manifest")
-        .json()
-        .expect("Failed to parse manifest");
+    let cached = read_cached_manifest(tag);
+    let mut req = client().get(&url);
+    if let Some((_, Some(ref etag))) = cached {
+        req = req.header(reqwest::header::IF_NONE_MATCH, etag.as_str());
+    }
+    let resp = req.send().expect("Failed to fetch manifest");
+
+    let m: Manifest = if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+        // 304 — cached body is authoritative. cached must be Some
+        // because we only sent If-None-Match when it was.
+        let (body, _) = cached.expect("304 implies a cached body");
+        serde_json::from_str(&body).expect("Failed to parse cached manifest")
+    } else {
+        let resp = resp
+            .error_for_status()
+            .expect("Failed to fetch manifest");
+        let new_etag = resp
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let body = resp.text().expect("Failed to read manifest body");
+        write_cached_manifest(tag, &body, new_etag.as_deref());
+        serde_json::from_str(&body).expect("Failed to parse manifest")
+    };
+
     if let Err(e) = validate_schema(&m) {
         eprintln!("{e}");
         std::process::exit(1);

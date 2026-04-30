@@ -26,7 +26,7 @@ HF_BASE="${MAT_VIS_HF_BASE:-https://huggingface.co/datasets/$HF_DATASET/resolve}
 DEFAULT_TAG="v2026.04.2"
 TAG="${MAT_VIS_TAG:-$DEFAULT_TAG}"
 CACHE="${MAT_VIS_CACHE:-$HOME/.cache/mat-vis}"
-UA="mat-vis-client/0.6.2 (shell)"
+UA="mat-vis-client/0.6.3 (shell)"
 
 # ── helpers ──────────────────────────────────────────────────────
 
@@ -46,11 +46,72 @@ fetch_json() {
 }
 
 get_manifest() {
-    local m sv
-    m=$(fetch_json "$(hf_url release-manifest.json)" "$CACHE/$TAG/.manifest.json")
-    sv=$(echo "$m" | jq -r '.schema_version // empty')
+    # Issue #258 — manifest cache validates against the origin per
+    # invocation via a conditional GET. Body + ETag are stored side-by-
+    # side under $CACHE/$TAG/.manifest.{json,etag}; on 304 the cached
+    # body is served, on 200 both are replaced atomically. Falls back
+    # to unconditional GET when no .manifest.etag is on disk (cold
+    # start or after a cache prune) so a stale etag can't lock us out.
+    local body_path etag_path url etag http_code body sv
+    body_path="$CACHE/$TAG/.manifest.json"
+    etag_path="$CACHE/$TAG/.manifest.etag"
+    url=$(hf_url release-manifest.json)
+    mkdir -p "$(dirname "$body_path")"
+
+    etag=""
+    if [ -f "$etag_path" ] && [ -f "$body_path" ]; then
+        etag=$(cat "$etag_path")
+    fi
+
+    local tmp_body tmp_headers
+    tmp_body=$(mktemp)
+    tmp_headers=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp_body' '$tmp_headers'" RETURN
+
+    local curl_status
+    if [ -n "$etag" ]; then
+        http_code=$(curl -sL -o "$tmp_body" -D "$tmp_headers" \
+            -w '%{http_code}' \
+            -H "User-Agent: $UA" \
+            -H "If-None-Match: $etag" \
+            "$url")
+        curl_status=$?
+    else
+        http_code=$(curl -sL -o "$tmp_body" -D "$tmp_headers" \
+            -w '%{http_code}' \
+            -H "User-Agent: $UA" \
+            "$url")
+        curl_status=$?
+    fi
+    [ "$curl_status" -eq 0 ] || die "Failed to fetch $url"
+
+    # 000 = non-HTTP scheme (file://, used by structural tests). Treat
+    # as 200 when curl exited cleanly: there's no ETag semantics on
+    # local files, so we always overwrite the body cache.
+    if [ "$http_code" = "304" ] && [ -f "$body_path" ]; then
+        body=$(cat "$body_path")
+    elif [ "$http_code" = "200" ] || [ "$http_code" = "000" ]; then
+        cp "$tmp_body" "$body_path"
+        # Extract latest ETag header (case-insensitive, last wins on
+        # redirect chains). Strip CR + surrounding whitespace.
+        local new_etag
+        new_etag=$(awk 'BEGIN{IGNORECASE=1} /^etag:/ {sub(/^[Ee][Tt][Aa][Gg]:[ \t]*/, ""); sub(/\r$/, ""); val=$0} END{print val}' "$tmp_headers")
+        if [ -n "$new_etag" ]; then
+            printf '%s' "$new_etag" > "$etag_path"
+        else
+            # Defensive: server gave no ETag — drop any stale file so
+            # next invocation refetches unconditionally.
+            rm -f "$etag_path"
+        fi
+        body=$(cat "$body_path")
+    else
+        die "Failed to fetch $url (HTTP $http_code)"
+    fi
+
+    sv=$(echo "$body" | jq -r '.schema_version // empty')
     [ "$sv" = "3" ] || die "manifest schema_version=$sv (need 3 — per-file substrate, ADR-0012)"
-    echo "$m"
+    echo "$body"
 }
 
 # Fetch the catalog (ADR-0011 v3) for a source. Cached locally.

@@ -28,7 +28,7 @@ const HF_BASE =
 // SSoT: clients/js/package.json. Kept in sync by
 // scripts/sync-js-version.py (pre-commit) — a drift test in tests/
 // fails CI if these disagree. Do not hand-edit.
-export const VERSION = '0.6.2';
+export const VERSION = '0.6.3';
 const UA = `mat-vis-client/${VERSION} (JavaScript)`;
 
 // Default tag when the caller doesn't pin one (#242). The dataset's
@@ -51,8 +51,53 @@ function startsWithMagic(buf, magic) {
   return true;
 }
 
+// Issue #258 — manifest cache validates against the origin per client
+// lifecycle via a conditional GET. Storage is filesystem in Node (so a
+// fresh process can short-circuit body refetches on 304) and in-memory
+// only in the browser (no persistent cache available without IndexedDB,
+// which would pull a dependency the zero-deps client refuses to take).
+const IS_NODE = typeof process !== 'undefined' && process.versions?.node;
+
+async function readCachedManifest(cacheDir) {
+  if (!IS_NODE || !cacheDir) return [null, null];
+  const { readFile } = await import('fs/promises');
+  const { join } = await import('path');
+  try {
+    const body = await readFile(join(cacheDir, '.manifest.json'), 'utf-8');
+    let etag = null;
+    try {
+      etag = (await readFile(join(cacheDir, '.manifest.etag'), 'utf-8')) || null;
+    } catch {
+      // no etag file — cold-start equivalent, fall through.
+    }
+    return [body, etag];
+  } catch {
+    return [null, null];
+  }
+}
+
+async function writeCachedManifest(cacheDir, body, etag) {
+  if (!IS_NODE || !cacheDir) return;
+  const { mkdir, writeFile, unlink } = await import('fs/promises');
+  const { join } = await import('path');
+  await mkdir(cacheDir, { recursive: true });
+  await writeFile(join(cacheDir, '.manifest.json'), body);
+  const etagPath = join(cacheDir, '.manifest.etag');
+  if (etag) {
+    await writeFile(etagPath, etag);
+  } else {
+    // Stale etag from a prior lifecycle would falsely 304 us.
+    try {
+      await unlink(etagPath);
+    } catch {
+      // already absent — fine.
+    }
+  }
+}
+
 export class MatVisClient {
   #tag;
+  #cacheDir;
   #manifest = null;
   #catalogs = new Map();
   #tierComplete = new Map();
@@ -60,9 +105,21 @@ export class MatVisClient {
   /**
    * @param {Object} opts
    * @param {string} [opts.tag] - Release tag (default: DEFAULT_TAG, see #242)
+   * @param {string} [opts.cacheDir] - Per-tag manifest cache dir (Node only).
+   *   Falls back to ``$MAT_VIS_CACHE/<tag>`` then ``~/.cache/mat-vis/<tag>``.
+   *   Browser: ignored (no persistent cache without IndexedDB).
    */
-  constructor({ tag } = {}) {
+  constructor({ tag, cacheDir } = {}) {
     this.#tag = tag || DEFAULT_TAG;
+    if (IS_NODE) {
+      const root =
+        cacheDir ||
+        process.env.MAT_VIS_CACHE ||
+        (process.env.HOME ? `${process.env.HOME}/.cache/mat-vis` : null);
+      this.#cacheDir = root ? `${root}/${this.#tag}` : null;
+    } else {
+      this.#cacheDir = null;
+    }
   }
 
   #hfUrl(path) {
@@ -70,17 +127,36 @@ export class MatVisClient {
   }
 
   async manifest() {
-    if (!this.#manifest) {
-      const url = this.#hfUrl('release-manifest.json');
-      const resp = await fetch(url, { headers: { 'User-Agent': UA } });
+    // In-memory short-circuit (#258): repeated calls in the same
+    // process never touch HTTP, regardless of substrate.
+    if (this.#manifest) return this.#manifest;
+
+    const url = this.#hfUrl('release-manifest.json');
+    const [cachedBody, cachedEtag] = await readCachedManifest(this.#cacheDir);
+    const headers = { 'User-Agent': UA };
+    if (cachedEtag) headers['If-None-Match'] = cachedEtag;
+
+    const resp = await fetch(url, { headers });
+
+    // 304 Not Modified — cached body is authoritative. On an immutable
+    // release tag (see README's immutable-tag note) this is the steady
+    // state, so we save the body bytes and avoid the JSON parse hop on
+    // wire-format payload too.
+    if (resp.status === 304 && cachedBody) {
+      this.#manifest = JSON.parse(cachedBody);
+    } else {
       if (!resp.ok) throw new Error(`Failed to fetch manifest: ${resp.status}`);
-      this.#manifest = await resp.json();
-      const sv = this.#manifest.schema_version;
-      if (sv !== 3) {
-        throw new Error(
-          `Unsupported manifest schema_version=${sv}; this client requires v3 (per-file substrate, ADR-0012).`,
-        );
-      }
+      const body = await resp.text();
+      this.#manifest = JSON.parse(body);
+      const newEtag = resp.headers.get('etag');
+      await writeCachedManifest(this.#cacheDir, body, newEtag);
+    }
+
+    const sv = this.#manifest.schema_version;
+    if (sv !== 3) {
+      throw new Error(
+        `Unsupported manifest schema_version=${sv}; this client requires v3 (per-file substrate, ADR-0012).`,
+      );
     }
     return this.#manifest;
   }
