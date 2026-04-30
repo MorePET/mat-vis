@@ -4,8 +4,12 @@
 #
 # Shape:
 #   plan    — emits matrix sources (#233) + derives target-tier label
-#   derive  — matrix[source] runs the Dagger `derive` or `derive-ktx2`
+#   derive  — matrix[source] runs the Dagger `derive` or `derive-ktx-2`
 #             function (which wraps mat-vis-baker hf-derive{,-ktx2}).
+#             #240: dagger's Go CLI splits letter→digit boundaries when
+#             converting camelCase to kebab, so `deriveKtx2` is exposed
+#             as `derive-ktx-2` (not `derive-ktx2`). Smoke test in
+#             tests/test_dagger_function_names.py guards this contract.
 #             Each material batch is an atomic HF commit; a sentinel
 #             `.tier_complete` file lands as the final commit per
 #             (source, target_tier) so clients can probe atomicity
@@ -207,7 +211,7 @@ jobs:
           verb: call
           module: .dagger
           args: >-
-            ${{ inputs.kind == 'resize' && 'derive' || 'derive-ktx2' }}
+            ${{ inputs.kind == 'resize' && 'derive' || 'derive-ktx-2' }}
             --context=.
             --source=${{ matrix.source }}
             ${{ inputs.kind == 'resize' && format('--target-tier={0}', inputs.target-tier) || '' }}

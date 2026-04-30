@@ -8,7 +8,10 @@
 # escape hatch.
 #
 # Reproduce locally with:
-#   dagger call test-e2e --hf-token=env:HF_TOKEN --context=.
+#   dagger call test-e-2-e --hf-token=env:HF_TOKEN --context=.
+#
+# #240: dagger's Go CLI splits letter→digit boundaries when converting
+# camelCase to kebab, so `testE2E`/`test_e2e` is exposed as `test-e-2-e`.
 
 name: E2E
 
@@ -34,13 +37,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: test-e2e
+      - name: test-e-2-e
         uses: dagger/dagger-for-github@v8.4.1
         with:
           verb: call
           module: .dagger
           args: >-
-            test-e2e
+            test-e-2-e
             --context=.
             --hf-token=env:HF_TOKEN
             --repo-id=gerchowl/mat-vis-tst
