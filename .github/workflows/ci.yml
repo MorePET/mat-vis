@@ -45,7 +45,7 @@ jobs:
           # in each language container so the @live / liveDescribe blocks
           # (incl. the #248 manifest-driven coverage matrix) actually run
           # against prod HF, not the structural-only stubs.
-          args: test-clients --src=. --tag=v2026.04.0 --live=true
+          args: test-clients --src=. --tag=v2026.04.2 --live=true
 
   # validate-release lives in promote-data-release.yml (pre-promotion gate)
   # and release-validate.yml (daily drift check). It tests the state of a
