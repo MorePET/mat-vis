@@ -11,7 +11,7 @@ Usage:
     dagger call bake                 # per-file hf-bake → atomic HF commit (#136 / ADR-0012)
     dagger call smoke-bake           # dry-run bake against gerchowl/mat-vis-tst (#136)
     dagger call derive               # per-file hf-derive (resize) (#204)
-    dagger call derive-ktx2          # per-file hf-derive-ktx2 (#204)
+    dagger call derive-ktx-2         # per-file hf-derive-ktx2 (#204; #240)
     dagger call integration-test     # local end-to-end per-file bake + verify
     dagger call probe-sources        # verify upstream API connectivity
     dagger call test-all             # lint + test + smoke + probe
@@ -20,8 +20,7 @@ Usage:
     dagger call test-client-shell    # bash tests for shell reference client
     dagger call test-client-rust     # cargo test for Rust reference client
     dagger call test-clients         # all 4 client tests in parallel
-    dagger call test-e2e             # nightly E2E against mat-vis-tst (#193)
-    dagger call validate-release      # verify release assets are complete
+    dagger call test-e-2-e           # nightly E2E against mat-vis-tst (#193; #240)
     dagger call preflight            # verify GHCR auth before push
     dagger call push                 # preflight + build + push to GHCR
 """
@@ -853,6 +852,12 @@ class MatVisCi:
 
         Safety: defaults to ``gerchowl/mat-vis-tst``; any other target
         requires ``--allow-prod=true``.
+
+        CLI surface: dagger's Go-side kebab-case conversion splits
+        letter→digit boundaries, so this Python ``derive_ktx2`` is
+        exposed as ``dagger call derive-ktx-2`` (not ``derive-ktx2``).
+        See #240 and the contract test in
+        ``tests/test_dagger_function_names.py``.
         """
         self._guard_prod_target(repo_id, allow_prod)
         ctr = self._baker_container(context, with_ktx2=True, hf_token=hf_token)
