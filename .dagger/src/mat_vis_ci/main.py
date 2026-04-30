@@ -272,7 +272,7 @@ class MatVisCi:
     async def test_client_python(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.2",
         live: Annotated[
             bool,
             Doc("Set MAT_VIS_LIVE_TESTS=1 + MAT_VIS_LIVE_TAG=tag to enable @live tests (#248)"),
@@ -300,7 +300,7 @@ class MatVisCi:
     async def test_client_js(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.2",
         live: Annotated[
             bool,
             Doc("Set MAT_VIS_LIVE_TESTS=1 + MAT_VIS_LIVE_TAG=tag to enable live tests (#248)"),
@@ -325,7 +325,7 @@ class MatVisCi:
     async def test_client_shell(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.2",
         live: Annotated[
             bool,
             Doc("Set MAT_VIS_LIVE_TESTS=1 + MAT_VIS_LIVE_TAG=tag to enable live tests (#248)"),
@@ -351,7 +351,7 @@ class MatVisCi:
     async def test_client_rust(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.2",
         live: Annotated[
             bool,
             Doc("Set MAT_VIS_LIVE_TESTS=1 + MAT_VIS_LIVE_TAG=tag to enable live tests (#248)"),
@@ -382,7 +382,7 @@ class MatVisCi:
     async def test_clients(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.2",
         live: Annotated[
             bool,
             Doc("Forward MAT_VIS_LIVE_TESTS=1 + MAT_VIS_LIVE_TAG=tag to every client (#248)"),
