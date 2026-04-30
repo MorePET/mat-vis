@@ -357,11 +357,20 @@ class MatVisCi:
             Doc("Set MAT_VIS_LIVE_TESTS=1 + MAT_VIS_LIVE_TAG=tag to enable live tests (#248)"),
         ] = False,
     ) -> str:
-        """Run cargo test for the Rust reference client against a live release."""
+        """Run cargo test for the Rust reference client against a live release.
+
+        #241: when ``live=True``, mock-based unit tests and the @live
+        tests share process state — httpmock leaves ``MAT_VIS_HF_BASE``
+        pointing at a 127.0.0.1 server, so live tests then 404 on the
+        mock instead of hitting real HF. Workaround: run the two test
+        sets as separate cargo invocations (separate processes), so
+        env-var pollution from the mock tests can't bleed into live.
+        Proper fix tracked in #241.
+        """
         context = src or dag.host().directory(".")
         cargo_cache = dag.cache_volume("cargo-registry")
         target_cache = dag.cache_volume("cargo-target")
-        ctr = (
+        base = (
             dag.container()
             .from_("rust:1.89-slim")
             .with_exec(["apt-get", "update", "-qq"])
@@ -372,11 +381,22 @@ class MatVisCi:
             .with_workdir("/app/clients/rust")
             .with_env_variable("MAT_VIS_TAG", tag)
         )
-        if live:
-            ctr = ctr.with_env_variable("MAT_VIS_LIVE_TESTS", "1").with_env_variable(
-                "MAT_VIS_LIVE_TAG", tag
-            )
-        return await ctr.with_exec(["cargo", "test", "--", "--test-threads=1"]).stdout()
+        # Always run the mock-based / unit suite (live=False). Filters
+        # OUT live_* tests so they don't see any leaked mock state.
+        unit_out = await base.with_exec(
+            ["cargo", "test", "--", "--test-threads=1", "--skip", "live_"]
+        ).stdout()
+        if not live:
+            return unit_out
+        # Live tests run in a fresh process so MAT_VIS_HF_BASE leakage
+        # from the mock-based unit tests can't bleed in (#241).
+        live_out = await (
+            base.with_env_variable("MAT_VIS_LIVE_TESTS", "1")
+            .with_env_variable("MAT_VIS_LIVE_TAG", tag)
+            .with_exec(["cargo", "test", "live_", "--", "--test-threads=1"])
+            .stdout()
+        )
+        return f"{unit_out}\n--- live tests ---\n{live_out}"
 
     @function
     async def test_clients(
