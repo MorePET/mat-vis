@@ -11,7 +11,7 @@
 #   mat-vis.sh fetch ambientcg Rock064 color 1k -o rock.png
 #
 # Environment:
-#   MAT_VIS_TAG     — release tag (default: main)
+#   MAT_VIS_TAG     — release tag (default: $DEFAULT_TAG, see #242)
 #   MAT_VIS_CACHE   — cache directory (default: ~/.cache/mat-vis)
 #   MAT_VIS_HF_BASE — HF resolve URL prefix (default: prod)
 
@@ -19,9 +19,14 @@ set -euo pipefail
 
 HF_DATASET="gerchowl/mat-vis"
 HF_BASE="${MAT_VIS_HF_BASE:-https://huggingface.co/datasets/$HF_DATASET/resolve}"
-TAG="${MAT_VIS_TAG:-main}"
+# Default tag when MAT_VIS_TAG is unset (#242). The dataset's `main`
+# branch is an empty baseline — every release lives on a CalVer branch
+# — so a tag-less invocation must default to a real release. Keep in
+# lockstep with the Python/JS/Rust clients' DEFAULT_TAG.
+DEFAULT_TAG="v2026.04.2"
+TAG="${MAT_VIS_TAG:-$DEFAULT_TAG}"
 CACHE="${MAT_VIS_CACHE:-$HOME/.cache/mat-vis}"
-UA="mat-vis-client/0.6.0 (shell)"
+UA="mat-vis-client/0.6.2 (shell)"
 
 # ── helpers ──────────────────────────────────────────────────────
 
@@ -163,7 +168,7 @@ case "${1:-help}" in
         echo "  mat-vis.sh fetch <source> <id> <channel> [tier] [-o file]"
         echo ""
         echo "Environment:"
-        echo "  MAT_VIS_TAG     Release tag (default: main)"
+        echo "  MAT_VIS_TAG     Release tag (default: $DEFAULT_TAG)"
         echo "  MAT_VIS_CACHE   Cache dir (default: ~/.cache/mat-vis)"
         echo "  MAT_VIS_HF_BASE HF resolve URL (default: prod)"
         ;;

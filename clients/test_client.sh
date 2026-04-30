@@ -207,6 +207,57 @@ EOF
     unset MAT_VIS_HF_BASE MAT_VIS_TAG MAT_VIS_CACHE
 }
 
+# ── default tag (#242; structural — no network) ───────────────────
+
+default_tag_tests() {
+    echo "=== default tag (#242) ==="
+    # The script defaults MAT_VIS_TAG to a real CalVer release so a
+    # tag-less invocation against prod HF returns real data. We assert
+    # the literal here so an accidental flip back to "main" is caught
+    # without any network round-trip.
+    local default_line
+    default_line=$(grep -E '^DEFAULT_TAG=' "$CLIENT" | head -1)
+    assert_contains "DEFAULT_TAG is v2026.04.2" "$default_line" 'DEFAULT_TAG="v2026.04.2"'
+
+    # The MAT_VIS_TAG fallback must reference DEFAULT_TAG (not "main").
+    local tag_line
+    tag_line=$(grep -E '^TAG=' "$CLIENT" | head -1)
+    # shellcheck disable=SC2016  # asserting on the literal source text, not expansion
+    assert_contains "TAG falls back to DEFAULT_TAG" "$tag_line" '${MAT_VIS_TAG:-$DEFAULT_TAG}'
+
+    # help shows the new default in the env doc block.
+    local help_out
+    help_out=$(MAT_VIS_TAG="" "$CLIENT" help 2>&1 || true)
+    assert_contains "help mentions v2026.04.2 default" "$help_out" "v2026.04.2"
+}
+
+# ── live default tag (#242; opt-in via MAT_VIS_LIVE_TESTS=1) ───────
+
+live_default_tag_tests() {
+    if [ "${MAT_VIS_LIVE_TESTS:-0}" != "1" ]; then
+        echo "=== live default tag (#242; skipped; set MAT_VIS_LIVE_TESTS=1) ==="
+        return
+    fi
+    echo "=== live default tag (#242; HF round-trip with no MAT_VIS_TAG) ==="
+    # Unset MAT_VIS_TAG so the client falls back to DEFAULT_TAG.
+    local cache
+    cache=$(mktemp -d)
+    export MAT_VIS_CACHE="$cache"
+    unset MAT_VIS_TAG
+    trap 'rm -rf "$cache"' RETURN
+
+    local list_out
+    if ! list_out=$("$CLIENT" list 2>&1); then
+        echo "  FAIL default-tag list failed: $list_out"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    assert_contains "default-tag list includes 1k tier" "$list_out" "1k"
+    assert_contains "default-tag list includes ambientcg" "$list_out" "ambientcg"
+
+    unset MAT_VIS_CACHE
+}
+
 # ── live: opt-in via MAT_VIS_LIVE_TESTS=1 ──────────────────────────
 
 live_tests() {
@@ -321,6 +372,8 @@ cmd_e2e() {
 }
 
 structural_tests
+default_tag_tests
+live_default_tag_tests
 live_tests
 cmd_e2e
 

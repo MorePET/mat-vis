@@ -49,6 +49,13 @@ HF_BASE = os.environ.get(
     "MAT_VIS_HF_BASE",
     f"https://huggingface.co/datasets/{HF_DATASET}/resolve",
 )
+# Default tag when the caller doesn't pin one (#242). The dataset's
+# `main` branch is an empty baseline — every release lives on a
+# CalVer branch — so a `tag=None` client must default to a real
+# release. Bump this when a new prod release ships and is verified
+# under the per-file substrate (#186 / ADR-0012). The explicit
+# ``tag=...`` override still wins for callers that need it.
+DEFAULT_TAG = "v2026.04.2"
 DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" / "mat-vis"))
 
 # SSoT for version: clients/python/pyproject.toml. Derived at runtime so
@@ -466,9 +473,11 @@ class MatVisClient:
         if manifest_url:
             self._manifest_url = manifest_url
         else:
-            # v0.6.0: HF substrate only. No "latest" alias — tag required.
-            # Default `main` tracks the dataset's main branch (for dev).
-            rev = tag or "main"
+            # v0.6.0: HF substrate only. No "latest" alias on HF — the
+            # client picks a sensible default release (DEFAULT_TAG) so
+            # out-of-the-box use returns real data instead of the empty
+            # `main` baseline (#242). Explicit ``tag=...`` overrides.
+            rev = tag or DEFAULT_TAG
             self._manifest_url = f"{HF_BASE}/{rev}/release-manifest.json"
 
     @property
@@ -715,10 +724,11 @@ class MatVisClient:
 
         v0.6.0 requires a tagged revision — there is no "latest" alias
         on HF the way `releases/latest` worked on GitHub. Falls back to
-        `main` for dev-time clients constructed with no tag, but that
-        path only sees whatever is on the dataset's default branch.
+        ``DEFAULT_TAG`` (#242) for clients constructed with no tag, so
+        ``client.fetch_texture(...)`` returns real data out-of-the-box
+        even when the manifest lacks a ``release_tag`` field.
         """
-        return self._tag or self.manifest.get("release_tag", "main")
+        return self._tag or self.manifest.get("release_tag", DEFAULT_TAG)
 
     def _hf_url(self, path: str) -> str:
         return f"{HF_BASE}/{self._revision()}/{path}"

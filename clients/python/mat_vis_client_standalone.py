@@ -46,11 +46,16 @@ HF_BASE = os.environ.get(
     "MAT_VIS_HF_BASE",
     f"https://huggingface.co/datasets/{HF_DATASET}/resolve",
 )
+# Default tag when the caller doesn't pin one (#242). The dataset's
+# `main` branch is an empty baseline — every release lives on a
+# CalVer branch. Bump when a new prod release ships under the
+# per-file substrate (#186 / ADR-0012). Explicit ``tag=...`` wins.
+DEFAULT_TAG = "v2026.04.2"
 DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" / "mat-vis"))
 # Version is kept in sync with clients/python/pyproject.toml by
 # scripts/sync-standalone-version.py (run via pre-commit). Do not
 # hand-edit — a drift test in tests/ fails CI if it disagrees.
-__version__ = "0.6.1"
+__version__ = "0.6.2"
 # Same User-Agent as the installable package (issue #70). Standalone vs
 # pip-installed is an internal packaging detail; servers receiving the
 # request can't act on it and splitting UA populations fragments
@@ -414,9 +419,10 @@ class MatVisClient:
         if manifest_url:
             self._manifest_url = manifest_url
         else:
-            # v0.6.0: HF substrate only. No "latest" alias — tag
-            # effectively required; falls back to `main` for dev-time use.
-            rev = tag or "main"
+            # v0.6.0: HF substrate only. No "latest" alias on HF —
+            # falls back to ``DEFAULT_TAG`` (#242) so out-of-the-box use
+            # returns real data instead of the empty `main` baseline.
+            rev = tag or DEFAULT_TAG
             self._manifest_url = f"{HF_BASE}/{rev}/release-manifest.json"
 
     @property
@@ -459,7 +465,7 @@ class MatVisClient:
         Per-file substrate (#186 / ADR-0012): catalogs at root,
         ``<src>/<tier>/.tier_complete`` sentinels mark complete tiers.
         """
-        rev = self._tag or "main"
+        rev = self._tag or DEFAULT_TAG
         tree_url = f"https://huggingface.co/api/datasets/{HF_DATASET}/tree/{rev}?recursive=true"
         tree = _get_json(tree_url)
         paths = [e["path"] for e in tree if e.get("type") == "file"]
@@ -653,7 +659,7 @@ class MatVisClient:
 
     def _revision(self) -> str:
         """Pinned revision for HF resolve URLs (v0.6.0: tag required)."""
-        return self._tag or self.manifest.get("release_tag", "main")
+        return self._tag or self.manifest.get("release_tag", DEFAULT_TAG)
 
     def _hf_url(self, path: str) -> str:
         return f"{HF_BASE}/{self._revision()}/{path}"
