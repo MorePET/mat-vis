@@ -316,6 +316,46 @@ liveDescribe('live (set MAT_VIS_LIVE_TESTS=1; needs per-file prod tag)', () => {
     assert.deepStrictEqual([...magic], [0x89, 0x50, 0x4e, 0x47]);
     assert.ok(buf.byteLength > 1000);
   });
+
+  // #248: manifest-driven per-(source, tier) coverage. One manifest
+  // GET (post-#239 cache) drives every fetch. Sources that publish a
+  // tier in the manifest but have zero records carrying that tier are
+  // skipped — documented as expected (e.g. gpuopen on v2026.04.x).
+  it('every listed tier is fetchable', async () => {
+    const m = await client.manifest();
+    const sources = m.sources || {};
+    assert.ok(Object.keys(sources).length > 0, 'manifest must list sources');
+
+    const attempted = [];
+    const skippedEmpty = [];
+    for (const source of Object.keys(sources).sort()) {
+      const tiers = (sources[source] && sources[source].tiers) || {};
+      for (const tier of Object.keys(tiers).sort()) {
+        if (!tiers[tier] || tiers[tier].complete !== true) continue;
+        const mats = await client.materials(source, tier);
+        if (mats.length === 0) {
+          skippedEmpty.push([source, tier]);
+          continue;
+        }
+        const materialId = mats[0];
+        const buf = await client.fetchTexture(source, materialId, 'color', tier);
+        const head = new Uint8Array(buf, 0, 4);
+        const headHex = [...head].map((b) => b.toString(16).padStart(2, '0')).join('');
+        const isPng = head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47;
+        const isKtx2 = head[0] === 0xab && head[1] === 0x4b && head[2] === 0x54 && head[3] === 0x58;
+        assert.ok(
+          isPng || isKtx2,
+          `(${source}, ${tier}, ${materialId}, magic_bytes_hex_first_4=${headHex}) — ` +
+            `expected PNG (89504e47) or KTX2 (ab4b5458) magic`,
+        );
+        attempted.push([source, tier]);
+      }
+    }
+    assert.ok(
+      attempted.length > 0,
+      `no complete (source, tier) pairs had non-empty material lists; skipped_empty=${JSON.stringify(skippedEmpty)}`,
+    );
+  });
 });
 
 // ── e2e (mat-vis-tst per-file substrate, #193) ─────────────────────

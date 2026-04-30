@@ -686,6 +686,64 @@ class TestLiveFetchTexture:
             live_client.fetch_texture("ambientcg", "NONEXISTENT_XYZ", "color", "1k")
 
 
+# ── #248: manifest-driven per-(source, tier) coverage ────────────
+
+
+PNG_MAGIC = b"\x89PNG"
+KTX2_MAGIC = b"\xabKTX"
+
+
+@live
+class TestLiveFullManifestCoverage:
+    """End-to-end coverage matrix derived from the live manifest.
+
+    For every ``(source, tier)`` pair the manifest declares
+    ``complete=True`` we resolve the material list and fetch the
+    ``color`` channel of the first entry, asserting PNG or KTX2 magic.
+    Sources whose materials list is empty for a given tier (e.g.
+    gpuopen tiers carry no per-tier records on v2026.04.x) are
+    skipped — this is documented as expected, not a regression.
+
+    A single manifest fetch drives the whole loop (post-#239 cache).
+    """
+
+    def test_every_listed_tier_is_fetchable(self, live_client):
+        manifest = live_client.manifest
+        sources = manifest.get("sources", {})
+        assert sources, "manifest must declare at least one source"
+
+        attempted: list[tuple[str, str]] = []
+        skipped_empty: list[tuple[str, str]] = []
+        for source, src_entry in sorted(sources.items()):
+            tiers = (src_entry or {}).get("tiers") or {}
+            for tier, tier_entry in sorted(tiers.items()):
+                if not (tier_entry or {}).get("complete"):
+                    continue
+                mats = live_client.materials(source, tier)
+                if not mats:
+                    # Some sources publish a tier in the manifest but
+                    # have zero records carrying that tier in their
+                    # per-source catalog (e.g. gpuopen on v2026.04.x).
+                    # Treat as expected, log via collected list.
+                    skipped_empty.append((source, tier))
+                    continue
+                material_id = mats[0]
+                data = live_client.fetch_texture(source, material_id, "color", tier)
+                head = data[:4]
+                head_hex = head.hex()
+                assert head.startswith(PNG_MAGIC) or head.startswith(KTX2_MAGIC), (
+                    f"({source!r}, {tier!r}, {material_id!r}, "
+                    f"magic_bytes_hex_first_4={head_hex!r}) — "
+                    f"expected PNG (89504e47) or KTX2 (ab4b5458) magic"
+                )
+                attempted.append((source, tier))
+
+        assert attempted, (
+            "manifest declared no complete (source, tier) pairs with "
+            f"non-empty material lists; skipped_empty={skipped_empty}"
+        )
+
+
 # ── Live regression guards for py-mat#90 (mat-vis#141 / #143 / #144) ──
 # These hit the real gpuopen release and verify the preferred UX
 # (``fetch_all_textures(source, name)``) works end-to-end. They skip
