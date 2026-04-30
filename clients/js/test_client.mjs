@@ -14,7 +14,7 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
-import { MatVisClient } from './mat-vis-client.mjs';
+import { MatVisClient, DEFAULT_TAG } from './mat-vis-client.mjs';
 
 // ── stubbed-fetch structural tests ─────────────────────────────────
 
@@ -71,6 +71,62 @@ const MOCK_CATALOG = [
     maps: ['color', 'normal'],
   },
 ];
+
+// ── default tag (#242) ────────────────────────────────────────────
+
+describe('default tag (#242)', () => {
+  it('exports DEFAULT_TAG = "v2026.04.2"', () => {
+    assert.strictEqual(DEFAULT_TAG, 'v2026.04.2');
+  });
+
+  it('client without tag uses DEFAULT_TAG in HF URLs', async () => {
+    const captured = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stubFetch([
+      [
+        '/release-manifest.json',
+        (url) => {
+          captured.push(url);
+          return jsonResp(MOCK_MANIFEST);
+        },
+      ],
+    ]);
+    try {
+      const client = new MatVisClient();
+      await client.manifest();
+      assert.ok(
+        captured.some((u) => u.includes(`/${DEFAULT_TAG}/release-manifest.json`)),
+        `expected URL containing /${DEFAULT_TAG}/release-manifest.json, got ${captured}`,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('explicit tag overrides DEFAULT_TAG', async () => {
+    const captured = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stubFetch([
+      [
+        '/release-manifest.json',
+        (url) => {
+          captured.push(url);
+          return jsonResp(MOCK_MANIFEST);
+        },
+      ],
+    ]);
+    try {
+      const client = new MatVisClient({ tag: 'v2026.04.0' });
+      await client.manifest();
+      assert.ok(
+        captured.some((u) => u.includes('/v2026.04.0/release-manifest.json')),
+        `expected URL containing /v2026.04.0/, got ${captured}`,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
 
 describe('structural', () => {
   let originalFetch;
@@ -221,6 +277,22 @@ const LIVE_ENABLED = process.env.MAT_VIS_LIVE_TESTS === '1';
 const LIVE_TAG = process.env.MAT_VIS_LIVE_TAG || 'v2026.04.1';
 
 const liveDescribe = LIVE_ENABLED ? describe : describe.skip;
+
+liveDescribe('live default tag (#242; set MAT_VIS_LIVE_TESTS=1)', () => {
+  // No tag override — exercises DEFAULT_TAG against prod HF.
+  const client = new MatVisClient();
+
+  it('default-tag client fetches a v3 manifest with sources', async () => {
+    const m = await client.manifest();
+    assert.strictEqual(m.schema_version, 3);
+    assert.ok(m.sources && Object.keys(m.sources).length > 0);
+  });
+
+  it('default-tag client lists 1k sources', async () => {
+    const sources = await client.sources('1k');
+    assert.ok(sources.includes('ambientcg'), `expected ambientcg in ${sources}`);
+  });
+});
 
 liveDescribe('live (set MAT_VIS_LIVE_TESTS=1; needs per-file prod tag)', () => {
   const client = new MatVisClient({ tag: LIVE_TAG });

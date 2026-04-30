@@ -554,6 +554,34 @@ class TestExportMtlx:
             assert 'name="MyMat_shader"' in content
 
 
+# ── Default-tag (#242) ────────────────────────────────────────
+
+
+class TestDefaultTag:
+    """Constructing without ``tag=`` must target a real release.
+
+    The dataset's ``main`` branch is an empty baseline — every release
+    lives on a CalVer branch — so ``MatVisClient()`` has to default to
+    a real tag (#242) or out-of-the-box use returns 404s on every
+    ``fetch_*`` call.
+    """
+
+    def test_default_tag_is_real_release(self):
+        from mat_vis_client.client import DEFAULT_TAG
+
+        assert DEFAULT_TAG == "v2026.04.2"
+
+    def test_default_manifest_url_uses_default_tag(self):
+        from mat_vis_client.client import DEFAULT_TAG
+
+        c = MatVisClient()
+        assert f"/{DEFAULT_TAG}/release-manifest.json" in c._manifest_url
+
+    def test_explicit_tag_overrides_default(self):
+        c = MatVisClient(tag="v2026.04.0")
+        assert "/v2026.04.0/release-manifest.json" in c._manifest_url
+
+
 # ── Live tests (network required) ──────────────────────────────
 
 live = pytest.mark.skipif(
@@ -575,6 +603,27 @@ def live_client():
     """Client pointed at the prod HF revision with a temp cache."""
     with tempfile.TemporaryDirectory() as tmp:
         yield MatVisClient(tag=LIVE_TAG, cache_dir=Path(tmp))
+
+
+@live
+class TestLiveDefaultTag:
+    """#242 — bare ``MatVisClient()`` must work end-to-end against HF.
+
+    The default tag is baked into the source (see ``DEFAULT_TAG`` and
+    ``TestDefaultTag``); this round-trip just confirms it actually
+    resolves on prod HF and that the manifest is shaped sanely.
+    """
+
+    def test_default_client_fetches_manifest(self, tmp_path):
+        c = MatVisClient(cache_dir=tmp_path)
+        m = c.manifest
+        assert m["schema_version"] == 3
+        assert "sources" in m and m["sources"], "default tag must point at a populated release"
+
+    def test_default_client_lists_sources(self, tmp_path):
+        c = MatVisClient(cache_dir=tmp_path)
+        sources = c.sources("1k")
+        assert "ambientcg" in sources, f"expected ambientcg in {sources}"
 
 
 @live

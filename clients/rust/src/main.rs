@@ -22,6 +22,14 @@ const HF_DATASET: &str = "gerchowl/mat-vis";
 // the HTTP User-Agent string follows automatically.
 const UA: &str = concat!("mat-vis-client/", env!("CARGO_PKG_VERSION"), " (Rust)");
 
+// Default tag when the caller doesn't pass --tag / set MAT_VIS_TAG (#242).
+// The dataset's `main` branch is an empty baseline — every release
+// lives on a CalVer branch — so a tag-less invocation must default to
+// a real release. Keep in lockstep with the Python/JS clients'
+// DEFAULT_TAG; bump when a new prod release ships under the per-file
+// substrate (#186 / ADR-0012).
+pub const DEFAULT_TAG: &str = "v2026.04.2";
+
 const PNG_MAGIC: &[u8] = &[0x89, 0x50, 0x4e, 0x47];
 const KTX2_MAGIC: &[u8] = &[0xab, 0x4b, 0x54, 0x58];
 
@@ -172,7 +180,7 @@ fn die<T>(msg: String) -> T {
 #[derive(Parser)]
 #[command(name = "mat-vis", about = "mat-vis PBR texture client (per-file HF substrate)")]
 struct Cli {
-    #[arg(long, help = "Release tag (default: main)")]
+    #[arg(long, help = "Release tag (default: DEFAULT_TAG, see #242)")]
     tag: Option<String>,
 
     #[command(subcommand)]
@@ -205,7 +213,7 @@ fn resolved_tag(cli_tag: &Option<String>) -> String {
     cli_tag
         .clone()
         .or_else(|| std::env::var("MAT_VIS_TAG").ok())
-        .unwrap_or_else(|| "main".to_string())
+        .unwrap_or_else(|| DEFAULT_TAG.to_string())
 }
 
 fn main() {
@@ -356,6 +364,37 @@ mod tests {
         assert!(validate_schema(&m).is_ok());
     }
 
+    // ── default tag (#242) ──────────────────────────────────────────
+
+    /// The dataset's `main` branch is empty — `MatVisClient` without
+    /// a `--tag` must default to a real release. This is the unit-side
+    /// pin: catches accidental regressions to "main" or wrong CalVer.
+    #[test]
+    fn default_tag_is_real_release() {
+        assert_eq!(DEFAULT_TAG, "v2026.04.2");
+    }
+
+    #[test]
+    fn resolved_tag_falls_back_to_default() {
+        // Drop MAT_VIS_TAG for this assertion; restore after.
+        let prev = std::env::var("MAT_VIS_TAG").ok();
+        // SAFETY: setting/removing env vars is safe in single-threaded
+        // test context — Cargo runs tests in parallel by default but
+        // this test only reads its own scope and restores.
+        unsafe { std::env::remove_var("MAT_VIS_TAG") };
+        let tag = resolved_tag(&None);
+        if let Some(p) = prev {
+            unsafe { std::env::set_var("MAT_VIS_TAG", p) };
+        }
+        assert_eq!(tag, DEFAULT_TAG);
+    }
+
+    #[test]
+    fn resolved_tag_explicit_overrides_default() {
+        let tag = resolved_tag(&Some("v2026.04.0".to_string()));
+        assert_eq!(tag, "v2026.04.0");
+    }
+
     // ── live (opt-in via MAT_VIS_LIVE_TESTS=1) ─────────────────────
 
     #[test]
@@ -367,6 +406,22 @@ mod tests {
         let m = fetch_manifest(&live_tag());
         assert_eq!(m.schema_version, 3);
         assert!(!m.sources.is_empty(), "manifest sources should be non-empty");
+    }
+
+    /// #242 — `DEFAULT_TAG` must resolve a populated v3 manifest on
+    /// prod HF. Skipped unless live tests are enabled.
+    #[test]
+    fn live_default_tag_fetches_v3_manifest() {
+        if !live_enabled() {
+            eprintln!("(skipped: set MAT_VIS_LIVE_TESTS=1)");
+            return;
+        }
+        let m = fetch_manifest(DEFAULT_TAG);
+        assert_eq!(m.schema_version, 3);
+        assert!(
+            !m.sources.is_empty(),
+            "DEFAULT_TAG must point at a populated release"
+        );
     }
 
     #[test]
