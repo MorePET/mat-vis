@@ -34,12 +34,10 @@ MOCK_MANIFEST_V1 = {
     },
 }
 
-# HF tree-listing fixture for tests that exercise _build_manifest_from_tree.
-MOCK_TREE_V3 = [
-    {"path": "ambientcg.json", "type": "file"},
-    {"path": "ambientcg/1k/.tier_complete", "type": "file"},
-    {"path": "ambientcg/1k/Rock064/color.png", "type": "file"},
-]
+# release-manifest.json fixture for tests that exercise the manifest fetch.
+# Post mat-vis#238: the client reads release-manifest.json directly via a
+# single GET; the returned JSON is the manifest dict verbatim.
+MOCK_MANIFEST_FETCH = MOCK_MANIFEST_V1
 
 MOCK_MANIFEST_V2 = {
     "schema_version": 3,
@@ -99,10 +97,9 @@ def test_cache_true_is_default(tmp_cache):
 def test_cache_false_does_not_write_manifest_to_disk(tmp_cache):
     """With cache=False, fetching manifest must not create a .manifest.json."""
     c = MatVisClient(cache_dir=tmp_cache, tag="v2026.04.0", cache=False)
-    # Per-file substrate (#186): the manifest is synthesized from the
-    # HF tree listing; the tree-listing GET returns a list of {path, type}
-    # entries, not a manifest dict.
-    with patch("mat_vis_client.client._get_json", return_value=MOCK_TREE_V3):
+    # Post mat-vis#238: the client fetches release-manifest.json directly,
+    # so _get_json returns the manifest dict verbatim.
+    with patch("mat_vis_client.client._get_json", return_value=MOCK_MANIFEST_FETCH):
         _ = c.manifest
     # No cached manifest anywhere under tmp_cache
     matches = list(tmp_cache.rglob(".manifest.json"))
@@ -112,7 +109,7 @@ def test_cache_false_does_not_write_manifest_to_disk(tmp_cache):
 def test_cache_false_fetches_manifest_every_time(tmp_cache):
     """With cache=False, manifest is fetched on every .manifest access."""
     c = MatVisClient(cache_dir=tmp_cache, tag="v2026.04.0", cache=False)
-    with patch("mat_vis_client.client._get_json", return_value=MOCK_TREE_V3) as mock_get:
+    with patch("mat_vis_client.client._get_json", return_value=MOCK_MANIFEST_FETCH) as mock_get:
         _ = c.manifest
         # Re-reset the in-memory cache to force another fetch
         c._manifest = None

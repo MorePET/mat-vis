@@ -226,6 +226,42 @@ class TestClientManifest:
         assert "ambientcg" in sources
         assert "polyhaven" in sources
 
+    def test_manifest_fetches_release_manifest_directly(self):
+        """Cold cache: ``manifest`` fetches release-manifest.json verbatim
+        via a single GET (mat-vis#238). No tree-listing reconstruction."""
+        with tempfile.TemporaryDirectory() as tmp:
+            client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+            with patch("mat_vis_client.client._get_json", return_value=MOCK_MANIFEST) as mock_get:
+                m = client.manifest
+            # Returned verbatim
+            assert m == MOCK_MANIFEST
+            # Single fetch, against the release-manifest.json URL
+            assert mock_get.call_count == 1
+            (url,), _ = mock_get.call_args
+            assert url.endswith("/v2026.04.0/release-manifest.json")
+            # Cached on disk under the tag scope
+            cached = Path(tmp) / "v2026.04.0" / ".manifest.json"
+            assert cached.exists()
+            assert json.loads(cached.read_text()) == MOCK_MANIFEST
+
+    def test_manifest_rejects_unsupported_schema(self):
+        """``_check_schema_version`` still gates the fetched manifest."""
+        with tempfile.TemporaryDirectory() as tmp:
+            client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+            bad = {**MOCK_MANIFEST, "schema_version": 99}
+            with patch("mat_vis_client.client._get_json", return_value=bad):
+                with pytest.raises(RuntimeError, match="schema_version=99"):
+                    _ = client.manifest
+
+    def test_manifest_rejects_missing_schema(self):
+        """A manifest with no ``schema_version`` surfaces the cache-clear hint."""
+        with tempfile.TemporaryDirectory() as tmp:
+            client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+            bad = {k: v for k, v in MOCK_MANIFEST.items() if k != "schema_version"}
+            with patch("mat_vis_client.client._get_json", return_value=bad):
+                with pytest.raises(RuntimeError, match="missing 'schema_version'"):
+                    _ = client.manifest
+
 
 class TestClientCatalogQueries:
     """Per-file substrate (#186): materials/channels read from v3 catalog."""
