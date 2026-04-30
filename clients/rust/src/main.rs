@@ -376,15 +376,18 @@ mod tests {
 
     #[test]
     fn resolved_tag_falls_back_to_default() {
-        // Drop MAT_VIS_TAG for this assertion; restore after.
+        // Drop MAT_VIS_TAG for this assertion; restore on scope exit.
+        // SAFETY: covered by `ENV_LOCK` — keeps mutation race-free
+        // even under default (parallel) `cargo test`.
+        let _lock = ENV_LOCK.lock().unwrap();
         let prev = std::env::var("MAT_VIS_TAG").ok();
-        // SAFETY: setting/removing env vars is safe in single-threaded
-        // test context — Cargo runs tests in parallel by default but
-        // this test only reads its own scope and restores.
         unsafe { std::env::remove_var("MAT_VIS_TAG") };
         let tag = resolved_tag(&None);
-        if let Some(p) = prev {
-            unsafe { std::env::set_var("MAT_VIS_TAG", p) };
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("MAT_VIS_TAG", p),
+                None => std::env::remove_var("MAT_VIS_TAG"),
+            }
         }
         assert_eq!(tag, DEFAULT_TAG);
     }
@@ -520,26 +523,62 @@ mod tests {
     // the live tests, which are gated off by default. These four
     // tests close that gap without needing prod HF.
     //
-    // env-var serialization: every test sets `MAT_VIS_HF_BASE` to its
-    // mock server URL. Cargo runs tests in a single binary in parallel
-    // by default, so we serialize through a process-local Mutex.
+    // env-var isolation (#241): every mock test sets `MAT_VIS_HF_BASE`
+    // to its mock server URL. Cargo runs tests in a single binary —
+    // and even with `--test-threads=1` the env var leaks to later
+    // tests in the same process. `@live` tests then 404 on
+    // `http://127.0.0.1:<port>/...` instead of huggingface.co.
+    //
+    // Fix: an in-tree `EnvGuard` RAII helper. Each mock test stores
+    // the prior value, sets the mock URL, and restores on drop —
+    // test-runner agnostic, no new dev dep. We keep `ENV_LOCK` so the
+    // suite is also safe under default (parallel) `cargo test`: env
+    // mutation is not thread-safe in Rust 2024 (`set_var` is unsafe).
 
     use httpmock::prelude::*;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn set_hf_base(url: &str) {
-        // SAFETY: the mutex above is held by the caller for the
-        // duration of the test, so no concurrent reader/writer races.
-        unsafe { std::env::set_var("MAT_VIS_HF_BASE", url) };
+    /// RAII guard that sets an env var on construction and restores
+    /// the prior value (or removes it if previously unset) on drop.
+    /// See module-level comment for rationale (#241).
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prior = std::env::var(key).ok();
+            // SAFETY: callers hold `ENV_LOCK` for the test's duration,
+            // so no concurrent reader/writer race on this var.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: `ENV_LOCK` is held by the test that owns this
+            // guard until after the guard drops (guard is dropped
+            // before the lock guard in reverse declaration order).
+            unsafe {
+                match &self.prior {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
     }
 
     #[test]
     fn http_png_ktx2_fallback() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap();
         let server = MockServer::start();
-        set_hf_base(&server.base_url());
+        // Drop order: `_env` drops before `_lock` (reverse decl order),
+        // so env restoration happens while the lock is still held.
+        let _env = EnvGuard::set("MAT_VIS_HF_BASE", &server.base_url());
 
         // .png 404, .ktx2 200 with valid magic.
         let png_mock = server.mock(|when, then| {
@@ -566,9 +605,9 @@ mod tests {
 
     #[test]
     fn http_magic_byte_rejection() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap();
         let server = MockServer::start();
-        set_hf_base(&server.base_url());
+        let _env = EnvGuard::set("MAT_VIS_HF_BASE", &server.base_url());
 
         // .png 200 but bytes are bogus (no PNG/KTX2 magic).
         let _png = server.mock(|when, then| {
@@ -587,9 +626,9 @@ mod tests {
         // treated identically to a 404 — the loop continues to .ktx2.
         // This is "wrong" in a UX sense (a 503 retry would be ideal)
         // but is consistent across all three v0.6 clients.
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap();
         let server = MockServer::start();
-        set_hf_base(&server.base_url());
+        let _env = EnvGuard::set("MAT_VIS_HF_BASE", &server.base_url());
 
         let _png = server.mock(|when, then| {
             when.method(GET).path("/vtest/ambientcg/1k/Rock064/color.png");
@@ -612,9 +651,9 @@ mod tests {
 
     #[test]
     fn http_sentinel_probed_then_texture_fetched() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap();
         let server = MockServer::start();
-        set_hf_base(&server.base_url());
+        let _env = EnvGuard::set("MAT_VIS_HF_BASE", &server.base_url());
 
         let sentinel = server.mock(|when, then| {
             when.method(GET).path("/vtest/ambientcg/1k/.tier_complete");
@@ -648,9 +687,9 @@ mod tests {
 
     #[test]
     fn http_sentinel_missing_rejects() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap();
         let server = MockServer::start();
-        set_hf_base(&server.base_url());
+        let _env = EnvGuard::set("MAT_VIS_HF_BASE", &server.base_url());
 
         let _miss = server.mock(|when, then| {
             when.method(GET).path("/vtest/ambientcg/1k/.tier_complete");
@@ -694,40 +733,30 @@ mod tests {
             eprintln!("(skipped: set MAT_VIS_E2E=1)");
             return;
         }
-        let _guard = ENV_LOCK.lock().unwrap();
-        // Point the client at the scratch dataset for the duration
-        // of this test only — ENV_LOCK serialises with the httpmock
-        // tests above so they don't see this URL.
-        let prev = std::env::var("MAT_VIS_HF_BASE").ok();
-        set_hf_base("https://huggingface.co/datasets/gerchowl/mat-vis-tst/resolve");
+        let _lock = ENV_LOCK.lock().unwrap();
+        // Point the client at the scratch dataset for the duration of
+        // this test only. `EnvGuard` restores on drop (panic-safe), so
+        // a later @live test sees the original (unset) state — #241.
+        let _env = EnvGuard::set(
+            "MAT_VIS_HF_BASE",
+            "https://huggingface.co/datasets/gerchowl/mat-vis-tst/resolve",
+        );
 
-        let result = (|| -> Result<(), String> {
-            let tag = e2e_tag();
-            let m = fetch_manifest(&tag);
-            assert_eq!(m.schema_version, 3);
-            let cat = fetch_catalog(&tag, "polyhaven", &m);
-            let mid = cat
-                .iter()
-                .find(|e| e.available_tiers.iter().any(|t| t == "1k"))
-                .map(|e| e.id.clone())
-                .ok_or_else(|| {
-                    "no 1k-staged polyhaven material in mat-vis-tst — did the Python E2E suite bake the tag?".to_string()
-                })?;
-            assert_tier_complete(&tag, "polyhaven", "1k")?;
-            let bytes = fetch_texture_bytes(&tag, "polyhaven", &mid, "color", "1k")?;
-            assert!(bytes.starts_with(PNG_MAGIC), "must be a real PNG");
-            assert!(bytes.len() > 1000, "PNG too small: {}", bytes.len());
-            Ok(())
-        })();
-
-        // Restore env (best-effort) before propagating any failure.
-        // SAFETY: ENV_LOCK is held for the duration of the test.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MAT_VIS_HF_BASE", v),
-                None => std::env::remove_var("MAT_VIS_HF_BASE"),
-            }
-        }
-        result.expect("e2e round-trip");
+        let tag = e2e_tag();
+        let m = fetch_manifest(&tag);
+        assert_eq!(m.schema_version, 3);
+        let cat = fetch_catalog(&tag, "polyhaven", &m);
+        let mid = cat
+            .iter()
+            .find(|e| e.available_tiers.iter().any(|t| t == "1k"))
+            .map(|e| e.id.clone())
+            .expect(
+                "no 1k-staged polyhaven material in mat-vis-tst — did the Python E2E suite bake the tag?",
+            );
+        assert_tier_complete(&tag, "polyhaven", "1k").expect("sentinel must exist");
+        let bytes = fetch_texture_bytes(&tag, "polyhaven", &mid, "color", "1k")
+            .expect("texture fetch must succeed");
+        assert!(bytes.starts_with(PNG_MAGIC), "must be a real PNG");
+        assert!(bytes.len() > 1000, "PNG too small: {}", bytes.len());
     }
 }
