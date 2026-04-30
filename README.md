@@ -268,6 +268,14 @@ dagger call -m .dagger bake-and-release \
 - **Data releases**: calver (`v2026.04.2`) — tied to upstream source updates
 - **Code/client releases**: semver (`v0.6.x`) — API changes
 
+**Release tags are immutable.** Once a CalVer tag is published (e.g.
+`v2026.04.2`), the data at that revision will not change — bytes pinned
+to a tag stay pinned. New upstream snapshots, fixes, or rebakes ship as
+a new CalVer tag, never as an in-place rewrite of an existing one. This
+contract is what lets clients use cheap `If-None-Match` conditional GETs
+on the manifest (#258) and trust pinned-tag deployments across long
+intervals without re-validating every byte.
+
 ## Key design decisions
 
 Architecture is captured in [`docs/decisions/`](docs/decisions/). The

@@ -20,26 +20,39 @@ import { MatVisClient, DEFAULT_TAG } from './mat-vis-client.mjs';
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 
+// Issue #258 — the manifest path now reads ``text()`` (so the raw
+// body bytes can be cached side-by-side with the ETag) and inspects
+// ``headers.get('etag')``. Stubs grew the matching surface; legacy
+// tests still call ``json()`` against catalogs / sentinels.
+function _emptyHeaders() {
+  return { get: () => null };
+}
+
 function stubFetch(routes) {
-  return async (url, _opts) => {
+  return async (url, opts) => {
     for (const [pattern, handler] of routes) {
-      if (typeof pattern === 'string' && url.includes(pattern)) return handler(url);
-      if (pattern instanceof RegExp && pattern.test(url)) return handler(url);
+      if (typeof pattern === 'string' && url.includes(pattern)) return handler(url, opts);
+      if (pattern instanceof RegExp && pattern.test(url)) return handler(url, opts);
     }
     return {
       ok: false,
       status: 404,
+      headers: _emptyHeaders(),
       async json() { return {}; },
+      async text() { return ''; },
       async arrayBuffer() { return new ArrayBuffer(0); },
     };
   };
 }
 
-function jsonResp(obj) {
+function jsonResp(obj, etag = null) {
+  const body = JSON.stringify(obj);
   return {
     ok: true,
     status: 200,
+    headers: { get: (k) => (k.toLowerCase() === 'etag' ? etag : null) },
     async json() { return obj; },
+    async text() { return body; },
     async arrayBuffer() { return new ArrayBuffer(0); },
   };
 }
@@ -48,7 +61,9 @@ function bytesResp(u8) {
   return {
     ok: true,
     status: 200,
+    headers: _emptyHeaders(),
     async json() { throw new Error('not json'); },
+    async text() { throw new Error('not text'); },
     async arrayBuffer() {
       return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
     },

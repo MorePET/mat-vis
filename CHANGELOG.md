@@ -19,6 +19,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## mat-vis-client 0.6.3
+
+ETag-aware manifest cache across all four reference clients, plus a
+formal immutable-tag policy declaration. The previous disk cache was
+never invalidated — once a manifest landed under `$MAT_VIS_CACHE`, no
+client could pick up a re-published manifest at the same tag short of
+clearing the cache by hand. With
+[#258](https://github.com/MorePET/mat-vis/issues/258) the cache holds a
+sibling `.manifest.etag` file and every client lifecycle issues one
+`If-None-Match` conditional GET; HF responds 304 when the manifest is
+unchanged (the steady state on an immutable release tag — see Notes
+below) and the cached body is served without re-downloading.
+
+### Changed
+
+- All four reference clients (Python, JS, Rust, shell) replace the
+  never-invalidated manifest disk cache with an ETag-aware conditional
+  GET ([#258](https://github.com/MorePET/mat-vis/issues/258)). One HTTP
+  round-trip per client lifecycle in the steady state (304 on immutable
+  tags); the body is refetched only when the server's ETag actually
+  moves. Defensive cold-start when the origin omits an ETag — body is
+  cached, but no `.manifest.etag` is written, so the next lifecycle
+  refetches unconditionally rather than risking a stale-etag deadlock.
+  JS keeps an in-memory cache only in the browser (no IndexedDB
+  dependency) and a filesystem cache under Node, matching the existing
+  zero-deps posture.
+- All four client package versions aligned to **0.6.3**.
+
+### Notes
+
+- **Release tags are immutable.** Once a CalVer tag is published (e.g.
+  `v2026.04.2`), the data at that revision will not change. New
+  upstream snapshots, fixes, or rebakes ship as a new CalVer tag, never
+  as an in-place rewrite of an existing one. This contract is what lets
+  the new ETag cache trust 304 responses on pinned tags — the manifest
+  bytes simply cannot drift under a pinned tag in the first place.
+
 ## mat-vis-client 0.6.2
 
 Out-of-the-box-usable defaults across all four reference clients. With no
