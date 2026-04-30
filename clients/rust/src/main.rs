@@ -445,6 +445,74 @@ mod tests {
         assert!(bytes.len() > 1000);
     }
 
+    /// #248 — manifest-driven per-(source, tier) coverage.
+    ///
+    /// Single manifest fetch (post-#239) drives every (source, tier)
+    /// where ``complete=true``. Sources that list a tier but have no
+    /// records carrying that tier in their per-source catalog are
+    /// skipped — documented as expected (e.g. gpuopen on v2026.04.x).
+    #[test]
+    fn live_every_listed_tier_is_fetchable() {
+        if !live_enabled() {
+            eprintln!("(skipped: set MAT_VIS_LIVE_TESTS=1)");
+            return;
+        }
+        let tag = live_tag();
+        let manifest = fetch_manifest(&tag);
+        assert!(!manifest.sources.is_empty(), "manifest must list sources");
+
+        let mut sources: Vec<&String> = manifest.sources.keys().collect();
+        sources.sort();
+
+        let mut attempted: Vec<(String, String)> = Vec::new();
+        let mut skipped_empty: Vec<(String, String)> = Vec::new();
+
+        for source in sources {
+            let src_entry = manifest.sources.get(source).expect("source");
+            let mut tiers: Vec<&String> = src_entry.tiers.keys().collect();
+            tiers.sort();
+            for tier in tiers {
+                let tier_entry = src_entry.tiers.get(tier).expect("tier");
+                let complete = tier_entry
+                    .as_object()
+                    .and_then(|o| o.get("complete"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !complete {
+                    continue;
+                }
+                let cat = fetch_catalog(&tag, source, &manifest);
+                let mid = cat
+                    .iter()
+                    .find(|e| e.available_tiers.iter().any(|t| t == tier))
+                    .map(|e| e.id.clone());
+                let Some(material_id) = mid else {
+                    skipped_empty.push((source.clone(), tier.clone()));
+                    continue;
+                };
+                assert_tier_complete(&tag, source, tier)
+                    .unwrap_or_else(|e| panic!("sentinel missing for ({source}, {tier}): {e}"));
+                let bytes = fetch_texture_bytes(&tag, source, &material_id, "color", tier)
+                    .unwrap_or_else(|e| panic!("({source}, {tier}, {material_id}) fetch: {e}"));
+                let head = &bytes[..4.min(bytes.len())];
+                let head_hex: String = head.iter().map(|b| format!("{b:02x}")).collect();
+                let ok = bytes.starts_with(PNG_MAGIC) || bytes.starts_with(KTX2_MAGIC);
+                assert!(
+                    ok,
+                    "({source}, {tier}, {material_id}, magic_bytes_hex_first_4={head_hex:?}) — \
+                     expected PNG (89504e47) or KTX2 (ab4b5458) magic"
+                );
+                attempted.push((source.clone(), tier.clone()));
+            }
+        }
+
+        assert!(
+            !attempted.is_empty(),
+            "no complete (source, tier) pairs had non-empty material lists; \
+             skipped_empty={skipped_empty:?}"
+        );
+    }
+
     // ── httpmock-based offline coverage (#199) ─────────────────────
     //
     // The HTTP-handling code paths (sentinel, fallback, magic-byte

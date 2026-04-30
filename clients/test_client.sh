@@ -299,6 +299,65 @@ live_tests() {
         89504e47|ab4b5458) echo "  PASS PNG/KTX2 magic verified ($magic)"; PASS=$((PASS + 1)) ;;
         *) echo "  FAIL unexpected magic: $magic"; FAIL=$((FAIL + 1)) ;;
     esac
+
+    # #248: manifest-driven per-(source, tier) coverage.
+    # Single manifest GET drives every (source, tier) marked
+    # complete=true. Empty material lists are expected on some sources
+    # (e.g. gpuopen on v2026.04.x) and skipped, not failed.
+    local manifest_url manifest_json
+    manifest_url="https://huggingface.co/datasets/gerchowl/mat-vis/resolve/$MAT_VIS_TAG/release-manifest.json"
+    if ! manifest_json=$(curl -sfL -H "User-Agent: mat-vis-shell-test" "$manifest_url"); then
+        echo "  FAIL #248: failed to fetch manifest from $manifest_url"
+        FAIL=$((FAIL + 1))
+    else
+        local pairs attempted=0 skipped_empty=0 fails_248=0
+        # Emit "<source> <tier>" lines for every complete=true pair.
+        pairs=$(echo "$manifest_json" | jq -r \
+            '.sources | to_entries[] | . as $s |
+             ($s.value.tiers // {}) | to_entries[] |
+             select(.value.complete == true) |
+             "\($s.key) \(.key)"')
+        while IFS=' ' read -r src tier; do
+            [ -n "$src" ] || continue
+            local mats first
+            if ! mats=$("$CLIENT" materials "$src" "$tier" 2>/dev/null); then
+                echo "  FAIL #248: materials lookup failed for ($src, $tier)"
+                FAIL=$((FAIL + 1)); fails_248=$((fails_248 + 1))
+                continue
+            fi
+            first=$(echo "$mats" | head -1)
+            if [ -z "$first" ]; then
+                # Documented expected: some sources publish a tier but
+                # carry no records with that tier in their catalog.
+                skipped_empty=$((skipped_empty + 1))
+                continue
+            fi
+            local out_248="$cache/_248_${src}_${tier}.bin"
+            if ! "$CLIENT" fetch "$src" "$first" color "$tier" -o "$out_248" >/dev/null 2>&1; then
+                echo "  FAIL #248: fetch failed for ($src, $tier, $first)"
+                FAIL=$((FAIL + 1)); fails_248=$((fails_248 + 1))
+                continue
+            fi
+            local m4
+            m4=$(head -c4 "$out_248" | od -An -tx1 | tr -d ' \n')
+            case "$m4" in
+                89504e47|ab4b5458)
+                    attempted=$((attempted + 1))
+                    ;;
+                *)
+                    echo "  FAIL #248: ($src, $tier, $first, magic_bytes_hex_first_4=$m4) — expected PNG (89504e47) or KTX2 (ab4b5458) magic"
+                    FAIL=$((FAIL + 1)); fails_248=$((fails_248 + 1))
+                    ;;
+            esac
+        done <<< "$pairs"
+        if [ "$fails_248" -eq 0 ] && [ "$attempted" -gt 0 ]; then
+            echo "  PASS #248 manifest-driven coverage: $attempted (source,tier) pairs fetched, $skipped_empty empty pair(s) skipped"
+            PASS=$((PASS + 1))
+        elif [ "$fails_248" -eq 0 ] && [ "$attempted" -eq 0 ]; then
+            echo "  FAIL #248: no complete (source,tier) pair yielded a non-empty material list (skipped_empty=$skipped_empty)"
+            FAIL=$((FAIL + 1))
+        fi
+    fi
 }
 
 # ── e2e: opt-in via MAT_VIS_E2E=1 (mat-vis-tst per-file substrate, #193)
