@@ -28,8 +28,16 @@ const HF_BASE =
 // SSoT: clients/js/package.json. Kept in sync by
 // scripts/sync-js-version.py (pre-commit) — a drift test in tests/
 // fails CI if these disagree. Do not hand-edit.
-export const VERSION = '0.6.0';
+export const VERSION = '0.6.2';
 const UA = `mat-vis-client/${VERSION} (JavaScript)`;
+
+// Default tag when the caller doesn't pin one (#242). The dataset's
+// `main` branch is an empty baseline — every release lives on a
+// CalVer branch — so a tag-less client must default to a real
+// release. Bump in lockstep with the Python client's DEFAULT_TAG
+// when a new prod release ships under the per-file substrate
+// (#186 / ADR-0012). Explicit ``tag=...`` still wins.
+export const DEFAULT_TAG = 'v2026.04.2';
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47];
 const KTX2_MAGIC = [0xab, 0x4b, 0x54, 0x58];
@@ -51,10 +59,10 @@ export class MatVisClient {
 
   /**
    * @param {Object} opts
-   * @param {string} [opts.tag] - Release tag (default: 'main')
+   * @param {string} [opts.tag] - Release tag (default: DEFAULT_TAG, see #242)
    */
   constructor({ tag } = {}) {
-    this.#tag = tag || 'main';
+    this.#tag = tag || DEFAULT_TAG;
   }
 
   #hfUrl(path) {
