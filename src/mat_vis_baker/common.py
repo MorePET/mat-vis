@@ -6,6 +6,7 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -82,6 +83,8 @@ for _cat, _keywords in {
         "bamboo",
         "cork",
         "parquet",
+        "plank",  # covers ambientcg's "Planks" category (59 records) via
+        # the plural→singular fallback in _lookup_token
     ],
     "stone": [
         "stone",
@@ -137,6 +140,8 @@ for _cat, _keywords in {
         "mortar",
         "pavement",
         "sidewalk",
+        "paving",
+        "terrazzo",
     ],
     "ceramic": ["ceramic", "porcelain", "tile", "terracotta", "clay", "brick", "pottery"],
     "glass": ["glass", "mirror", "crystal", "window", "translucent", "transparent"],
@@ -169,19 +174,168 @@ for _cat, _keywords in {
         _CATEGORY_MAP[kw] = _cat
 
 
-def normalize_category(raw: str) -> str:
-    """Map a freeform upstream category to one of the 10 canonical categories."""
-    if not raw:
+def _tokenize_category(first: str) -> list[str]:
+    """Split a lower-case first segment into candidate match tokens.
+
+    Handles dashes, underscores, spaces, and CamelCase run-ons like
+    "WoodFloor" / "PaintedPlaster" / "BaseMaterials" (which arrive as
+    "woodfloor" after .lower(), so we split on the original casing
+    before lower-casing — see normalize_category).
+    """
+    # split on any non-alphanumeric delimiter
+    tokens: list[str] = []
+    buf = ""
+    for ch in first:
+        if ch.isalnum():
+            buf += ch
+        else:
+            if buf:
+                tokens.append(buf)
+            buf = ""
+    if buf:
+        tokens.append(buf)
+    return tokens
+
+
+def _split_camel(token: str) -> list[str]:
+    """Split a CamelCase/PascalCase token into lower-case sub-words.
+
+    "WoodFloor" -> ["wood", "floor"]; "SciFi" -> ["sci", "fi"];
+    "PaintedPlaster" -> ["painted", "plaster"]; a token with no upper
+    transitions returns itself (lower-cased) as a single element.
+    """
+    if not token:
+        return []
+    parts: list[str] = []
+    start = 0
+    for i in range(1, len(token)):
+        if token[i].isupper() and token[i - 1].islower():
+            parts.append(token[start:i])
+            start = i
+    parts.append(token[start:])
+    return [p.lower() for p in parts if p]
+
+
+def _lookup_token(word: str) -> str | None:
+    """Look up a single lower-case word in _CATEGORY_MAP with plural fallback.
+
+    Tries the word as-is, then strips a trailing "s" (bricks -> brick,
+    rocks -> rock, tiles -> tile, fabrics -> fabric, leaves unchanged
+    if <=2 chars so we don't match empty strings or single letters).
+    Deterministic: no fuzzy matching.
+    """
+    if not word:
+        return None
+    if word in _CATEGORY_MAP:
+        return _CATEGORY_MAP[word]
+    if len(word) > 2 and word.endswith("s"):
+        stem = word[:-1]
+        if stem in _CATEGORY_MAP:
+            return _CATEGORY_MAP[stem]
+    return None
+
+
+def normalize_category(raw: str, tags: list[str] | None = None) -> str:
+    """Map a freeform upstream category to one of the 10 canonical categories.
+
+    Handles:
+      - Hierarchical paths ("Metal/Steel" -> first segment)
+      - Plurals ("Bricks" -> brick -> ceramic; "Rocks" -> rock -> stone)
+      - Multi-word display strings ("Brick Wall", "Interior Flooring")
+      - CamelCase run-ons ("WoodFloor", "PaintedPlaster", "BaseMaterials")
+      - dash / underscore separators
+
+    When the primary path doesn't find a hit and ``tags`` is supplied,
+    falls back to looking up each tag against ``_CATEGORY_MAP`` (with
+    the same plural handling). This rescues sources whose top-level
+    category is context-only (polyhaven's ``[outdoor, natural, floor]``
+    with a material token hidden in ``tags=[rocks, stones, dirt]``)
+    or whose category is a multi-material bucket whose individual
+    records are tagged with the actual material (ambientcg's
+    ``"Planks"`` records tagged ``["wood", "planks"]``).
+
+    Known fall-throughs that intentionally stay "other" even with tag
+    fallback, because their tags are stylistic / color / format only:
+      - "Liquid", "Manmade", "Human" (physicallybased)
+      - "Atlas", "Decal", "Sign", "OnlyPBR" (ambientcg)
+      - "SciFi", "Wallpaper" (gpuopen)
+      - "Facade", "Roofing", "Interior/Exterior Flooring",
+        "Base Materials" (multi-material buckets)
+
+    Deterministic only — no fuzzy / Levenshtein matching (see mat-vis#150).
+    Unmatched inputs fall through to "other".
+    """
+    if not raw and not tags:
         return "other"
-    # ambientcg uses hierarchical like "Metal/Steel" — take first segment
-    first = raw.split("/")[0].strip().lower()
-    if first in _CATEGORY_MAP:
-        return _CATEGORY_MAP[first]
-    # try individual words
-    for word in first.split():
-        if word in _CATEGORY_MAP:
-            return _CATEGORY_MAP[word]
+    if raw:
+        # ambientcg uses hierarchical like "Metal/Steel" — take first segment.
+        # Preserve original casing so we can split CamelCase afterwards.
+        first_cased = raw.split("/")[0].strip()
+        first = first_cased.lower()
+        # Fast path: whole-segment match (covers legacy behavior).
+        hit = _lookup_token(first)
+        if hit is not None:
+            return hit
+        # Split on delimiters, then CamelCase-split each token.
+        for delim_token in _tokenize_category(first_cased):
+            for sub in _split_camel(delim_token):
+                hit = _lookup_token(sub)
+                if hit is not None:
+                    return hit
+    # Tag fallback — only reached when category failed (or was empty).
+    # Tags are curated by upstream authors, so exact matching against
+    # _CATEGORY_MAP is sufficient; we don't split / camel-case them.
+    #
+    # A few metal-alias keywords ("gold", "silver", "copper", "brass",
+    # "bronze", "chrome") double as English color words on stylistic
+    # items (a "gold"-colored wallpaper, a "copper"-tone fabric). Those
+    # would produce false-positive `metal` classifications if they
+    # appear as tags. The exclusion set only applies in the tag path —
+    # when the UPSTREAM CATEGORY says "Gold", we still correctly map
+    # to metal because the primary branch above already returned.
+    if tags:
+        for tag in tags:
+            if not isinstance(tag, str):
+                continue
+            token = tag.strip().lower()
+            if token in _TAG_AMBIGUOUS_COLOR:
+                continue
+            hit = _lookup_token(token)
+            if hit is not None:
+                return hit
     return "other"
+
+
+# Metal aliases that double as color words on stylistic items. Skipped
+# in the tag-fallback path only — primary category matches still work.
+_TAG_AMBIGUOUS_COLOR: frozenset[str] = frozenset(
+    {"gold", "silver", "copper", "brass", "bronze", "chrome"}
+)
+
+
+# ── SPDX license normalization ──────────────────────────────────
+
+_SPDX_MAP: dict[str, str] = {
+    # upstream strings → SPDX identifiers. Extend per-source as new
+    # upstream license strings appear (covered by CI schema-diff gate).
+    "MIT Public Domain": "MIT",  # gpuopen (issue #168)
+}
+
+
+def normalize_spdx(raw: str | None) -> str:
+    """Map an upstream license string to a valid SPDX identifier.
+
+    Returns ``"NOASSERTION"`` (SPDX-valid, semantically ``unknown``)
+    when the input is empty or unmapped — safer than raising mid-bake
+    and schema-valid (``minLength: 1``).
+    """
+    if not raw or not raw.strip():
+        return "NOASSERTION"
+    key = raw.strip()
+    if key in _SPDX_MAP:
+        return _SPDX_MAP[key]
+    log.warning("normalize_spdx: unknown upstream license %r → NOASSERTION", key)
+    return "NOASSERTION"
 
 
 # ── channel normalization (per-source) ──────────────────────────
@@ -243,23 +397,140 @@ def normalize_channel(source: str, raw_name: str) -> str | None:
 # ── data types ──────────────────────────────────────────────────
 
 
-@dataclass
-class MaterialRecord:
-    """Intermediate record passed between pipeline stages."""
+# ── Layer 1: mat_vis curated block (ADR-0011 / mat-vis#152) ────
+#
+# Stable, unified, cross-source-normalized fields. Every index entry
+# carries exactly this shape; missing upstream values are ``None``, not
+# absent, so the key set is stable. This block is the ONLY query surface
+# — ``client.search()`` / ``client.index()`` look here and nowhere else.
 
-    id: str
-    source: str
-    name: str
-    category: str
-    tags: list[str] = field(default_factory=list)
-    source_url: str = ""
-    source_license: str = "CC0-1.0"
-    source_mtlx_url: str | None = None
-    color_hex: str | None = None
+
+@dataclass
+class PhysicalBlock:
+    """Physical dimensions / resolution, normalized to SI where applicable."""
+
+    dimensions_m: list[float | None] | None = None  # [x, y, z?] in metres
+    max_resolution_px: list[int] | None = None  # [w, h]
+
+
+@dataclass
+class PBRBlock:
+    """Physically-based rendering scalars, mostly from physicallybased.info."""
+
+    color_rgb: list[float] | None = None  # [r, g, b] float 0..1
     roughness: float | None = None
     metalness: float | None = None
     ior: float | None = None
-    last_updated: str = ""
+    specular_f0: list[float] | None = None  # [r, g, b] float
+    transmission: float | None = None
+    complex_ior: list[float] | None = None  # 6-float wavelength-resolved
+
+
+@dataclass
+class AttributionBlock:
+    """Upstream attribution / licensing (SPDX where known)."""
+
+    authors: list[str] = field(default_factory=list)
+    license_spdx: str = "CC0-1.0"
+    source_url: str = ""
+
+
+@dataclass
+class DatesBlock:
+    """Upstream publish / update dates, normalized to ISO-8601 (YYYY-MM-DD)."""
+
+    published: str | None = None
+    updated: str | None = None
+
+
+@dataclass
+class MatVisBlock:
+    """Layer-1 curated contract. Semver-stable across v0.6.x."""
+
+    name: str = ""
+    category: str = "other"
+    tags: list[str] = field(default_factory=list)
+    description: str | None = None
+    physical: PhysicalBlock = field(default_factory=PhysicalBlock)
+    pbr: PBRBlock = field(default_factory=PBRBlock)
+    attribution: AttributionBlock = field(default_factory=AttributionBlock)
+    dates: DatesBlock = field(default_factory=DatesBlock)
+    upstream_id: str = ""
+
+
+# ── Layer 2: upstream verbatim mirror (ADR-0011 / mat-vis#152) ─
+#
+# Per-source, allowlisted passthrough of the upstream JSON response.
+# Explicitly NOT semver-stable: shape follows upstream and may shift.
+# Stripped from ``client.index()`` / ``client.search()`` results;
+# exposed only via ``client.upstream(source, material_id)``.
+
+
+@dataclass
+class UpstreamBlock:
+    """Verbatim upstream metadata, trimmed to a per-source allowlist.
+
+    ``source``: upstream identifier (``"ambientcg"`` / ``"polyhaven"`` / ...).
+    ``schema_version``: bumped when this block's CONTRACT (keys ``source`` /
+    ``fetched_at`` / ``raw``) changes, NOT when upstream adds a field.
+    ``fetched_at``: ISO-8601 UTC timestamp of the bake-time fetch, e.g.
+    ``"2026-04-20T16:00:00Z"``.
+    ``raw``: allowlisted subset of the upstream response. ``{}`` when the
+    allowlist emptied everything (preferred over ``None`` for a stable
+    downstream shape). ``None`` only when the record has no upstream
+    payload at all (should be rare).
+    """
+
+    source: str = ""
+    schema_version: int = 1
+    fetched_at: str | None = None
+    raw: dict | None = None
+
+
+def utc_now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 ``Z`` string.
+
+    Used as ``UpstreamBlock.fetched_at`` at bake time. Second precision is
+    plenty — the field is for downstream staleness diagnosis, not
+    sub-millisecond ordering.
+    """
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _filter_upstream(raw: dict, allowlist: frozenset[str]) -> dict:
+    """Return a shallow copy of ``raw`` keeping only keys in ``allowlist``.
+
+    Shallow by design: the allowlist is a single flat set of top-level keys.
+    Nested dicts (e.g. gpuopen's package metadata, ambientcg's
+    ``downloadFolders``) pass through verbatim when their top-level key is
+    allowed, or are dropped entirely when it isn't. Per-field pruning of
+    nested structures is a future concern — Phase C's goal is a blunt,
+    auditable filter, not a deep reshape.
+
+    Missing keys are not inserted (``None`` placeholders would bloat every
+    record with keys upstream has never had). Non-dict input returns ``{}``.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if k in allowlist}
+
+
+@dataclass
+class MaterialRecord:
+    """Intermediate record passed between pipeline stages.
+
+    Top-level carries bake-pipeline fields only (``id``, ``source``, tier /
+    channel / hash state). Semantic data splits between two layers:
+
+    - ``mat_vis`` (Layer 1): stable, unified, semver-stable across v0.6.x.
+    - ``upstream`` (Layer 2, ADR-0011): verbatim allowlisted mirror of the
+      upstream JSON. Shape follows upstream; NOT semver-stable.
+    """
+
+    id: str
+    source: str
+    mat_vis: MatVisBlock = field(default_factory=MatVisBlock)
+    upstream: UpstreamBlock | None = None
     available_tiers: list[str] = field(default_factory=list)
     maps: list[str] = field(default_factory=list)
     texture_paths: dict[str, Path] = field(default_factory=dict)

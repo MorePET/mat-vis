@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MorePET/mat-vis/docs/specs/release-manifest-schema-v2.json",
+  "title": "Release Manifest (v2 — HF substrate, ADR-0007)",
+  "description": "v2 shape for release-manifest.json. Drafted during Phase 2 of the v0.5.0 migration and expected to be locked in Phase 3. Supersedes v1 (GitHub Releases + parquet) — the per-source entry now points at (tar, rowmap) pairs per tier, and scalar-only sources carry just a catalog pointer. Published as the root-level manifest of every tagged HF revision.",
+  "type": "object",
+  "required": ["version", "release_tag", "sources"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "description": "Schema version. Currently 2.",
+      "const": 2
+    },
+    "release_tag": {
+      "type": "string",
+      "description": "Tag-name of the dataset revision. Calver for production releases (e.g. v2026.04.1), suffixed for pre-releases (e.g. v2026.04.1-rc1).",
+      "pattern": "^v\\d{4}\\.\\d{2}\\.\\d+(-[A-Za-z0-9.]+)?$"
+    },
+    "sources": {
+      "type": "object",
+      "description": "Keyed by source name. Every baked source appears here — scalar-only sources (physicallybased) omit the 'tiers' key.",
+      "propertyNames": {
+        "enum": ["ambientcg", "polyhaven", "gpuopen", "physicallybased"]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/sourceEntry"
+      }
+    }
+  },
+  "$defs": {
+    "sourceEntry": {
+      "type": "object",
+      "required": ["catalog", "materials_count"],
+      "additionalProperties": false,
+      "properties": {
+        "catalog": {
+          "type": "string",
+          "description": "Path-in-repo of the per-source index JSON (e.g. 'physicallybased.json')."
+        },
+        "materials_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of materials in this source's catalog."
+        },
+        "mtlx": {
+          "type": "string",
+          "description": "Optional — path-in-repo of the MaterialX graph index (present only for sources that ship MTLX)."
+        },
+        "tiers": {
+          "type": "object",
+          "description": "Tier → {tar, rowmap} pairs. Absent on scalar-only sources.",
+          "propertyNames": {
+            "enum": ["1k", "2k", "4k", "8k", "ktx2-1k", "ktx2-2k", "ktx2-4k", "ktx2-8k"]
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/tierAssets"
+          }
+        }
+      }
+    },
+    "tierAssets": {
+      "type": "object",
+      "required": ["tar", "rowmap"],
+      "additionalProperties": false,
+      "properties": {
+        "tar": {
+          "type": "string",
+          "description": "Path-in-repo of the tar archive (e.g. 'ambientcg-1k.tar' or 'ktx2/ambientcg-1k.tar')."
+        },
+        "rowmap": {
+          "type": "string",
+          "description": "Path-in-repo of the offset/length sidecar (e.g. 'ambientcg-1k-rowmap.json')."
+        }
+      }
+    }
+  }
+}

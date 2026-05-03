@@ -1,23 +1,42 @@
 ---
-# Bake workflow — thin Dagger wrapper.
+# Bake workflow — atomic HF push per (source, tier) per ADR-0007.
+#
+# Invokes the Dagger `bake` function (#136) which wraps
+# mat-vis-baker hf-bake in a python:3.12-slim container. Container
+# bootstraps inside Dagger — no separate install steps here.
+# Reproduce locally with: dagger call bake --source=... --tier=1k ...
+#
+# #233: matrix workflow_dispatch. A single dispatch can target N
+# sources (`-f sources=ambientcg,polyhaven,gpuopen` or `-f sources=all`)
+# and they run sequentially under a job-level concurrency group, so the
+# repo-budget concurrency from #225/#227 no longer drops middle
+# dispatches when N>2 are queued in quick succession.
 
 name: Bake
 
 on:  # yamllint disable-line rule:truthy
   workflow_dispatch:
     inputs:
+      sources:
+        description: >-
+          Comma-separated sources, or "all". "all" expands to
+          ambientcg,polyhaven,gpuopen for textured tiers, and adds
+          physicallybased only when tier=scalar.
+        required: false
+        default: 'all'
+        type: string
       source:
-        description: 'Source to bake'
-        required: true
-        default: 'ambientcg'
-        type: choice
-        options:
-          - ambientcg
-          - polyhaven
-          - gpuopen
-          - physicallybased
+        description: >-
+          DEPRECATED (#233) — single-source legacy input; use `sources`.
+          When `sources` is left at its default and `source` is set,
+          `source` is treated as a 1-element matrix. Accepts the same
+          values as the old choice list: ambientcg|polyhaven|gpuopen|
+          physicallybased. Remove after one milestone.
+        required: false
+        default: ''
+        type: string
       tier:
-        description: 'Resolution tier'
+        description: 'Resolution tier (scalar for physicallybased)'
         required: true
         default: '1k'
         type: choice
@@ -27,85 +46,170 @@ on:  # yamllint disable-line rule:truthy
           - 512
           - 1k
           - 2k
+          - 4k
+          - 8k
+          - scalar
       limit:
         description: 'Max materials (0 = all)'
         required: false
         default: '0'
         type: string
       offset:
-        description: 'Skip first N materials (for chunked execution)'
+        description: 'Skip first N materials'
         required: false
         default: '0'
         type: string
       batch-size:
-        description: 'Materials per streaming batch'
+        description: 'Materials per atomic commit (count ceiling). #228: bytes is the binding constraint at typical content; 300 is a safe overshoot.'
         required: false
-        default: '50'
+        default: '300'
         type: string
-      upload-chunks:
-        description: 'Upload + delete each parquet partition as it closes (frees runner disk)'
+      batch-max-bytes:
+        description: 'Bytes per atomic commit (#228). 734003200 = 700 MiB; HF caps at 1 GiB/commit, leaving headroom for catalog + manifest + sentinel.'
         required: false
-        default: true
-        type: boolean
+        default: '734003200'
+        type: string
       release-tag:
-        description: 'Calver data release tag (e.g. v2026.04.0)'
-        required: false
-        default: 'v2026.04.0'
+        description: 'Calver data release tag (e.g. v2026.04.1)'
+        required: true
+        default: 'v2026.04.1'
         type: string
-      category:
-        description: 'Only bake materials in one normalized category (empty = all)'
-        required: false
-        default: ''
-        type: choice
-        options:
-          - ''
-          - ceramic
-          - concrete
-          - fabric
-          - glass
-          - metal
-          - organic
-          - other
-          - plastic
-          - stone
-          - wood
       dry-run:
-        description: 'Fetch + bake but skip release uploads'
+        description: 'Bake to local tar; skip the HF push'
+        required: false
+        default: false
+        type: boolean
+      repo-id:
+        description: 'HF dataset repo'
+        required: false
+        default: 'gerchowl/mat-vis-tst'
+        type: string
+      allow-prod:
+        description: 'Required to target any non-*-tst HF repo (e.g. gerchowl/mat-vis)'
         required: false
         default: false
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
   issues: write          # needed by notify-on-failure composite action
 
+# #235 hotfix: workflow-level budget — serialise *every* dispatch
+# against a given HF repo. Previously this was at workflow level, then
+# moved to job level by #233 to support matrix fan-out. The job-level
+# group conflicted with matrix siblings (one-pending-per-group cancels
+# mid-matrix). Reverted here to workflow level; serialization within
+# one dispatch is now done by `matrix.max-parallel: 1` below.
+concurrency:
+  group: bake-${{ inputs.repo-id }}-budget
+  cancel-in-progress: false
+
 jobs:
-  bake:
-    name: Bake ${{ inputs.source }} ${{ inputs.tier }}
+  plan:
+    name: plan (matrix expansion)
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    outputs:
+      sources: ${{ steps.expand.outputs.sources }}
+    steps:
+      - id: expand
+        env:
+          SOURCES_INPUT: ${{ inputs.sources }}
+          SOURCE_LEGACY: ${{ inputs.source }}
+          TIER: ${{ inputs.tier }}
+        run: |
+          set -euo pipefail
+          # #233: resolve effective sources list.
+          #   - `sources` wins when both are set.
+          #   - bare legacy `source` (with default `sources=all`) is
+          #     promoted to a 1-element matrix for back-compat.
+          #   - "all" expands to the textured trio; physicallybased is
+          #     scalar-only and joins the matrix only when tier=scalar.
+          sources="$SOURCES_INPUT"
+          if [ -n "$SOURCE_LEGACY" ] && [ "$sources" = "all" ]; then
+            sources="$SOURCE_LEGACY"
+          fi
+
+          python3 - "$sources" "$TIER" <<'PY' >>"$GITHUB_OUTPUT"
+          import json, sys
+          raw, tier = sys.argv[1], sys.argv[2]
+          if raw == "all":
+              expanded = ["ambientcg", "polyhaven", "gpuopen"]
+              if tier == "scalar":
+                  expanded.append("physicallybased")
+          else:
+              expanded = [s.strip() for s in raw.split(",") if s.strip()]
+          if not expanded:
+              raise SystemExit("error: empty sources list after expansion")
+          print(f"sources={json.dumps(expanded)}")
+          PY
+          echo "Plan: tier=$TIER sources=$(tail -n1 "$GITHUB_OUTPUT")"
+
+  bake:
+    needs: plan
+    name: hf-bake ${{ matrix.source }} ${{ inputs.tier }}
+    runs-on: ubuntu-latest
+    # GH-hosted runners hard-cap at 360 min; 350 leaves headroom for
+    # the post-step log upload and any slack in the scheduler.
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      # #235 hotfix: serialise the matrix siblings WITHIN one dispatch
+      # via matrix.max-parallel. Job-level concurrency-group serialization
+      # (added in #233) doesn't work for matrix siblings — GH's "one
+      # pending slot per group" rule cancels every sibling beyond the
+      # second within the same run, killing #214 phase-7 polyhaven on
+      # the first prod-derive matrix dispatch. matrix.max-parallel is
+      # the correct within-run primitive.
+      max-parallel: 1
+      matrix:
+        source: ${{ fromJson(needs.plan.outputs.sources) }}
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dagger/dagger-for-github@v8.4.1
+      # `uv` is needed by the schema-drift gate below; install once up-front
+      # so the gate doesn't fail with `uv: command not found` (latent since
+      # #170 — gate had never fired against a non-dry-run bake until #214).
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Dagger shell-safety lint (#61)
+        run: python3 scripts/check-dagger-shell-safety.py
+
+      - name: hf-bake
+        uses: dagger/dagger-for-github@v8.4.1
         with:
           verb: call
           module: .dagger
+          # Dagger fn sentinels: limit=0 (no cap), offset=0 (no skip),
+          # shard-index/total=-1 (unsharded). The baker CLI adopts the
+          # same sentinel convention so re-plumbing is a pure rename.
           args: >-
-            bake-and-release
-            --src=.
-            --source=${{ inputs.source }}
+            bake
+            --context=.
+            --source=${{ matrix.source }}
             --tier=${{ inputs.tier }}
+            --release-tag=${{ inputs.release-tag }}
+            --repo-id=${{ inputs.repo-id }}
+            --allow-prod=${{ inputs.allow-prod }}
+            --hf-token=env:HF_TOKEN
             --limit=${{ inputs.limit }}
             --offset=${{ inputs.offset }}
             --batch-size=${{ inputs.batch-size }}
-            --upload-chunks=${{ inputs.upload-chunks }}
-            --release-tag=${{ inputs.release-tag }}
-            --category=${{ inputs.category }}
-            --dry-run=${{ inputs.dry-run }}
-            --registry-pass=env:GITHUB_TOKEN
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            --batch-max-bytes=${{ inputs.batch-max-bytes }}
+            ${{ inputs.dry-run == true && '--dry-run=true' || '' }}
+
+      # ADR-0011 / mat-vis#152 phase-c: lock the Layer-2 upstream mirror
+      # against silent schema drift. The baker just pushed the candidate
+      # <source>.json to HF at release-tag; fetch it and diff against the
+      # previous release. See scripts/check_upstream_schema_drift.py.
+      # Skipped on dry-run (nothing was pushed to HF).
+      - name: Upstream schema-drift gate (#152)
+        if: inputs.dry-run != true
+        run: |
+          uv run python scripts/check_upstream_schema_drift.py \
+            --source "${{ matrix.source }}" \
+            --candidate "https://huggingface.co/datasets/${{ inputs.repo-id }}/resolve/${{ inputs.release-tag }}/${{ matrix.source }}.json"
 
       - name: Notify on failure
         if: failure()
@@ -113,11 +217,9 @@ jobs:
         with:
           label-prefix: "[bake-failed]"
           workflow-name: "bake"
-          target: "${{ inputs.source }}/${{ inputs.tier }}${{ inputs.category != '' && format('/{0}', inputs.category) || '' }} @ ${{ inputs.release-tag }}"
+          target: "${{ matrix.source }}/${{ inputs.tier }} @ ${{ inputs.release-tag }}"
           context: >-
             Likely causes: upstream API transient (rate-limit or 5xx),
-            runner disk filled, toktx/ktx2 encode failure (#82 territory),
-            or gh release upload failed silently. Check run logs for the
-            specific step that errored. If upload-chunks was true, some
-            parquets may be partially uploaded — validate-release will
-            surface any dangling rowmaps on next run.
+            runner disk filled during fetch, or HF push auth/size error.
+            Check the hf-bake step logs. Atomic HF commits mean a failed
+            bake leaves the target revision unchanged — safe to retry.

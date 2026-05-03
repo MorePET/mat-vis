@@ -7,6 +7,12 @@ Usage:
     dagger call test                 # pytest
     dagger call smoke                # verify pyarrow import (slim)
     dagger call smoke-materialx      # verify MaterialX import (heavy)
+    dagger call smoke-baker          # verify baker container (#135)
+    dagger call bake                 # per-file hf-bake → atomic HF commit (#136 / ADR-0012)
+    dagger call smoke-bake           # dry-run bake against gerchowl/mat-vis-tst (#136)
+    dagger call derive               # per-file hf-derive (resize) (#204)
+    dagger call derive-ktx-2         # per-file hf-derive-ktx2 (#204; #240)
+    dagger call integration-test     # local end-to-end per-file bake + verify
     dagger call probe-sources        # verify upstream API connectivity
     dagger call test-all             # lint + test + smoke + probe
     dagger call test-client-python   # pytest on Python reference client
@@ -14,7 +20,7 @@ Usage:
     dagger call test-client-shell    # bash tests for shell reference client
     dagger call test-client-rust     # cargo test for Rust reference client
     dagger call test-clients         # all 4 client tests in parallel
-    dagger call validate-release      # verify release assets are complete
+    dagger call test-e-2-e           # nightly E2E against mat-vis-tst (#193; #240)
     dagger call preflight            # verify GHCR auth before push
     dagger call push                 # preflight + build + push to GHCR
 """
@@ -23,6 +29,8 @@ from typing import Annotated
 
 import dagger
 from dagger import Doc, dag, function, object_type
+
+from mat_vis_ci._bake_cli import bake_argv as _bake_argv
 
 IMAGE = "ghcr.io/morepet/mat-vis-baker"
 TARGET_PLATFORM = dagger.Platform("linux/amd64")
@@ -99,7 +107,26 @@ if ok < len(SOURCES):
 '''
 
 VERIFY_SCRIPT = '''\
-"""Verify integration test output: parquet + rowmap + range-read."""
+"""Verify hf-bake --dry-run output: v3 catalog (ADR-0012).
+
+Per-file substrate dry-runs do NOT persist the per-file tree to disk
+— ``bake_one_per_file`` builds CommitOperationAdd ops in memory,
+logs "would commit N files" on dry-run, and unlinks the local texture
+bytes after the (skipped) flush. The only on-disk artifact a dry-run
+leaves behind is the per-source catalog JSON at the work_dir root.
+
+So the verify here:
+  1. Asserts the catalog exists and is v3-shaped (list of entries
+     with a ``mat_vis`` block).
+  2. Trusts the CLI exit code (already 0 by the time we run, else
+     the previous Dagger step would have failed).
+
+Live per-file tree shape (PNGs under ``<source>/<tier>/<id>/<channel>``,
+``.tier_complete`` sentinel) is asserted by the MAT_VIS_E2E=1
+round-trip suite in ``tests/e2e/test_per_file_roundtrip.py`` — that
+suite actually pushes to ``gerchowl/mat-vis-tst`` and HEADs back the
+files.
+"""
 
 import json
 import sys
@@ -107,321 +134,25 @@ from pathlib import Path
 
 out_dir = Path(sys.argv[1])
 
-# Check files exist
-pq_files = sorted(out_dir.glob("*.parquet"))
-assert pq_files, f"No parquet files in {out_dir}"
+# Catalog at work_dir root (v3 shape: list of entries with mat_vis block).
+catalog_files = [
+    p for p in out_dir.glob("*.json") if p.name != "release-manifest.json"
+]
+assert catalog_files, f"no per-source catalog JSON at {out_dir}"
+for cat in catalog_files:
+    body = json.loads(cat.read_text())
+    assert isinstance(body, list) and body, (
+        f"{cat.name}: catalog must be a non-empty list"
+    )
+    assert all("mat_vis" in entry for entry in body), (
+        f"{cat.name}: every entry must carry a 'mat_vis' block (v3 shape)"
+    )
 
-rowmap_files = sorted(out_dir.glob("*-rowmap.json"))
-assert rowmap_files, f"No rowmap files in {out_dir}"
-
-index_files = list(out_dir.glob("*.json"))
-assert any("rowmap" not in f.name for f in index_files), "No index JSON"
-
-# Match each rowmap to its parquet by category slug
-verified = 0
-errors = []
-total_materials = 0
-
-for rm_path in rowmap_files:
-    rowmap = json.loads(rm_path.read_text())
-    pq_name = rowmap.get("parquet_file", "")
-    pq_path = out_dir / pq_name if pq_name else None
-
-    if not pq_path or not pq_path.exists():
-        # Fall back: extract category from rowmap filename and find matching parquet
-        # e.g. ambientcg-1k-wood-rowmap.json -> mat-vis-ambientcg-1k-wood.parquet
-        slug = rm_path.stem.replace("-rowmap", "")
-        candidates = [p for p in pq_files if slug in p.stem]
-        if not candidates:
-            errors.append(f"No parquet for rowmap {rm_path.name}")
-            continue
-        pq_path = candidates[0]
-
-    file_bytes = pq_path.read_bytes()
-    materials = rowmap["materials"]
-    total_materials += len(materials)
-
-    for mid, channels in materials.items():
-        for ch, rng in channels.items():
-            offset = rng["offset"]
-            length = rng["length"]
-            chunk = file_bytes[offset : offset + length]
-            if chunk[:4] != b"\\x89PNG":
-                errors.append(f"{mid}/{ch}: not PNG at offset {offset} (got {chunk[:4]!r})")
-                continue
-            if len(chunk) != length:
-                errors.append(
-                    f"{mid}/{ch}: length mismatch at offset {offset}"
-                    f" (expected {length}, got {len(chunk)}, file_size={len(file_bytes)})"
-                )
-                continue
-            verified += 1
-
-if errors:
-    for e in errors:
-        print(f"  FAIL {e}")
-    sys.exit(1)
-
-print(f"  OK parquets: {len(pq_files)} files")
-print(f"  OK rowmaps: {len(rowmap_files)} files, {total_materials} materials")
-print(f"  OK range-read: {verified} channels verified (all PNG)")
-print(f"  OK index: {len(index_files)} JSON files")
-print(f"\\nintegration test passed")
-'''
-
-
-VALIDATE_RELEASE_SCRIPT = '''\
-"""Validate all expected release assets exist and range reads work.
-
-Stronger than the old version:
- - Discovers tier list from the manifest (covers ktx2-*, mtlx, future tiers)
- - Asserts minimum channel count per material (catches silent drops)
- - Tests N random materials per source x tier (not just 1)
- - Detects PNG vs KTX2 magic bytes depending on tier name
- - Verifies counts of parquets vs rowmap_files match per source x tier
-"""
-
-import json
-import os
-import random
-import sys
-import urllib.request
-
-USER_AGENT = "mat-vis-validate/0.2"
-REQUIRED_SOURCES = ["ambientcg", "polyhaven"]
-OPTIONAL_SOURCES = ["gpuopen"]
-
-# Minimum channel count a material must have. Looser for KTX2 where toktx
-# may reject some channel types (16-bit displacement/ao, etc).
-MIN_CHANNELS_PER_MATERIAL = {
-    "png": 1,    # at least one channel (normal or color) must be present
-    "ktx2": 1,   # tolerate partial coverage for now
-}
-
-# How many random materials to sample per source x tier
-SAMPLE_SIZE = 3
-
-PNG_MAGIC = b"\\x89PNG"
-KTX2_MAGIC = b"\\xabKTX 20\\xbb\\r\\n\\x1a\\n"
-
-
-def get(url, headers=None):
-    hdrs = {"User-Agent": USER_AGENT}
-    if headers:
-        hdrs.update(headers)
-    req = urllib.request.Request(url, headers=hdrs)
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read()
-
-
-def get_json(url):
-    return json.loads(get(url))
-
-
-def head_ok(url):
-    """Return True if HEAD on the URL succeeds (200 after following redirects).
-
-    Used to assert a parquet exists on the release without downloading it —
-    the file is typically 100 MB to 2 GB, and we only need to know it's
-    there. GitHub's release URL 302s to a signed CDN URL; urllib follows.
-    """
-    hdrs = {"User-Agent": USER_AGENT}
-    req = urllib.request.Request(url, headers=hdrs, method="HEAD")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
-
-
-tag = os.environ.get("VALIDATE_TAG", "v2026.04.0")
-release_base = f"https://github.com/MorePET/mat-vis/releases/download/{tag}"
-manifest_url = f"{release_base}/release-manifest.json"
-
-# ── 1. Fetch manifest ──
-print(f"=== validate-release {tag} ===\\n")
-try:
-    manifest = get_json(manifest_url)
-    print(f"  OK manifest fetched ({len(json.dumps(manifest))} bytes)")
-except Exception as e:
-    print(f"FAIL manifest: {e}")
-    sys.exit(1)
-
-tiers_data = manifest.get("tiers", {})
-if not tiers_data:
-    print("FAIL manifest has no tiers")
-    sys.exit(1)
-
-failures = []
-passes = []
-
-
-def expected_magic(tier_name):
-    """Return expected file-format magic bytes for a tier."""
-    if tier_name.startswith("ktx2"):
-        return KTX2_MAGIC, "KTX2"
-    return PNG_MAGIC, "PNG"
-
-
-def min_channels_for(tier_name):
-    return MIN_CHANNELS_PER_MATERIAL["ktx2" if tier_name.startswith("ktx2") else "png"]
-
-
-def validate_source_tier(source, tier, tier_info, required):
-    """Run all checks for a single source x tier combo. Returns (passes, failures)."""
-    label = f"{source}/{tier}"
-    base_url = tier_info.get("base_url", "")
-    sources_in_tier = tier_info.get("sources", {})
-
-    if source not in sources_in_tier:
-        if required:
-            return [], [f"{label}: missing from manifest"]
-        return [f"{label}: not present (optional, OK)"], []
-
-    src_data = sources_in_tier[source]
-    parquet_files = src_data.get("parquet_files", [])
-    rowmap_files = src_data.get("rowmap_files", [])
-    if not rowmap_files:
-        rowmap_files = [src_data.get("rowmap_file", f"{source}-{tier}-rowmap.json")]
-
-    local_passes = []
-    local_failures = []
-
-    # Parquet/rowmap count parity (each parquet should have a rowmap)
-    if parquet_files and len(rowmap_files) != len(parquet_files):
-        local_failures.append(
-            f"{label}: parquet/rowmap count mismatch "
-            f"({len(parquet_files)} pq, {len(rowmap_files)} rm)"
-        )
-
-    # Aggregate across all chunked rowmaps
-    total_materials = 0
-    all_channel_counts = []
-    sample_pool = []  # list of (mat_id, channels, pq_file) for random sampling
-
-    for rm_file in rowmap_files:
-        rm_url = base_url + rm_file
-        try:
-            rowmap = get_json(rm_url)
-        except Exception as e:
-            local_failures.append(f"{label}: rowmap fetch failed ({rm_file}): {e}")
-            continue
-
-        materials = rowmap.get("materials", {})
-        pq_file = rowmap.get("parquet_file", "")
-        if not materials:
-            local_failures.append(f"{label}: {rm_file} has 0 materials")
-            continue
-        if not pq_file:
-            local_failures.append(f"{label}: {rm_file} missing parquet_file")
-            continue
-
-        # Manifest consistency: rowmap claims a parquet; assert it's uploaded.
-        # Catches the "silently missing parquet" failure mode directly, without
-        # relying on random-sample range reads to stumble over the missing file
-        # (the v2026.04.0 release shipped with 4 dangling rowmaps that the old
-        # count-parity check caught in aggregate but couldn't identify by name).
-        pq_url = base_url + pq_file
-        if not head_ok(pq_url):
-            local_failures.append(
-                f"{label}: rowmap {rm_file} points at parquet {pq_file} "
-                f"which is not uploaded to the release"
-            )
-            continue
-
-        total_materials += len(materials)
-        for mid, chans in materials.items():
-            all_channel_counts.append(len(chans))
-            sample_pool.append((mid, chans, pq_file))
-
-    if total_materials == 0:
-        local_failures.append(f"{label}: no materials across any rowmap")
-        return local_passes, local_failures
-
-    # Minimum channel-count assertion (catches silent drops)
-    min_chans = min(all_channel_counts) if all_channel_counts else 0
-    max_chans = max(all_channel_counts) if all_channel_counts else 0
-    required_min = min_channels_for(tier)
-    if min_chans < required_min:
-        local_failures.append(
-            f"{label}: min channels per material ({min_chans}) below "
-            f"threshold ({required_min})"
-        )
-    else:
-        local_passes.append(
-            f"{label}: {total_materials} materials, "
-            f"channels min={min_chans} max={max_chans}"
-        )
-
-    # Range-read N random materials, verify format magic
-    magic, magic_name = expected_magic(tier)
-    n = min(SAMPLE_SIZE, len(sample_pool))
-    samples = random.sample(sample_pool, n) if n > 0 else []
-
-    verified = 0
-    for mat_id, channels, pq_file in samples:
-        ch_name = random.choice(list(channels.keys()))
-        rng = channels[ch_name]
-        offset = rng["offset"]
-        length = rng["length"]
-        pq_url = base_url + pq_file
-        try:
-            data = get(pq_url, headers={"Range": f"bytes={offset}-{offset + length - 1}"})
-            if not data.startswith(magic):
-                local_failures.append(
-                    f"{label}: {mat_id}/{ch_name} not {magic_name} "
-                    f"(got {data[: len(magic)]!r})"
-                )
-            else:
-                verified += 1
-        except Exception as e:
-            local_failures.append(f"{label}: range read {mat_id}/{ch_name} failed: {e}")
-
-    if verified == n and n > 0:
-        local_passes.append(f"{label}: {verified}/{n} range-reads verified as {magic_name}")
-
-    return local_passes, local_failures
-
-
-# ── 2. Validate all tiers discovered in manifest ──
-# Discovered from manifest, NOT hardcoded — covers ktx2-*, mtlx, future tiers.
-for tier in sorted(tiers_data.keys()):
-    tier_info = tiers_data[tier]
-    for source in REQUIRED_SOURCES:
-        p, f = validate_source_tier(source, tier, tier_info, required=True)
-        passes.extend(p)
-        failures.extend(f)
-    for source in OPTIONAL_SOURCES:
-        p, f = validate_source_tier(source, tier, tier_info, required=False)
-        passes.extend(p)
-        failures.extend(f)
-
-# ── 5. Check physicallybased index JSON ──
-pb_label = "physicallybased/index"
-try:
-    pb_url = f"{release_base}/physicallybased.json"
-    pb_data = get_json(pb_url)
-    if isinstance(pb_data, list) and len(pb_data) > 0:
-        passes.append(f"{pb_label}: OK ({len(pb_data)} entries)")
-    else:
-        failures.append(f"{pb_label}: unexpected shape (got {type(pb_data).__name__})")
-except Exception as e:
-    failures.append(f"{pb_label}: {e}")
-
-# ── Report ──
-print()
-for p in passes:
-    print(f"  OK {p}")
-for f in failures:
-    print(f"FAIL {f}")
-
-total = len(passes) + len(failures)
-print(f"\\n{len(passes)}/{total} checks passed")
-if failures:
-    print(f"{len(failures)} FAILURES — release is incomplete")
-    sys.exit(1)
-else:
-    print("release validated successfully")
+print(f"  OK catalogs: {len(catalog_files)} v3 file(s)")
+for cat in catalog_files:
+    body = json.loads(cat.read_text())
+    print(f"  OK {cat.name}: {len(body)} entries, all v3-shaped")
+print(f"\\nintegration test passed (per-file substrate, ADR-0012)")
 '''
 
 
@@ -483,6 +214,13 @@ class MatVisCi:
             .with_mounted_directory("/app", context)
             .with_workdir("/app")
             .with_exec(["pip", "install", "--quiet", "-e", ".[baker,dev]"])
+            # Install the client package too so cross-module tests
+            # (e.g. tests/test_version_sync.py::test_client_runtime_version_matches_pyproject,
+            # which does ``from mat_vis_client import __version__``) can
+            # import it. Without this, the top-level tests/ suite can
+            # only see the baker package even though it guards client
+            # invariants.
+            .with_exec(["pip", "install", "--quiet", "-e", "./clients/python"])
             .with_exec(["pytest", "tests/", "-v"])
             .stdout()
         )
@@ -533,12 +271,16 @@ class MatVisCi:
     async def test_client_python(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.2",
+        live: Annotated[
+            bool,
+            Doc("Set MAT_VIS_LIVE_TESTS=1 + MAT_VIS_LIVE_TAG=tag to enable @live tests (#248)"),
+        ] = False,
     ) -> str:
         """Run pytest on the Python reference client against a live release."""
         context = src or dag.host().directory(".")
         pip_cache = dag.cache_volume("pip-cache")
-        return await (
+        ctr = (
             dag.container()
             .from_("python:3.12-slim")
             .with_mounted_cache("/root/.cache/pip", pip_cache)
@@ -546,60 +288,81 @@ class MatVisCi:
             .with_workdir("/app/clients/python")
             .with_exec(["pip", "install", "--quiet", "pytest", "."])
             .with_env_variable("MAT_VIS_TAG", tag)
-            .with_exec(["pytest", "test_client.py", "-v"])
-            .stdout()
         )
+        if live:
+            ctr = ctr.with_env_variable("MAT_VIS_LIVE_TESTS", "1").with_env_variable(
+                "MAT_VIS_LIVE_TAG", tag
+            )
+        return await ctr.with_exec(["pytest", "test_client.py", "-v"]).stdout()
 
     @function
     async def test_client_js(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.2",
+        live: Annotated[
+            bool,
+            Doc("Set MAT_VIS_LIVE_TESTS=1 + MAT_VIS_LIVE_TAG=tag to enable live tests (#248)"),
+        ] = False,
     ) -> str:
         """Run node --test on the JS reference client against a live release."""
         context = src or dag.host().directory(".")
-        return await (
+        ctr = (
             dag.container()
             .from_("node:22-slim")
             .with_mounted_directory("/app", context)
             .with_workdir("/app/clients/js")
             .with_env_variable("MAT_VIS_TAG", tag)
-            .with_exec(["node", "--test", "test_client.mjs"])
-            .stdout()
         )
+        if live:
+            ctr = ctr.with_env_variable("MAT_VIS_LIVE_TESTS", "1").with_env_variable(
+                "MAT_VIS_LIVE_TAG", tag
+            )
+        return await ctr.with_exec(["node", "--test", "test_client.mjs"]).stdout()
 
     @function
     async def test_client_shell(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.2",
+        live: Annotated[
+            bool,
+            Doc("Set MAT_VIS_LIVE_TESTS=1 + MAT_VIS_LIVE_TAG=tag to enable live tests (#248)"),
+        ] = False,
     ) -> str:
         """Run bash test script for the shell reference client against a live release."""
         context = src or dag.host().directory(".")
-        return await (
+        ctr = (
             dag.container()
             .from_("alpine:3.20")
             .with_exec(["apk", "add", "--no-cache", "bash", "curl", "jq", "vim"])
             .with_mounted_directory("/app", context)
             .with_workdir("/app/clients")
             .with_env_variable("MAT_VIS_TAG", tag)
-            .with_exec(["bash", "test_client.sh"])
-            .stdout()
         )
+        if live:
+            ctr = ctr.with_env_variable("MAT_VIS_LIVE_TESTS", "1").with_env_variable(
+                "MAT_VIS_LIVE_TAG", tag
+            )
+        return await ctr.with_exec(["bash", "test_client.sh"]).stdout()
 
     @function
     async def test_client_rust(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.2",
+        live: Annotated[
+            bool,
+            Doc("Set MAT_VIS_LIVE_TESTS=1 + MAT_VIS_LIVE_TAG=tag to enable live tests (#248)"),
+        ] = False,
     ) -> str:
         """Run cargo test for the Rust reference client against a live release."""
         context = src or dag.host().directory(".")
         cargo_cache = dag.cache_volume("cargo-registry")
         target_cache = dag.cache_volume("cargo-target")
-        return await (
+        ctr = (
             dag.container()
-            .from_("rust:1.86-slim")
+            .from_("rust:1.89-slim")
             .with_exec(["apt-get", "update", "-qq"])
             .with_exec(["apt-get", "install", "-y", "-qq", "pkg-config", "libssl-dev"])
             .with_mounted_cache("/usr/local/cargo/registry", cargo_cache)
@@ -607,25 +370,35 @@ class MatVisCi:
             .with_mounted_directory("/app", context)
             .with_workdir("/app/clients/rust")
             .with_env_variable("MAT_VIS_TAG", tag)
-            .with_exec(["cargo", "test", "--", "--test-threads=1"])
-            .stdout()
         )
+        if live:
+            ctr = ctr.with_env_variable("MAT_VIS_LIVE_TESTS", "1").with_env_variable(
+                "MAT_VIS_LIVE_TAG", tag
+            )
+        # #241: mock + live tests now share a single cargo invocation
+        # again — `EnvGuard` in the test code restores `MAT_VIS_HF_BASE`
+        # on test exit, so env-var pollution can't bleed across tests.
+        return await ctr.with_exec(["cargo", "test", "--", "--test-threads=1"]).stdout()
 
     @function
     async def test_clients(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.0",
+        tag: Annotated[str, Doc("Release tag to test against")] = "v2026.04.2",
+        live: Annotated[
+            bool,
+            Doc("Forward MAT_VIS_LIVE_TESTS=1 + MAT_VIS_LIVE_TAG=tag to every client (#248)"),
+        ] = False,
     ) -> str:
         """Run all 4 reference client test suites in parallel."""
         context = src or dag.host().directory(".")
 
         import asyncio
 
-        py_task = asyncio.ensure_future(self.test_client_python(context, tag))
-        js_task = asyncio.ensure_future(self.test_client_js(context, tag))
-        sh_task = asyncio.ensure_future(self.test_client_shell(context, tag))
-        rs_task = asyncio.ensure_future(self.test_client_rust(context, tag))
+        py_task = asyncio.ensure_future(self.test_client_python(context, tag, live))
+        js_task = asyncio.ensure_future(self.test_client_js(context, tag, live))
+        sh_task = asyncio.ensure_future(self.test_client_shell(context, tag, live))
+        rs_task = asyncio.ensure_future(self.test_client_rust(context, tag, live))
 
         py_out, js_out, sh_out, rs_out = await asyncio.gather(py_task, js_task, sh_task, rs_task)
 
@@ -643,9 +416,17 @@ class MatVisCi:
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
     ) -> str:
-        """End-to-end: fetch 2 ambientcg materials → bake → pack → rowmap → range-read verify.
+        """End-to-end (local): fetch 2 ambientcg materials → per-file bake → verify.
 
-        Runs native (no platform override) — tests pipeline logic, not the amd64 image.
+        Uses ``hf-bake --dry-run`` so the pipeline is fully exercised
+        (upstream fetch + per-file write + catalog build) without
+        needing an HF_TOKEN in the runner — skipping the actual HF push.
+        Runs native (no platform override).
+
+        Per-file substrate (ADR-0012, #189): the verify script asserts
+        the per-file tree shape (``<source>/<tier>/<id>/<channel>.png``
+        + ``.tier_complete`` sentinel + v3 catalog at root). The legacy
+        tar+rowmap shape was retired in #189.
         """
         context = src or dag.host().directory(".")
         pip_cache = dag.cache_volume("pip-cache")
@@ -659,12 +440,17 @@ class MatVisCi:
             .with_exec(
                 [
                     "mat-vis-baker",
-                    "all",
+                    "hf-bake",
                     "ambientcg",
                     "1k",
                     "/tmp/integration",
                     "--limit",
                     "2",
+                    "--release-tag",
+                    "v0000.00.0",
+                    "--repo-id",
+                    "gerchowl/mat-vis-tst",
+                    "--dry-run",
                 ]
             )
             .with_new_file(
@@ -678,409 +464,434 @@ class MatVisCi:
 
     # ── bake pipeline ─────────────────────────────────────────────
 
+    def _guard_prod_target(self, repo_id: str, allow_prod: bool) -> None:
+        """Refuse writes to the canonical production repo without opt-in.
+
+        The default target for every bake fn is the scratch dataset
+        ``gerchowl/mat-vis-tst``. Any other target (production
+        ``gerchowl/mat-vis`` or a third-party fork) requires
+        ``--allow-prod=true`` at call time. Prevents feature-branch /
+        smoke-test dispatches from accidentally landing in the public
+        catalog. The flag is never persisted — it has to be supplied on
+        every invocation that touches prod.
+
+        Scratch namespace check is namespace-scoped (``.../mat-vis-tst``
+        or ``.../mat-vis-<suffix>-tst``) rather than plain ``endswith("-tst")``
+        so a fork named ``evil/mat-vis-tst`` still counts as opt-in
+        scratch, but a generic ``somebody/tst`` does not sneak through
+        the default.
+        """
+        if "/" in repo_id:
+            _owner, name = repo_id.rsplit("/", 1)
+            if name == "mat-vis-tst" or name.endswith("-tst") and name.startswith("mat-vis"):
+                return
+        if allow_prod:
+            return
+        raise ValueError(
+            f"Refusing to write to non-scratch repo {repo_id!r} without "
+            "--allow-prod=true. Scratch repos are named .../mat-vis-tst "
+            "(or .../mat-vis-*-tst); anything else requires an explicit "
+            "--allow-prod=true. Example: pass --allow-prod=true to target "
+            "gerchowl/mat-vis for a real data release."
+        )
+
     def _baker_container(
-        self, context: dagger.Directory, with_ktx2: bool = False
+        self,
+        context: dagger.Directory,
+        hf_token: dagger.Secret | None = None,
+        with_ktx2: bool = False,
     ) -> dagger.Container:
-        """Baker container with code + gh CLI + git. Optionally with toktx for KTX2."""
-        pip_cache = dag.cache_volume("pip-cache")
+        """Baker container for hf-bake / hf-derive / hf-derive-ktx2 (#135 / #204).
+
+        Parity target: Linux x86_64, Python 3.12, ``uv sync --all-extras``
+        on the repo. With ``with_ktx2=True``, KTX-Software 4.4.0 ``.deb``
+        is installed so ``toktx`` is on ``PATH`` — needed for the
+        ``hf-derive-ktx2`` leg of the per-file derive pipeline (#204).
+
+        Env:
+          - ``PYTHONUNBUFFERED=1`` — heartbeat / OTLP logs flush live
+            (matches #148 workflow fix).
+          - ``HF_TOKEN`` — injected from a Dagger secret when provided;
+            never inlined.
+        """
+        uv_cache = dag.cache_volume("uv-cache")
+        apt_cache = dag.cache_volume("apt-cache")
+
         ctr = (
             dag.container()
             .from_("python:3.12-slim")
+            .with_env_variable("DEBIAN_FRONTEND", "noninteractive")
+            .with_mounted_cache("/var/cache/apt", apt_cache)
             .with_exec(["apt-get", "update", "-qq"])
-            .with_exec(["apt-get", "install", "-y", "-qq", "git", "curl"])
+            .with_exec(["apt-get", "install", "-y", "-qq", "git", "curl", "ca-certificates"])
+            # Install uv via the astral-sh standalone installer.
             .with_exec(
                 [
                     "sh",
                     "-c",
-                    "curl -fsSL https://github.com/cli/cli/releases/download/v2.74.1/gh_2.74.1_linux_amd64.tar.gz | tar xz --strip-components=2 -C /usr/local/bin gh_2.74.1_linux_amd64/bin/gh",
+                    "curl -LsSf https://astral.sh/uv/install.sh | sh && "
+                    "install -m 0755 /root/.local/bin/uv /usr/local/bin/uv",
                 ]
             )
         )
+
         if with_ktx2:
-            # Install toktx from KTX-Software .deb (Khronos)
+            # Khronos KTX-Software 4.4.0 .deb — same URL the legacy
+            # derive.yml used so toktx output is byte-identical across
+            # the v0.5/v0.6 cutover.
             ctr = ctr.with_exec(
                 [
                     "sh",
                     "-c",
-                    "apt-get install -y -qq libgomp1 ca-certificates && "
-                    "curl -fsSL -o /tmp/ktx.deb https://github.com/KhronosGroup/KTX-Software/releases/download/v4.4.0/KTX-Software-4.4.0-Linux-x86_64.deb && "
-                    "dpkg -i /tmp/ktx.deb && rm /tmp/ktx.deb",
+                    "apt-get install -y -qq libgomp1 && "
+                    "curl -fsSL -o /tmp/ktx.deb "
+                    "https://github.com/KhronosGroup/KTX-Software/releases/download/"
+                    "v4.4.0/KTX-Software-4.4.0-Linux-x86_64.deb && "
+                    "dpkg -i /tmp/ktx.deb && rm /tmp/ktx.deb && "
+                    "toktx --version",
                 ]
             )
-        return (
-            ctr.with_mounted_cache("/root/.cache/pip", pip_cache)
+
+        ctr = (
+            ctr.with_env_variable("PYTHONUNBUFFERED", "1")
+            .with_mounted_cache("/root/.cache/uv", uv_cache)
             .with_mounted_directory("/app", context)
             .with_workdir("/app")
-            .with_exec(["pip", "install", "--quiet", "-e", ".[baker]"])
+            .with_exec(["uv", "sync", "--all-extras"])
+        )
+
+        if hf_token is not None:
+            ctr = ctr.with_secret_variable("HF_TOKEN", hf_token)
+
+        return ctr
+
+    @function
+    async def bake(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        source: Annotated[str, Doc("Upstream source: ambientcg|polyhaven|gpuopen|physicallybased")],
+        tier: Annotated[
+            str, Doc("Resolution tier (e.g. 1k, 2k, 4k); 'scalar' for physicallybased")
+        ],
+        release_tag: Annotated[str, Doc("Calver data release tag, e.g. v2026.04.1")],
+        hf_token: Annotated[dagger.Secret, Doc("HF write token for the atomic push")],
+        repo_id: Annotated[str, Doc("Target HF dataset repo")] = "gerchowl/mat-vis-tst",
+        allow_prod: Annotated[
+            bool, Doc("Opt-in flag required to target any non-*-tst repo (e.g. gerchowl/mat-vis)")
+        ] = False,
+        limit: Annotated[int, Doc("Max materials (0 = no limit)")] = 0,
+        offset: Annotated[int, Doc("Skip first N materials")] = 0,
+        batch_size: Annotated[int, Doc("Materials per atomic commit (count ceiling, #228)")] = 300,
+        batch_max_bytes: Annotated[
+            int,
+            Doc(
+                "Bytes per atomic commit (default 700 MiB). #228: flush "
+                "trips on first-of-N-or-bytes. HF caps at 1 GiB/commit; "
+                "700 MiB leaves room for catalog + manifest + sentinel."
+            ),
+        ] = 700 * 1024 * 1024,
+        dry_run: Annotated[bool, Doc("Build locally; skip HF push")] = False,
+    ) -> str:
+        """Bake one (source, tier) into an HF commit (#136 / ADR-0012).
+
+        Wraps ``mat-vis-baker hf-bake`` in the shared ``_baker_container``
+        (#135). Returns the CLI stdout — the final line is the commit SHA
+        when ``--dry-run`` is not set.
+
+        Substrate: per-file (ADR-0012). Each material × channel lands as
+        one file under ``<source>/<tier>/<mid>/<channel>``. Pre-flight
+        tree scan + batch commits (size ``batch_size``) make bakes
+        resumable across crashes. The legacy tar+rowmap path and its
+        ``--legacy-tar`` flag were retired in #189.
+
+        Sentinels: ``limit=0`` drops ``--limit``.
+
+        Safety: defaults to ``gerchowl/mat-vis-tst`` (scratch). Any other
+        target requires ``allow_prod=true``. Both Dagger-level
+        (``_guard_prod_target``) and baker-level (per-file
+        ``_guard_prod_target``) checks fire; redundant by design so the
+        rail still holds when callers reach the baker without going
+        through Dagger.
+        """
+        self._guard_prod_target(repo_id, allow_prod)
+        ctr = self._baker_container(context, hf_token=hf_token)
+        argv = _bake_argv(
+            source=source,
+            tier=tier,
+            release_tag=release_tag,
+            repo_id=repo_id,
+            offset=offset,
+            batch_size=batch_size,
+            batch_max_bytes=batch_max_bytes,
+            limit=limit,
+            dry_run=dry_run,
+            allow_prod=allow_prod,
+        )
+        return await ctr.with_exec(argv).stdout()
+
+    @function
+    async def test_e2e(
+        self,
+        hf_token: Annotated[dagger.Secret, Doc("HF write token for the round-trip bake")],
+        context: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        repo_id: Annotated[
+            str, Doc("Target HF dataset repo (must be a *-tst scratch namespace)")
+        ] = "gerchowl/mat-vis-tst",
+    ) -> str:
+        """Run the live MAT_VIS_E2E=1 round-trip suite against mat-vis-tst (#193).
+
+        Spins up a python:3.12-slim container, syncs project deps with
+        the baker + dev extras, installs the Python reference client, and
+        runs ``pytest tests/e2e/ -v`` with ``MAT_VIS_E2E=1`` and
+        ``HF_TOKEN`` injected from the Dagger secret. Returns stdout.
+
+        Refuses to run against any non-scratch ``repo_id`` — there is no
+        ``--allow-prod`` escape hatch here because the E2E suite makes
+        and deletes a throwaway tag (``v0.0.0-e2e-184-perfile``); doing
+        that on prod would churn the public dataset history. If you
+        need to E2E against prod, fork the suite into its own function.
+        """
+        if "/" in repo_id:
+            _owner, name = repo_id.rsplit("/", 1)
+            scratch = name == "mat-vis-tst" or (
+                name.startswith("mat-vis") and name.endswith("-tst")
+            )
+        else:
+            scratch = False
+        if not scratch:
+            raise ValueError(
+                f"test_e2e refuses to target non-scratch repo {repo_id!r}; "
+                "this function only runs against .../mat-vis-tst (or "
+                ".../mat-vis-*-tst). E2E bakes a throwaway tag and "
+                "deletes it on teardown — that's not safe on prod."
+            )
+
+        ctx = context or dag.host().directory(".")
+        uv_cache = dag.cache_volume("uv-cache")
+        apt_cache = dag.cache_volume("apt-cache")
+        return await (
+            dag.container()
+            .from_("python:3.12-slim")
+            .with_env_variable("DEBIAN_FRONTEND", "noninteractive")
+            .with_mounted_cache("/var/cache/apt", apt_cache)
+            .with_exec(["apt-get", "update", "-qq"])
+            .with_exec(["apt-get", "install", "-y", "-qq", "git", "curl", "ca-certificates"])
+            .with_exec(
+                [
+                    "sh",
+                    "-c",
+                    "curl -LsSf https://astral.sh/uv/install.sh | sh && "
+                    "install -m 0755 /root/.local/bin/uv /usr/local/bin/uv",
+                ]
+            )
+            .with_env_variable("PYTHONUNBUFFERED", "1")
+            .with_mounted_cache("/root/.cache/uv", uv_cache)
+            .with_mounted_directory("/app", ctx)
+            .with_workdir("/app")
+            .with_exec(["uv", "sync", "--all-extras"])
+            .with_exec(["uv", "pip", "install", "-e", "./clients/python"])
+            .with_secret_variable("HF_TOKEN", hf_token)
+            .with_env_variable("MAT_VIS_E2E", "1")
+            .with_exec(["uv", "run", "pytest", "tests/e2e/", "-v"])
+            .stdout()
         )
 
     @function
-    async def bake_and_release(
+    async def smoke_bake(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        source: Annotated[str, Doc("Source name")] = "ambientcg",
-        tier: Annotated[str, Doc("Resolution tier")] = "1k",
-        release_tag: Annotated[str, Doc("Release tag")] = "v0000.00.0",
-        limit: Annotated[int, Doc("Max materials (0 = all)")] = 0,
-        offset: Annotated[int, Doc("Skip first N materials")] = 0,
-        batch_size: Annotated[int, Doc("Materials per streaming batch")] = 50,
-        upload_chunks: Annotated[bool, Doc("Upload each parquet partition as it closes")] = True,
-        category: Annotated[
-            str, Doc("Filter to one normalized category (metal/wood/.../other). Empty = all.")
-        ] = "",
-        dry_run: Annotated[
-            bool,
-            Doc("Fetch + bake but skip release uploads. For verifying filters before a real bake."),
-        ] = False,
-        registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
     ) -> str:
-        """Bake materials → upload to release → rebuild manifest.
+        """Smoke-test the bake Dagger op end-to-end (#136).
 
-        Single container. Streaming pipeline — bounded disk usage.
-        With upload_chunks=True, each parquet partition is uploaded
-        and deleted as it closes, freeing runner disk for the next.
+        Dispatches against ``gerchowl/mat-vis-tst`` at ``v0.0.1-smoke``
+        with ``--dry-run --limit 1`` to prove the wrapper's plumbing
+        (argv construction, container mount, uv sync, CLI import) without
+        an actual HF push. Should finish well under 60s. Requires an
+        ``HF_TOKEN`` secret because the CLI signature demands it, but
+        ``--dry-run`` means the token is never consumed.
         """
         context = src or dag.host().directory(".")
-        baker = self._baker_container(context)
-
-        # Need GH_TOKEN early because --upload-chunks calls gh during the run
-        if registry_pass is not None:
-            baker = baker.with_secret_variable("GH_TOKEN", registry_pass)
-
-        bake_cmd = [
-            "mat-vis-baker",
-            "all",
-            source,
-            tier,
-            "/tmp/out",
-            "--release-tag",
-            release_tag,
-            "--batch-size",
-            str(batch_size),
-        ]
-        if limit > 0:
-            bake_cmd.extend(["--limit", str(limit)])
-        if offset > 0:
-            bake_cmd.extend(["--offset", str(offset)])
-        if upload_chunks and release_tag != "v0000.00.0" and not dry_run:
-            bake_cmd.append("--upload-chunks")
-        if category:
-            bake_cmd.extend(["--category", category])
-        if dry_run:
-            bake_cmd.append("--dry-run")
-
-        baker = baker.with_exec(bake_cmd)
-
-        # Upload remaining (non-chunk) assets to release. The user-supplied
-        # release_tag and source values are passed via env vars, NEVER
-        # interpolated into the shell string (see #61).
-        # Skipped entirely in dry-run mode.
-        if release_tag != "v0000.00.0" and registry_pass is not None and not dry_run:
-            baker = baker.with_env_variable("RELEASE_TAG", release_tag).with_env_variable(
-                "SOURCE", source
-            )
-            # Upload loose assets (leftover parquets / rowmaps / index JSON).
-            # Shell is used only for the glob + loop; values come from env.
-            baker = baker.with_exec(
-                [
-                    "sh",
-                    "-c",
-                    "set -e; for f in /tmp/out/*.parquet /tmp/out/*-rowmap.json "
-                    "/tmp/out/*.json; do "
-                    '[ -f "$f" ] || continue; '
-                    'case "$(basename "$f")" in '
-                    "release-manifest.json) ;; "
-                    '*) gh release upload "$RELEASE_TAG" "$f" --clobber || true ;; '
-                    "esac; "
-                    "done",
-                ]
-            )
-
-            # Pack original .mtlx files into JSON map (gpuopen has real graphs).
-            # Same rule: env vars only.
-            baker = baker.with_exec(
-                [
-                    "sh",
-                    "-c",
-                    "set -e; "
-                    'if [ -d "/tmp/out/mtlx/$SOURCE" ] && '
-                    'find "/tmp/out/mtlx/$SOURCE" -name "*.mtlx" -print -quit | '
-                    "grep -q .; then "
-                    'mat-vis-baker pack-mtlx /tmp/out --source "$SOURCE" '
-                    "--mtlx-dir /tmp/out/mtlx; "
-                    'if [ -f "/tmp/out/${SOURCE}-mtlx.json" ]; then '
-                    'gh release upload "$RELEASE_TAG" '
-                    '"/tmp/out/${SOURCE}-mtlx.json" --clobber || true; '
-                    "fi; "
-                    "fi",
-                ]
-            )
-
-            # Rebuild manifest from all release assets. Python script reads
-            # the tag from os.environ — no f-string interpolation.
-            baker = baker.with_exec(
-                [
-                    "python3",
-                    "-c",
-                    (
-                        "import os\n"
-                        "from pathlib import Path\n"
-                        "from mat_vis_baker.manifest import "
-                        "rebuild_manifest_from_release, write_manifest\n"
-                        "manifest = rebuild_manifest_from_release("
-                        "os.environ['RELEASE_TAG'])\n"
-                        "write_manifest(manifest, "
-                        "Path('/tmp/release-manifest.json'))\n"
-                    ),
-                ]
-            )
-            # Pure-argv: no shell at all for the manifest upload.
-            baker = baker.with_exec(
-                [
-                    "gh",
-                    "release",
-                    "upload",
-                    release_tag,
-                    "/tmp/release-manifest.json",
-                    "--clobber",
-                ]
-            )
-
-        return await baker.stdout()
+        # Dry-run path never exercises the secret, but the Dagger
+        # signature requires a non-None ``dagger.Secret``. Pull from the
+        # host env so local invocations work with ``HF_TOKEN`` exported.
+        hf_token = dag.set_secret("HF_TOKEN", "dry-run-placeholder")
+        return await self.bake(
+            context=context,
+            source="polyhaven",
+            tier="1k",
+            release_tag="v0.0.1-smoke",
+            hf_token=hf_token,
+            repo_id="gerchowl/mat-vis-tst",
+            limit=1,
+            dry_run=True,
+        )
 
     @function
-    async def derive_ktx2_to_release(
+    async def smoke_baker(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        source_tier: Annotated[str, Doc("PNG tier to transcode from")] = "1k",
-        target_tier: Annotated[str, Doc("KTX2 tier name")] = "ktx2-1k",
-        source: Annotated[str, Doc("Restrict to one source (or 'all')")] = "all",
-        release_tag: Annotated[str, Doc("Release tag")] = "v0000.00.0",
-        registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
     ) -> str:
-        """Derive KTX2 tier from existing PNG release, upload to same release.
+        """Smoke-test the baker container (#135).
 
-        Container has toktx (KTX-Software) installed. Streams from release
-        PNGs (HTTP range reads), transcodes to KTX2, packs into parquet.
+        Builds ``_baker_container`` and runs ``mat-vis-baker --help`` plus
+        ``mat-vis-baker hf-bake --help`` under ``uv run``. Exits 0 iff the
+        apt + ``uv sync`` succeed and the CLI is importable. No network
+        side effects — nothing touches HF.
         """
         context = src or dag.host().directory(".")
-        baker = self._baker_container(context, with_ktx2=True)
+        ctr = self._baker_container(context)
+        top = await ctr.with_exec(["uv", "run", "mat-vis-baker", "--help"]).stdout()
+        bake = await ctr.with_exec(["uv", "run", "mat-vis-baker", "hf-bake", "--help"]).stdout()
+        return f"=== mat-vis-baker --help ===\n{top}\n=== mat-vis-baker hf-bake --help ===\n{bake}"
 
-        if registry_pass is not None:
-            baker = baker.with_secret_variable("GH_TOKEN", registry_pass)
+    # ── per-file derive pipeline (#204) ─────────────────────────────
 
+    @function
+    async def derive(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        source: Annotated[str, Doc("Upstream (ambientcg/polyhaven/gpuopen)")],
+        target_tier: Annotated[str, Doc("Smaller tier to derive, e.g. 1k")],
+        source_tier: Annotated[str, Doc("Existing per-file tier to resize from, e.g. 4k")],
+        release_tag: Annotated[str, Doc("Calver release tag, e.g. v2026.05.0")],
+        hf_token: Annotated[dagger.Secret, Doc("HF API token for atomic commits")],
+        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis-tst",
+        allow_prod: Annotated[
+            bool, Doc("Opt-in flag required to target any non-*-tst repo")
+        ] = False,
+        limit: Annotated[int, Doc("Max materials (0 = no limit)")] = 0,
+        batch_size: Annotated[int, Doc("Materials per atomic commit (count ceiling, #228)")] = 300,
+        batch_max_bytes: Annotated[
+            int,
+            Doc(
+                "Bytes per atomic commit (default 700 MiB). #228: flush "
+                "trips on first-of-N-or-bytes. HF caps at 1 GiB/commit."
+            ),
+        ] = 700 * 1024 * 1024,
+        dry_run: Annotated[bool, Doc("Skip the HF push; build locally")] = False,
+    ) -> str:
+        """Per-file derive: resize an existing per-file tier into a smaller one (#204).
+
+        Wraps ``mat-vis-baker hf-derive`` in the slim baker container
+        (no KTX2 toolchain — ``with_ktx2=False``). Reads source channels
+        via plain HTTPS GET, runs PIL LANCZOS resize, writes per-file
+        PNGs back to HF. Updates ``<source>.json`` and writes a
+        ``.tier_complete`` sentinel as the final commit.
+
+        Safety: defaults to ``gerchowl/mat-vis-tst``; any other target
+        requires ``--allow-prod=true``.
+        """
+        self._guard_prod_target(repo_id, allow_prod)
+        ctr = self._baker_container(context, with_ktx2=False, hf_token=hf_token)
         cmd = [
+            "uv",
+            "run",
             "mat-vis-baker",
-            "derive-ktx2",
-            "/tmp/out",
-            "--release-tag",
-            release_tag,
+            "hf-derive",
+            "--source",
+            source,
             "--source-tier",
             source_tier,
             "--target-tier",
             target_tier,
-        ]
-        if source != "all":
-            cmd.extend(["--source", source])
-
-        baker = baker.with_exec(cmd)
-
-        # Upload all KTX2 parquets + rowmaps. release_tag flows via env.
-        if release_tag != "v0000.00.0" and registry_pass is not None:
-            baker = baker.with_env_variable("RELEASE_TAG", release_tag)
-            baker = baker.with_exec(
-                [
-                    "sh",
-                    "-c",
-                    "set -e; for f in /tmp/out/*.parquet /tmp/out/*-rowmap.json; "
-                    'do [ -f "$f" ] || continue; '
-                    'gh release upload "$RELEASE_TAG" "$f" --clobber || true; '
-                    "done",
-                ]
-            )
-            # Rebuild manifest
-            baker = baker.with_exec(
-                [
-                    "python3",
-                    "-c",
-                    (
-                        "import os\n"
-                        "from pathlib import Path\n"
-                        "from mat_vis_baker.manifest import "
-                        "rebuild_manifest_from_release, write_manifest\n"
-                        "manifest = rebuild_manifest_from_release("
-                        "os.environ['RELEASE_TAG'])\n"
-                        "write_manifest(manifest, "
-                        "Path('/tmp/release-manifest.json'))\n"
-                    ),
-                ]
-            )
-            baker = baker.with_exec(
-                [
-                    "gh",
-                    "release",
-                    "upload",
-                    release_tag,
-                    "/tmp/release-manifest.json",
-                    "--clobber",
-                ]
-            )
-
-        return await baker.stdout()
-
-    @function
-    async def bake_source(
-        self,
-        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        source: Annotated[str, Doc("Source name")] = "ambientcg",
-        tier: Annotated[str, Doc("Resolution tier")] = "1k",
-        release_tag: Annotated[str, Doc("Release tag for rowmap")] = "v0000.00.0",
-        limit: Annotated[int, Doc("Max materials (0 = all)")] = 0,
-    ) -> dagger.Directory:
-        """Bake single batch, return output directory (no upload)."""
-        context = src or dag.host().directory(".")
-        baker = self._baker_container(context)
-
-        bake_cmd = [
-            "mat-vis-baker",
-            "all",
-            source,
-            tier,
-            "/tmp/out",
             "--release-tag",
             release_tag,
+            "--work-dir",
+            "/tmp/derive",
+            "--repo-id",
+            repo_id,
+            "--hf-token",
+            "env:HF_TOKEN",
+            "--batch-size",
+            str(batch_size),
+            "--batch-max-bytes",
+            str(batch_max_bytes),
         ]
         if limit > 0:
-            bake_cmd.extend(["--limit", str(limit)])
-
-        return baker.with_exec(bake_cmd).directory("/tmp/out")
-
-    @function
-    async def regenerate_rowmaps(
-        self,
-        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        release_tag: Annotated[str, Doc("Release tag")] = "v2026.04.0",
-        registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
-    ) -> str:
-        """Regenerate all rowmap JSONs for a release using the legacy scanner.
-
-        This is the retrofit path for parquets baked before the sidecar
-        rowmap emission existed (#57). It downloads each parquet and runs
-        the legacy magic-byte scanner. Use after fixing the scanner to
-        repair existing release assets without re-baking.
-
-        ``release_tag`` flows to the inline script via the ``RELEASE_TAG``
-        env var — never interpolated into the source (#61).
-        """
-        context = src or dag.host().directory(".")
-        baker = self._baker_container(context)
-        if registry_pass is not None:
-            baker = baker.with_secret_variable("GH_TOKEN", registry_pass)
-        baker = baker.with_env_variable("RELEASE_TAG", release_tag)
-
-        # Static Python script — no f-string interpolation. Reads the tag
-        # from os.environ at runtime.
-        script = (
-            "import os, re, subprocess, urllib.request\n"
-            "from pathlib import Path\n"
-            "from mat_vis_baker.parquet_writer import "
-            "generate_rowmap_from_parquet_legacy, write_rowmap\n"
-            "\n"
-            "TAG = os.environ['RELEASE_TAG']\n"
-            "BASE = f'https://github.com/MorePET/mat-vis/releases/download/{TAG}'\n"
-            "work = Path('/tmp/regen'); work.mkdir(exist_ok=True)\n"
-            "\n"
-            "# List release assets\n"
-            "assets = subprocess.run(\n"
-            "    ['gh', 'release', 'view', TAG, '--json', 'assets', "
-            "'--jq', '.assets[].name'],\n"
-            "    capture_output=True, text=True, check=True,\n"
-            ").stdout.strip().split('\\n')\n"
-            "\n"
-            "pq_re = re.compile(r'^mat-vis-(\\w+)-(\\w+)-(\\w+?)(?:-\\d+)?\\.parquet$')\n"
-            "parquets = [a for a in assets if pq_re.match(a)]\n"
-            "print(f'Found {len(parquets)} parquet files')\n"
-            "\n"
-            "for i, pq_name in enumerate(sorted(parquets), 1):\n"
-            "    m = pq_re.match(pq_name)\n"
-            "    if not m: continue\n"
-            "    source, tier, _ = m.groups()\n"
-            "    pq_path = work / pq_name\n"
-            "    print(f'[{i}/{len(parquets)}] {pq_name}')\n"
-            "\n"
-            "    urllib.request.urlretrieve(f'{BASE}/{pq_name}', pq_path)\n"
-            "\n"
-            "    rm = generate_rowmap_from_parquet_legacy(pq_path, source, tier, TAG)\n"
-            "    n_mat = len(rm['materials'])\n"
-            "    n_chan = sum(len(c) for c in rm['materials'].values())\n"
-            "    print(f'  -> {n_mat} materials, {n_chan} channels')\n"
-            "\n"
-            "    stem = pq_path.stem.replace("
-            "f'mat-vis-{source}-{tier}-', f'{source}-{tier}-')\n"
-            "    rm_path = work / f'{stem}-rowmap.json'\n"
-            "    write_rowmap(rm, rm_path)\n"
-            "\n"
-            "    subprocess.run(['gh', 'release', 'upload', TAG, "
-            "str(rm_path), '--clobber'], check=False)\n"
-            "    pq_path.unlink()\n"
-            "\n"
-            "from mat_vis_baker.manifest import "
-            "rebuild_manifest_from_release, write_manifest\n"
-            "mf = rebuild_manifest_from_release(TAG)\n"
-            "mf_path = work / 'release-manifest.json'\n"
-            "write_manifest(mf, mf_path)\n"
-            "subprocess.run(['gh', 'release', 'upload', TAG, "
-            "str(mf_path), '--clobber'], check=False)\n"
-            "print('Manifest rebuilt and uploaded')\n"
-        )
-        return await baker.with_exec(["python3", "-c", script]).stdout()
+            cmd += ["--limit", str(limit)]
+        if dry_run:
+            cmd.append("--dry-run")
+        if allow_prod:
+            cmd.append("--allow-prod")
+        return await ctr.with_exec(cmd).stdout()
 
     @function
-    async def rebuild_manifest(
+    async def derive_ktx2(
         self,
-        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-        release_tag: Annotated[str, Doc("Release tag")] = "v2026.04.0",
-        registry_pass: Annotated[dagger.Secret | None, Doc("GH token")] = None,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        source: Annotated[str, Doc("Upstream (ambientcg/polyhaven/gpuopen)")],
+        source_tier: Annotated[str, Doc("Existing per-file PNG tier to transcode from")],
+        release_tag: Annotated[str, Doc("Calver release tag")],
+        hf_token: Annotated[dagger.Secret, Doc("HF API token for atomic commits")],
+        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis-tst",
+        allow_prod: Annotated[
+            bool, Doc("Opt-in flag required to target any non-*-tst repo")
+        ] = False,
+        target_tier: Annotated[str, Doc("KTX2 target tier label; empty = ktx2-<source-tier>")] = "",
+        limit: Annotated[int, Doc("Max materials (0 = no limit)")] = 0,
+        batch_size: Annotated[int, Doc("Materials per atomic commit (count ceiling, #228)")] = 300,
+        batch_max_bytes: Annotated[
+            int,
+            Doc(
+                "Bytes per atomic commit (default 700 MiB). #228: flush "
+                "trips on first-of-N-or-bytes. HF caps at 1 GiB/commit."
+            ),
+        ] = 700 * 1024 * 1024,
+        dry_run: Annotated[bool, Doc("Skip the HF push; build locally")] = False,
     ) -> str:
-        """Rebuild manifest only (no rowmap regeneration). Fast — just re-reads
-        release assets and regenerates release-manifest.json.
+        """Per-file derive: transcode an existing per-file PNG tier to KTX2 (#204).
 
-        ``release_tag`` flows via env var, not shell-string interpolation (#61).
+        Wraps ``mat-vis-baker hf-derive-ktx2`` in the baker container
+        with toktx installed (``with_ktx2=True``). Reads source PNG
+        channels via plain GET, runs ``toktx --encode uastc --genmipmap
+        --t2``, writes per-file ``.ktx2`` back to HF.
+
+        ``target_tier=""`` is the "use the CLI default" sentinel —
+        Dagger can't express "omit this arg", so we only pass
+        ``--target-tier`` when the operator supplied a non-empty value.
+
+        Safety: defaults to ``gerchowl/mat-vis-tst``; any other target
+        requires ``--allow-prod=true``.
+
+        CLI surface: dagger's Go-side kebab-case conversion splits
+        letter→digit boundaries, so this Python ``derive_ktx2`` is
+        exposed as ``dagger call derive-ktx-2`` (not ``derive-ktx2``).
+        See #240 and the contract test in
+        ``tests/test_dagger_function_names.py``.
         """
-        context = src or dag.host().directory(".")
-        baker = self._baker_container(context)
-        if registry_pass is not None:
-            baker = baker.with_secret_variable("GH_TOKEN", registry_pass)
-        baker = baker.with_env_variable("RELEASE_TAG", release_tag)
-
-        # Two argv-only execs: build the manifest, then upload it.
-        baker = baker.with_exec(
-            [
-                "python3",
-                "-c",
-                (
-                    "import os\n"
-                    "from pathlib import Path\n"
-                    "from mat_vis_baker.manifest import "
-                    "rebuild_manifest_from_release, write_manifest\n"
-                    "mf = rebuild_manifest_from_release(os.environ['RELEASE_TAG'])\n"
-                    "write_manifest(mf, Path('/tmp/release-manifest.json'))\n"
-                    "print('manifest has ' + str(len(mf['tiers'])) + ' tiers')\n"
-                ),
-            ]
-        )
-        return await baker.with_exec(
-            [
-                "gh",
-                "release",
-                "upload",
-                release_tag,
-                "/tmp/release-manifest.json",
-                "--clobber",
-            ]
-        ).stdout()
-
-    # ── source probes ─────────────────────────────────────────────
+        self._guard_prod_target(repo_id, allow_prod)
+        ctr = self._baker_container(context, with_ktx2=True, hf_token=hf_token)
+        cmd = [
+            "uv",
+            "run",
+            "mat-vis-baker",
+            "hf-derive-ktx2",
+            "--source",
+            source,
+            "--source-tier",
+            source_tier,
+            "--release-tag",
+            release_tag,
+            "--work-dir",
+            "/tmp/derive",
+            "--repo-id",
+            repo_id,
+            "--hf-token",
+            "env:HF_TOKEN",
+            "--batch-size",
+            str(batch_size),
+            "--batch-max-bytes",
+            str(batch_max_bytes),
+        ]
+        if target_tier:
+            cmd += ["--target-tier", target_tier]
+        if limit > 0:
+            cmd += ["--limit", str(limit)]
+        if dry_run:
+            cmd.append("--dry-run")
+        if allow_prod:
+            cmd.append("--allow-prod")
+        return await ctr.with_exec(cmd).stdout()
 
     @function
     async def probe_sources(
@@ -1104,36 +915,6 @@ class MatVisCi:
         )
 
     # ── release validation ─────────────────────────────────────
-
-    @function
-    async def validate_release(
-        self,
-        tag: Annotated[str, Doc("Release tag to validate")] = "v2026.04.0",
-        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
-    ) -> str:
-        """Validate all expected release assets exist and range reads work.
-
-        Checks the manifest, verifies every source x tier has parquet + rowmap,
-        picks one random material per combination for an HTTP range read, and
-        confirms PNG magic bytes. Exits non-zero on any failure.
-        """
-        context = src or dag.host().directory(".")
-        return await (
-            dag.container()
-            .from_("python:3.12-slim")
-            .with_mounted_directory("/app", context)
-            .with_workdir("/app")
-            .with_env_variable("VALIDATE_TAG", tag)
-            .with_new_file(
-                "/tmp/validate_release.py",
-                contents=VALIDATE_RELEASE_SCRIPT,
-                permissions=0o755,
-            )
-            .with_exec(["python", "/tmp/validate_release.py"])
-            .stdout()
-        )
-
-    # ── registry ────────────────────────────────────────────────
 
     @function
     async def preflight(

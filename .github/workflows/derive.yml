@@ -1,0 +1,249 @@
+---
+# Per-file derive workflow (#204) — resize a smaller PNG tier or
+# KTX2-transcode an existing per-file tier on HF.
+#
+# Shape:
+#   plan    — emits matrix sources (#233) + derives target-tier label
+#   derive  — matrix[source] runs the Dagger `derive` or `derive-ktx-2`
+#             function (which wraps mat-vis-baker hf-derive{,-ktx2}).
+#             #240: dagger's Go CLI splits letter→digit boundaries when
+#             converting camelCase to kebab, so `deriveKtx2` is exposed
+#             as `derive-ktx-2` (not `derive-ktx2`). Smoke test in
+#             tests/test_dagger_function_names.py guards this contract.
+#             Each material batch is an atomic HF commit; a sentinel
+#             `.tier_complete` file lands as the final commit per
+#             (source, target_tier) so clients can probe atomicity
+#             with one HEAD request.
+#   report  — notify-on-failure if any earlier job failed
+#
+# Why no merge step (vs. legacy v0.5.x derive.yml): the per-file
+# substrate (ADR-0012) makes each batch commit a durable checkpoint —
+# resume comes from pre-flight HEAD probes, not from reassembling
+# shard tars. The shard / merge plumbing the legacy workflow needed
+# was deleted in #189 along with the tar code.
+#
+# #233: matrix workflow_dispatch. A single dispatch can target N
+# sources (`-f sources=ambientcg,polyhaven,gpuopen` or `-f sources=all`)
+# and they run sequentially under a job-level concurrency group, so
+# the repo-budget concurrency from #225/#227 no longer drops middle
+# dispatches when N>2 are queued in quick succession. `physicallybased`
+# is bake-only (scalar tier) and is never part of a derive matrix.
+
+name: Derive
+
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: 'Derivation kind'
+        required: true
+        default: 'resize'
+        type: choice
+        options:
+          - resize
+          - ktx2
+      sources:
+        description: >-
+          Comma-separated sources, or "all". "all" expands to
+          ambientcg,polyhaven,gpuopen. physicallybased is bake-only
+          (scalar tier) and is never expanded for derive.
+        required: false
+        default: 'all'
+        type: string
+      source:
+        description: >-
+          DEPRECATED (#233) — single-source legacy input; use `sources`.
+          When `sources` is left at its default and `source` is set,
+          `source` is treated as a 1-element matrix. Accepts the same
+          values as the old choice list: ambientcg|polyhaven|gpuopen.
+          Remove after one milestone.
+        required: false
+        default: ''
+        type: string
+      source-tier:
+        description: 'Source tier to derive from (existing per-file tier on HF)'
+        required: true
+        default: '4k'
+        type: choice
+        options:
+          - 128
+          - 256
+          - 512
+          - 1k
+          - 2k
+          - 4k
+          - 8k
+      target-tier:
+        description: 'Target tier (resize only; e.g. 1k). Ignored for ktx2.'
+        required: false
+        default: '1k'
+        type: string
+      release-tag:
+        description: 'Calver data release tag (e.g. v2026.05.0)'
+        required: true
+        default: 'v2026.05.0'
+        type: string
+      repo-id:
+        description: 'HF dataset repo'
+        required: false
+        default: 'gerchowl/mat-vis-tst'
+        type: string
+      allow-prod:
+        description: 'Required to target any non-*-tst HF repo (e.g. gerchowl/mat-vis)'
+        required: false
+        default: false
+        type: boolean
+      batch-size:
+        description: 'Materials per atomic commit (count ceiling, #228). 300 is a safe overshoot — bytes is the binding constraint at typical content.'
+        required: false
+        default: '300'
+        type: string
+      batch-max-bytes:
+        description: 'Bytes per atomic commit (#228). 734003200 = 700 MiB; HF caps at 1 GiB/commit.'
+        required: false
+        default: '734003200'
+        type: string
+
+permissions:
+  contents: read
+  issues: write          # needed by notify-on-failure composite action
+
+# #235 hotfix: workflow-level budget — see the matching block in
+# bake.yml. Job-level concurrency in #233 conflicted with matrix
+# siblings; reverted to workflow level + matrix.max-parallel: 1 below.
+concurrency:
+  group: derive-${{ inputs.repo-id }}-budget
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: plan (matrix expansion + target-tier)
+    runs-on: ubuntu-latest
+    outputs:
+      sources: ${{ steps.expand.outputs.sources }}
+      target-tier: ${{ steps.tier.outputs.target-tier }}
+    steps:
+      - id: expand
+        env:
+          SOURCES_INPUT: ${{ inputs.sources }}
+          SOURCE_LEGACY: ${{ inputs.source }}
+        run: |
+          set -euo pipefail
+          # #233: resolve effective sources list.
+          #   - `sources` wins when both are set.
+          #   - bare legacy `source` (with default `sources=all`) is
+          #     promoted to a 1-element matrix for back-compat.
+          #   - "all" expands to the textured trio. physicallybased is
+          #     bake-scalar-only and is never expanded for derive.
+          sources="$SOURCES_INPUT"
+          if [ -n "$SOURCE_LEGACY" ] && [ "$sources" = "all" ]; then
+            sources="$SOURCE_LEGACY"
+          fi
+
+          python3 - "$sources" <<'PY' >>"$GITHUB_OUTPUT"
+          import json, sys
+          raw = sys.argv[1]
+          if raw == "all":
+              expanded = ["ambientcg", "polyhaven", "gpuopen"]
+          else:
+              expanded = [s.strip() for s in raw.split(",") if s.strip()]
+          if not expanded:
+              raise SystemExit("error: empty sources list after expansion")
+          for s in expanded:
+              if s == "physicallybased":
+                  raise SystemExit(
+                      "error: physicallybased is bake-only (scalar tier); "
+                      "remove it from `sources` for derive dispatches"
+                  )
+          print(f"sources={json.dumps(expanded)}")
+          PY
+          echo "Plan: sources=$(tail -n1 "$GITHUB_OUTPUT")"
+
+      - id: tier
+        run: |
+          set -euo pipefail
+          kind="${{ inputs.kind }}"
+
+          if [ "$kind" = "resize" ]; then
+            tier="${{ inputs.target-tier }}"
+            if [ -z "$tier" ]; then
+              echo "::error::resize requires target-tier"
+              exit 1
+            fi
+          else
+            tier="ktx2-${{ inputs.source-tier }}"
+          fi
+
+          {
+            echo "target-tier=$tier"
+          } >>"$GITHUB_OUTPUT"
+          echo "Plan: kind=$kind target-tier=$tier"
+
+  derive:
+    needs: plan
+    name: >-
+      ${{ inputs.kind }}
+      ${{ matrix.source }}
+      ${{ inputs.source-tier }}
+      → ${{ needs.plan.outputs.target-tier }}
+    runs-on: ubuntu-latest
+    # Per-file derive against a full source × tier (~2k materials × 7
+    # channels) tops out around 1-2 h on average; 350 min keeps headroom.
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      # #235 hotfix: serialise the matrix siblings WITHIN one dispatch
+      # via matrix.max-parallel. See the matching comment in bake.yml.
+      max-parallel: 1
+      matrix:
+        source: ${{ fromJson(needs.plan.outputs.sources) }}
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dagger shell-safety lint (#61)
+        run: python3 scripts/check-dagger-shell-safety.py
+
+      - name: Derive (per-file substrate, ADR-0012)
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          verb: call
+          module: .dagger
+          args: >-
+            ${{ inputs.kind == 'resize' && 'derive' || 'derive-ktx-2' }}
+            --context=.
+            --source=${{ matrix.source }}
+            ${{ inputs.kind == 'resize' && format('--target-tier={0}', inputs.target-tier) || '' }}
+            --source-tier=${{ inputs.source-tier }}
+            --release-tag=${{ inputs.release-tag }}
+            --repo-id=${{ inputs.repo-id }}
+            --hf-token=env:HF_TOKEN
+            --allow-prod=${{ inputs.allow-prod }}
+            --batch-size=${{ inputs.batch-size }}
+            --batch-max-bytes=${{ inputs.batch-max-bytes }}
+
+  report:
+    needs: [plan, derive]
+    if: >-
+      always() &&
+      (needs.plan.result == 'failure' ||
+       needs.derive.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Notify on failure
+        uses: ./.github/actions/notify-on-failure
+        with:
+          label-prefix: "[derive-failed]"
+          workflow-name: "derive"
+          target: >-
+            ${{ inputs.kind }} ${{ inputs.sources }}/${{ inputs.source-tier }}
+            → ${{ needs.plan.outputs.target-tier }}
+            @ ${{ inputs.release-tag }}
+          context: >-
+            Per-file derive (ADR-0012). Each batch commit is atomic on
+            HF, so succeeded materials are already on the substrate.
+            Recovery: re-dispatch the same workflow_dispatch — the
+            pre-flight HEAD probe skips already-derived materials, so
+            re-runs are bytes-free for everything that succeeded.

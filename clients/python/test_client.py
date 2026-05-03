@@ -50,110 +50,115 @@ def _mock_get(*args, **kwargs):
 
 
 MOCK_MANIFEST = {
-    "schema_version": 1,
-    "version": 1,  # retained for tests asserting on the legacy field
-    "release_tag": "v2026.04.0",
-    "tiers": {
-        "1k": {
-            "base_url": "https://example.com/releases/download/v2026.04.0/",
-            "sources": {
-                "ambientcg": {
-                    # Single rowmap — legacy shape. Search tests that need
-                    # broader category discovery override via mock_client_with_categories.
-                    "parquet_files": ["mat-vis-ambientcg-1k-stone.parquet"],
-                    "rowmap_files": ["ambientcg-1k-stone-rowmap.json"],
-                    "rowmap_file": "ambientcg-1k-stone-rowmap.json",
-                },
-                "polyhaven": {
-                    "parquet_files": ["mat-vis-polyhaven-1k-wood.parquet"],
-                    "rowmap_files": ["polyhaven-1k-wood-rowmap.json"],
-                    "rowmap_file": "polyhaven-1k-wood-rowmap.json",
-                },
-                "gpuopen": {
-                    "parquet_files": ["mat-vis-gpuopen-1k-other.parquet"],
-                    "rowmap_files": ["gpuopen-1k-other-rowmap.json"],
-                    "rowmap_file": "gpuopen-1k-other-rowmap.json",
-                },
+    "schema_version": 3,
+    "release_tag": "v2026.04.1",
+    "sources": {
+        "ambientcg": {
+            "catalog": "ambientcg.json",
+            "materials_count": 3,
+            "tiers": {"1k": {"complete": True}, "2k": {"complete": True}},
+        },
+        "polyhaven": {
+            "catalog": "polyhaven.json",
+            "materials_count": 1,
+            "tiers": {"1k": {"complete": True}},
+        },
+        "gpuopen": {
+            "catalog": "gpuopen.json",
+            "materials_count": 1,
+            "tiers": {"1k": {"complete": True}},
+        },
+    },
+}
+
+
+def _v3_entry(
+    mid: str,
+    name: str,
+    category: str,
+    *,
+    roughness: float,
+    metalness: float,
+    ior: float,
+    available_tiers: list[str],
+    maps: list[str],
+    updated: str,
+) -> dict:
+    """ADR-0011 v3-shaped catalog entry: semantic fields live under mat_vis."""
+    return {
+        "id": mid,
+        "source": "ambientcg",
+        "mat_vis": {
+            "name": name,
+            "category": category,
+            "tags": [],
+            "description": None,
+            "physical": {"dimensions_m": None, "max_resolution_px": None},
+            "pbr": {
+                "color_rgb": None,
+                "roughness": roughness,
+                "metalness": metalness,
+                "ior": ior,
+                "specular_f0": None,
+                "transmission": None,
+                "complex_ior": None,
             },
-        }
-    },
-}
+            "attribution": {
+                "authors": [],
+                "license_spdx": "CC0-1.0",
+                "source_url": f"https://ambientcg.com/view?id={mid}",
+            },
+            "dates": {"published": updated, "updated": updated},
+            "upstream_id": mid,
+        },
+        "upstream": {
+            "source": "ambientcg",
+            "schema_version": 1,
+            "fetched_at": "2026-04-24T00:00:00Z",
+            "raw": {},
+        },
+        "available_tiers": available_tiers,
+        "maps": maps,
+        "texture_hashes": {},
+        "status": "ok",
+        "needs_mtlx_bake": False,
+    }
 
-# Rowmap suitable for the gpuopen "test-uuid" material — mirrors the
-# ambientcg fixture's structure so MtlxSource.original.export() has
-# concrete channels to rewrite texture paths against.
-MOCK_ROWMAP_GPUOPEN = {
-    "parquet_file": "gpuopen-1k.parquet",
-    "materials": {
-        "test-uuid": {
-            "color": {"offset": 0, "length": 1024},
-            "roughness": {"offset": 1024, "length": 512},
-        },
-    },
-}
-
-MOCK_ROWMAP = {
-    "parquet_file": "ambientcg-1k.parquet",
-    "materials": {
-        "Rock064": {
-            "color": {"offset": 0, "length": 1024},
-            "normal": {"offset": 1024, "length": 2048},
-            "roughness": {"offset": 3072, "length": 512},
-        },
-        "Metal032": {
-            "color": {"offset": 4000, "length": 800},
-            "metalness": {"offset": 4800, "length": 600},
-            "roughness": {"offset": 5400, "length": 500},
-        },
-    },
-}
 
 MOCK_INDEX_AMBIENTCG = [
-    {
-        "id": "Rock064",
-        "source": "ambientcg",
-        "name": "Rough Granite",
-        "category": "stone",
-        "roughness": 0.8,
-        "metalness": 0.0,
-        "color_hex": "#A0522D",
-        "ior": 1.5,
-        "source_url": "https://ambientcg.com/view?id=Rock064",
-        "source_license": "CC0-1.0",
-        "available_tiers": ["1k", "2k"],
-        "maps": ["color", "normal", "roughness"],
-        "last_updated": "2025-01-15",
-    },
-    {
-        "id": "Metal032",
-        "source": "ambientcg",
-        "name": "Brushed Steel",
-        "category": "metal",
-        "roughness": 0.3,
-        "metalness": 1.0,
-        "color_hex": "#C0C0C0",
-        "ior": 2.5,
-        "source_url": "https://ambientcg.com/view?id=Metal032",
-        "source_license": "CC0-1.0",
-        "available_tiers": ["1k"],
-        "maps": ["color", "metalness", "roughness"],
-        "last_updated": "2025-02-10",
-    },
-    {
-        "id": "Wood045",
-        "source": "ambientcg",
-        "name": "Oak Planks",
-        "category": "wood",
-        "roughness": 0.6,
-        "metalness": 0.0,
-        "color_hex": "#8B4513",
-        "ior": 1.5,
-        "source_url": "https://ambientcg.com/view?id=Wood045",
-        "source_license": "CC0-1.0",
-        "available_tiers": ["1k", "2k", "4k"],
-        "maps": ["color", "normal", "roughness", "ao"],
-        "last_updated": "2025-03-01",
-    },
+    _v3_entry(
+        "Rock064",
+        "Rough Granite",
+        "stone",
+        roughness=0.8,
+        metalness=0.0,
+        ior=1.5,
+        available_tiers=["1k", "2k"],
+        maps=["color", "normal", "roughness"],
+        updated="2025-01-15",
+    ),
+    _v3_entry(
+        "Metal032",
+        "Brushed Steel",
+        "metal",
+        roughness=0.3,
+        metalness=1.0,
+        ior=2.5,
+        available_tiers=["1k"],
+        maps=["color", "metalness", "roughness"],
+        updated="2025-02-10",
+    ),
+    _v3_entry(
+        "Wood045",
+        "Oak Planks",
+        "wood",
+        roughness=0.6,
+        metalness=0.0,
+        ior=1.5,
+        available_tiers=["1k", "2k", "4k"],
+        maps=["color", "normal", "roughness", "ao"],
+        updated="2025-03-01",
+    ),
 ]
 
 
@@ -161,10 +166,17 @@ MOCK_INDEX_AMBIENTCG = [
 def mock_client():
     """Client with mocked HTTP and temp cache."""
     with tempfile.TemporaryDirectory() as tmp:
-        client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
-        # Pre-populate manifest cache so no HTTP needed
-        cache_path = Path(tmp) / ".manifest.json"
+        client = MatVisClient(tag="v2026.04.1", cache_dir=Path(tmp))
+        # Pre-populate manifest cache at the tag-scoped path. Issue #258
+        # added an ETag sibling — without it the conditional GET on
+        # first .manifest access would fall back to an unconditional
+        # fetch and clobber our test mocks. Pre-set the in-memory
+        # _manifest too so no HTTP is issued at all.
+        cache_path = Path(tmp) / "v2026.04.1" / ".manifest.json"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(MOCK_MANIFEST))
+        (Path(tmp) / "v2026.04.1" / ".manifest.etag").write_text('"mock"')
+        client._manifest = MOCK_MANIFEST
         # Suppress the background update-check HTTP calls that would
         # otherwise consume our mocked _get_json side_effect iterations.
         client._update_warned = True
@@ -176,23 +188,19 @@ def mock_search_client():
     """Client with a richer manifest (multiple rowmaps per source) so
     search() discovers the full category set. Used by search tests that
     reference categories not in the default single-rowmap fixture."""
+    # v0.6.0: no per-category partitioning (ADR-0007). The "rich"
+    # variant just raises the materials_count to match the full catalog
+    # used by search tests; category breadth comes from the catalog
+    # itself, not the manifest.
     rich_manifest = json.loads(json.dumps(MOCK_MANIFEST))  # deep copy
-    rich_manifest["tiers"]["1k"]["sources"]["ambientcg"].update(
-        parquet_files=[
-            "mat-vis-ambientcg-1k-stone.parquet",
-            "mat-vis-ambientcg-1k-metal.parquet",
-            "mat-vis-ambientcg-1k-wood.parquet",
-        ],
-        rowmap_files=[
-            "ambientcg-1k-stone-rowmap.json",
-            "ambientcg-1k-metal-rowmap.json",
-            "ambientcg-1k-wood-rowmap.json",
-        ],
-    )
+    rich_manifest["sources"]["ambientcg"]["materials_count"] = 3
     with tempfile.TemporaryDirectory() as tmp:
-        client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
-        cache_path = Path(tmp) / ".manifest.json"
+        client = MatVisClient(tag="v2026.04.1", cache_dir=Path(tmp))
+        cache_path = Path(tmp) / "v2026.04.1" / ".manifest.json"
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(rich_manifest))
+        (Path(tmp) / "v2026.04.1" / ".manifest.etag").write_text('"mock"')
+        client._manifest = rich_manifest
         client._update_warned = True
         yield client
 
@@ -221,11 +229,12 @@ class TestInRange:
 class TestClientManifest:
     def test_manifest_loads_from_cache(self, mock_client):
         m = mock_client.manifest
-        assert m["schema_version"] == 1
-        assert "tiers" in m
+        assert m["schema_version"] == 3  # per-file substrate (#186 / ADR-0012)
+        assert "sources" in m
 
     def test_tiers(self, mock_client):
-        assert mock_client.tiers() == ["1k"]
+        # ambientcg has 1k+2k staged in MOCK_MANIFEST; polyhaven/gpuopen 1k.
+        assert mock_client.tiers() == ["1k", "2k"]
 
     def test_sources(self, mock_client):
         sources = mock_client.sources("1k")
@@ -239,9 +248,15 @@ class TestClientManifest:
 def _fresh_client(cache_dir: Path) -> MatVisClient:
     """Client with MOCK_MANIFEST pre-cached but the update-check flag
     NOT suppressed — lets tests exercise the TTY / env-var gating path.
+    Issue #258: pair the cached body with an ETag; the tests below
+    additionally patch ``_get_with_etag`` to return 304-equivalent so
+    the conditional GET on first ``manifest`` access doesn't escape.
     """
-    client = MatVisClient(tag="v2026.04.0", cache_dir=cache_dir)
-    (cache_dir / ".manifest.json").write_text(json.dumps(MOCK_MANIFEST))
+    client = MatVisClient(tag="v2026.04.1", cache_dir=cache_dir)
+    scoped = cache_dir / "v2026.04.1"
+    scoped.mkdir(parents=True, exist_ok=True)
+    (scoped / ".manifest.json").write_text(json.dumps(MOCK_MANIFEST))
+    (scoped / ".manifest.etag").write_text('"mock"')
     return client
 
 
@@ -265,6 +280,12 @@ class TestUpdateCheckLogging:
                 with (
                     patch.object(mc, "UPDATE_CHECK_DISABLED", False),
                     patch.object(mc, "UPDATE_CHECK_FORCED", False),
+                    # Issue #258: 304-equivalent stub so the conditional
+                    # GET in `manifest` doesn't escape to real HTTP.
+                    patch(
+                        "mat_vis_client.client._get_with_etag",
+                        return_value=(None, '"mock"'),
+                    ),
                     patch.object(
                         client,
                         "check_updates",
@@ -299,6 +320,10 @@ class TestUpdateCheckLogging:
                 patch("sys.stderr.isatty", return_value=True),
                 patch.object(mc, "UPDATE_CHECK_DISABLED", False),
                 patch.object(mc, "UPDATE_CHECK_FORCED", False),
+                patch(
+                    "mat_vis_client.client._get_with_etag",
+                    return_value=(None, '"mock"'),
+                ),
                 patch.object(
                     client,
                     "check_updates",
@@ -333,6 +358,10 @@ class TestUpdateCheckLogging:
                 patch("sys.stderr.isatty", return_value=False),
                 patch.object(mc, "UPDATE_CHECK_DISABLED", False),
                 patch.object(mc, "UPDATE_CHECK_FORCED", True),
+                patch(
+                    "mat_vis_client.client._get_with_etag",
+                    return_value=(None, '"mock"'),
+                ),
                 patch.object(
                     client,
                     "check_updates",
@@ -366,6 +395,10 @@ class TestUpdateCheckLogging:
                 patch("sys.stderr.isatty", return_value=True),
                 patch.object(mc, "UPDATE_CHECK_DISABLED", True),
                 patch.object(mc, "UPDATE_CHECK_FORCED", True),
+                patch(
+                    "mat_vis_client.client._get_with_etag",
+                    return_value=(None, '"mock"'),
+                ),
                 patch.object(client, "check_updates") as mock_chk,
                 caplog.at_level("INFO", logger="mat-vis-client"),
             ):
@@ -383,23 +416,43 @@ class TestUpdateCheckLogging:
 class TestSchemaVersionStrict:
     """#69 — client requires ``schema_version``; no legacy fallback."""
 
+    def _write_manifest(self, tmp: Path, data: dict) -> Path:
+        scoped = Path(tmp) / "v2026.04.0"
+        scoped.mkdir(parents=True, exist_ok=True)
+        mf = scoped / ".manifest.json"
+        mf.write_text(json.dumps(data))
+        # Issue #258: pair the body with an ETag so the manifest
+        # property's conditional GET can short-circuit (304) instead of
+        # falling back to an unconditional refetch and clobbering our
+        # poisoned-payload test fixture.
+        (scoped / ".manifest.etag").write_text('"mock"')
+        return mf
+
     def test_rejects_manifest_without_schema_version(self):
         """A manifest with only ``version: 1`` raises RuntimeError."""
         with tempfile.TemporaryDirectory() as tmp:
             client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
             legacy = {k: v for k, v in MOCK_MANIFEST.items() if k != "schema_version"}
             assert "schema_version" not in legacy
-            (Path(tmp) / ".manifest.json").write_text(json.dumps(legacy))
-            with pytest.raises(RuntimeError, match="schema_version"):
-                _ = client.manifest
+            self._write_manifest(tmp, legacy)
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(None, '"mock"'),
+            ):
+                with pytest.raises(RuntimeError, match="schema_version"):
+                    _ = client.manifest
 
     def test_error_message_mentions_cache_clear(self):
         """Recovery path is surfaced in the error message."""
         with tempfile.TemporaryDirectory() as tmp:
             client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
-            (Path(tmp) / ".manifest.json").write_text(json.dumps({"version": 1}))
-            with pytest.raises(RuntimeError) as excinfo:
-                _ = client.manifest
+            self._write_manifest(tmp, {"version": 1})
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(None, '"mock"'),
+            ):
+                with pytest.raises(RuntimeError) as excinfo:
+                    _ = client.manifest
             msg = str(excinfo.value)
             assert "cache clear" in msg
             assert ".manifest.json" in msg
@@ -409,37 +462,35 @@ class TestSchemaVersionStrict:
         with tempfile.TemporaryDirectory() as tmp:
             client = MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
             future = {**MOCK_MANIFEST, "schema_version": 99}
-            (Path(tmp) / ".manifest.json").write_text(json.dumps(future))
-            with pytest.raises(RuntimeError, match="does not support"):
-                _ = client.manifest
+            self._write_manifest(tmp, future)
+            with patch(
+                "mat_vis_client.client._get_with_etag",
+                return_value=(None, '"mock"'),
+            ):
+                with pytest.raises(RuntimeError, match="does not support"):
+                    _ = client.manifest
 
 
-class TestClientRowmap:
-    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
-    def test_fetch_rowmap(self, mock_get, mock_client):
-        rm = mock_client.rowmap("ambientcg", "1k")
-        assert "materials" in rm
-        assert "Rock064" in rm["materials"]
+class TestClientCatalogQueries:
+    """Per-file substrate (#186): materials/channels are read from the
+    v3 catalog, not a separate rowmap. Lock the catalog-driven contract
+    as a regression gate."""
 
-    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
-    def test_materials_list(self, mock_get, mock_client):
-        mats = mock_client.materials("ambientcg", "1k")
-        assert "Metal032" in mats
-        assert "Rock064" in mats
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
+    def test_materials_filters_by_available_tiers(self, mock_get, mock_client):
+        """Only materials whose available_tiers contains the queried tier."""
+        # 1k: Rock064, Metal032, Wood045 all qualify
+        mats_1k = mock_client.materials("ambientcg", "1k")
+        assert sorted(mats_1k) == ["Metal032", "Rock064", "Wood045"]
+        # 2k: Metal032 is 1k-only → excluded
+        mats_2k = mock_client.materials("ambientcg", "2k")
+        assert sorted(mats_2k) == ["Rock064", "Wood045"]
 
-    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
-    def test_channels(self, mock_get, mock_client):
-        channels = mock_client.channels("ambientcg", "Rock064", "1k")
-        assert "color" in channels
-        assert "normal" in channels
-
-    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
-    def test_rowmap_entry(self, mock_get, mock_client):
-        entry = mock_client.rowmap_entry("ambientcg", "Rock064", "1k")
-        assert "color" in entry
-        assert entry["color"]["offset"] == 0
-        assert entry["color"]["length"] == 1024
-        assert entry["color"]["parquet_file"] == "ambientcg-1k.parquet"
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
+    def test_channels_from_catalog_maps(self, mock_get, mock_client):
+        """channels() reads the catalog entry's `maps` list."""
+        chs = mock_client.channels("ambientcg", "Rock064", "1k")
+        assert chs == ["color", "normal", "roughness"]
 
 
 class TestClientSearch:
@@ -489,7 +540,8 @@ class TestClientSearch:
         results = mock_search_client.search(source="ambientcg")
         assert len(results) == 3
 
-    def test_search_invalid_category_returns_empty(self, mock_client, caplog):
+    @patch("mat_vis_client.client._get_json")
+    def test_search_invalid_category_returns_empty(self, mock_get, mock_client, caplog):
         """Invalid category soft-warns and returns empty rather than raising.
 
         Raising would force consumers to validate against a moving-target
@@ -499,6 +551,9 @@ class TestClientSearch:
         """
         import logging
 
+        # v0.6.0 derives categories from per-source catalog entries; mock
+        # each `.index()` call with the fixture.
+        mock_get.return_value = MOCK_INDEX_AMBIENTCG
         with caplog.at_level(logging.WARNING, logger="mat-vis-client"):
             results = mock_client.search("invalid_category")
         assert results == []
@@ -506,21 +561,22 @@ class TestClientSearch:
 
 
 class TestClientPrefetch:
-    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
     @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_prefetch_downloads_all(self, mock_http, mock_json, mock_client):
+        """All materials with `tier in available_tiers` get prefetched."""
         progress = []
         n = mock_client.prefetch(
             "ambientcg",
             "1k",
             on_progress=lambda mid, i, total: progress.append((mid, i, total)),
         )
-        assert n == 2  # Rock064 and Metal032
-        assert len(progress) == 2
-        assert progress[-1][1] == 2  # last index
-        assert progress[-1][2] == 2  # total
+        assert n == 3  # Rock064, Metal032, Wood045 all have 1k
+        assert len(progress) == 3
+        assert progress[-1][1] == 3
+        assert progress[-1][2] == 3
 
-    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
     @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_fetch_all_textures(self, mock_http, mock_json, mock_client):
         textures = mock_client.fetch_all_textures("ambientcg", "Rock064", "1k")
@@ -657,13 +713,12 @@ class TestRateLimitRetry:
     @patch("mat_vis_client.client.time.sleep")
     @patch("mat_vis_client.client.urllib.request.urlopen")
     def test_non_ratelimit_403_is_not_retried(self, mock_open, _sleep):
-        from urllib.error import HTTPError
+        from mat_vis_client.client import _get, HTTPFetchError
 
-        from mat_vis_client.client import _get
-
-        # Plain 403 with no rate-limit signal → propagate, no retry
+        # Plain 403 with no rate-limit signal → typed HTTPFetchError (0.5+),
+        # no retry. Used to raise urllib.HTTPError directly; now wrapped.
         mock_open.side_effect = [self._http_error(403)]
-        with pytest.raises(HTTPError):
+        with pytest.raises(HTTPFetchError):
             _get("http://test/x")
         assert mock_open.call_count == 1
 
@@ -680,36 +735,39 @@ class TestMtlxOriginalFetchError:
         mock_get_json.side_effect = URLError("boom")
 
         src = mock_client.mtlx("gpuopen", "any-id", "1k")
-        # .original checks presence against the upstream map; fetch fails
+        # .original() checks presence against the upstream map; fetch fails
         # → empty map cached → returned as no-original-available.
-        assert src.original is None
+        assert src.original() is None
 
         # Second call uses the cache — no new network hit.
-        assert src.original is None
+        assert src.original() is None
         assert mock_get_json.call_count == 1
 
 
 class TestFriendlyNotFoundErrors:
     """Item G: missing tier / source / material / channel must raise
-    MatVisError with an Available-list suggestion, not a bare KeyError."""
+    MatVisError with an Available-list suggestion, not a bare KeyError.
+    Per-file substrate (#186) reads from the v3 catalog instead of a
+    rowmap, but the friendly-error contract is unchanged."""
 
-    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
     @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_unknown_tier_suggests_available(self, mock_http, mock_json, mock_client):
         from mat_vis_client import MatVisError
 
-        with pytest.raises(MatVisError, match=r"tier '2k' not found.*Available: \['1k'\]"):
-            mock_client.fetch_texture("ambientcg", "Rock064", "color", "2k")
+        # MOCK_MANIFEST advertises 1k + 2k for ambientcg; "16k" is unknown.
+        with pytest.raises(MatVisError, match=r"tier '16k' not found"):
+            mock_client.fetch_texture("ambientcg", "Rock064", "color", "16k")
 
-    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
     @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_unknown_source_suggests_available(self, mock_http, mock_json, mock_client):
         from mat_vis_client import MatVisError
 
-        with pytest.raises(MatVisError, match=r"source 'nope' not found in tier '1k'"):
+        with pytest.raises(MatVisError, match=r"source 'nope' not found"):
             mock_client.fetch_texture("nope", "Rock064", "color", "1k")
 
-    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
     @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_unknown_material_suggests_available(self, mock_http, mock_json, mock_client):
         from mat_vis_client import MatVisError
@@ -719,14 +777,15 @@ class TestFriendlyNotFoundErrors:
         msg = str(exc.value)
         assert "material 'DOES_NOT_EXIST' not found" in msg
         assert "ambientcg/1k" in msg
-        assert "Rock064" in msg  # canonical list present
+        assert "Rock064" in msg
         assert "Metal032" in msg
 
-    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
     @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_unknown_channel_suggests_available(self, mock_http, mock_json, mock_client):
         from mat_vis_client import MatVisError
 
+        # Rock064's catalog `maps` is [color, normal, roughness] — no "displacement".
         with pytest.raises(MatVisError) as exc:
             mock_client.fetch_texture("ambientcg", "Rock064", "displacement", "1k")
         msg = str(exc.value)
@@ -735,41 +794,100 @@ class TestFriendlyNotFoundErrors:
         assert "color" in msg
         assert "normal" in msg
 
-    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
-    def test_rowmap_entry_unknown_material(self, mock_json, mock_client):
+
+class TestTierCompleteSentinel:
+    """Per-file substrate atomicity gate (#186 / ADR-0012).
+
+    The .tier_complete sentinel is the final commit per tier. Probing
+    it on the first fetch_texture for a (source, tier) means a partial
+    bake never serves half-baked bytes."""
+
+    def test_missing_sentinel_raises(self, mock_client):
+        """If the HEAD probe fails, fetch_texture raises a friendly error."""
         from mat_vis_client import MatVisError
 
-        with pytest.raises(MatVisError, match="material 'XXX' not found"):
-            mock_client.rowmap_entry("ambientcg", "XXX", "1k")
+        # Catalog returns OK; sentinel HEAD raises (simulating a partial
+        # bake where the .tier_complete commit hasn't landed).
+        def _get(url, **_kw):
+            if url.endswith("/.tier_complete"):
+                raise OSError("404")
+            return TINY_PNG
+
+        with (
+            patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG),
+            patch("mat_vis_client.client._get", side_effect=_get),
+        ):
+            with pytest.raises(MatVisError, match="not atomically complete"):
+                mock_client.fetch_texture("ambientcg", "Rock064", "color", "1k")
+
+    def test_sentinel_probe_cached_per_tier(self, mock_client):
+        """Two fetches in the same (source, tier) probe the sentinel once."""
+        sentinel_calls = 0
+
+        def _get(url, **_kw):
+            nonlocal sentinel_calls
+            if url.endswith("/.tier_complete"):
+                sentinel_calls += 1
+            return TINY_PNG
+
+        with (
+            patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG),
+            patch("mat_vis_client.client._get", side_effect=_get),
+        ):
+            mock_client.fetch_texture("ambientcg", "Rock064", "color", "1k")
+            mock_client.fetch_texture("ambientcg", "Rock064", "normal", "1k")
+
+        assert sentinel_calls == 1, (
+            f"sentinel HEAD must be cached per (source, tier); got {sentinel_calls} probes"
+        )
 
 
-class TestFetchTextureSafety:
-    """Guard range-read cap against malicious/corrupt rowmaps."""
+class TestPerFileFetchUrlShape:
+    """Lock the per-file URL contract — clients depend on this exact
+    layout post-#186. Any future refactor that changes the URL must
+    update this gate explicitly."""
 
-    @patch("mat_vis_client.client._get", side_effect=_mock_get)
-    def test_rejects_oversize_length(self, mock_http, mock_client):
-        from mat_vis_client import MatVisError
-        from mat_vis_client.client import DEFAULT_MAX_FETCH_BYTES
+    def test_url_is_source_tier_mid_channel_png(self, mock_client):
+        captured: list[str] = []
 
-        evil = {
-            "parquet_file": "x.parquet",
-            "materials": {"EVIL": {"color": {"offset": 0, "length": DEFAULT_MAX_FETCH_BYTES + 1}}},
-        }
-        with patch("mat_vis_client.client._get_json", return_value=evil):
-            with pytest.raises(MatVisError, match="safety cap"):
-                mock_client.fetch_texture("ambientcg", "EVIL", "color", "1k")
+        def _get(url, **_kw):
+            captured.append(url)
+            if url.endswith("/.tier_complete"):
+                return b"v0.0.0\n"
+            return TINY_PNG
 
-    @patch("mat_vis_client.client._get", side_effect=_mock_get)
-    def test_rejects_invalid_length(self, mock_http, mock_client):
-        from mat_vis_client import MatVisError
+        with (
+            patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG),
+            patch("mat_vis_client.client._get", side_effect=_get),
+        ):
+            mock_client.fetch_texture("ambientcg", "Rock064", "color", "1k")
 
-        bad = {
-            "parquet_file": "x.parquet",
-            "materials": {"BAD": {"color": {"offset": 0, "length": -1}}},
-        }
-        with patch("mat_vis_client.client._get_json", return_value=bad):
-            with pytest.raises(MatVisError, match="invalid rowmap"):
-                mock_client.fetch_texture("ambientcg", "BAD", "color", "1k")
+        png_urls = [u for u in captured if u.endswith(".png")]
+        assert len(png_urls) == 1, f"expected one PNG GET, got {len(png_urls)}: {captured}"
+        assert png_urls[0].endswith("/ambientcg/1k/Rock064/color.png")
+
+    def test_falls_back_to_ktx2_on_404(self, mock_client):
+        """Channels available only in KTX2 form (e.g. derived ktx2-1k tiers)."""
+        captured: list[str] = []
+
+        def _get(url, **_kw):
+            captured.append(url)
+            if url.endswith("/.tier_complete"):
+                return b"v0.0.0\n"
+            if url.endswith(".png"):
+                raise OSError("404")  # PNG missing → fall back to KTX2
+            return b"\xabKTX 20\xbb\r\n\x1a\n" + b"\x00" * 100
+
+        with (
+            patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG),
+            patch("mat_vis_client.client._get", side_effect=_get),
+        ):
+            data = mock_client.fetch_texture("ambientcg", "Rock064", "color", "1k")
+
+        assert data.startswith(b"\xabKTX 20\xbb\r\n\x1a\n")
+        png_urls = [u for u in captured if u.endswith(".png")]
+        ktx2_urls = [u for u in captured if u.endswith(".ktx2")]
+        assert len(png_urls) == 1 and len(ktx2_urls) == 1
 
 
 # ── Adapter helper tests ───────────────────────────────────────
@@ -1009,7 +1127,7 @@ class TestExportMtlx:
 
 
 class TestMaterialize:
-    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
     @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_materialize_writes_pngs(self, mock_http, mock_json, mock_client):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1020,7 +1138,7 @@ class TestMaterialize:
             assert (tex_dir / "roughness.png").exists()
             assert (tex_dir / "color.png").read_bytes()[:4] == b"\x89PNG"
 
-    @patch("mat_vis_client.client._get_json", return_value=MOCK_ROWMAP)
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
     @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_materialize_skips_existing(self, mock_http, mock_json, mock_client):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1031,26 +1149,6 @@ class TestMaterialize:
             # Second call should skip (files exist)
             mock_client.materialize("ambientcg", "Rock064", "1k", tmp)
             assert mock_http.call_count == call_count_1  # no new HTTP calls
-
-    @patch("mat_vis_client.client._get_json")
-    @patch("mat_vis_client.client._get", side_effect=_mock_get)
-    def test_to_mtlx_generates_valid_document(self, mock_http, mock_json, mock_client):
-        # Deprecated but still functional.
-        mock_json.side_effect = [MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG, MOCK_ROWMAP]
-        import warnings
-
-        with tempfile.TemporaryDirectory() as tmp:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                mtlx_path = mock_client.to_mtlx("ambientcg", "Rock064", "1k", tmp)
-            assert mtlx_path.exists()
-            assert mtlx_path.suffix == ".mtlx"
-
-            content = mtlx_path.read_text()
-            assert "UsdPreviewSurface" in content
-            assert "<nodegraph " in content
-            assert "color.png" in content
-            assert 'version="1.38"' in content
 
 
 # ── MtlxSource façade tests ────────────────────────────────────
@@ -1076,9 +1174,9 @@ class TestMtlxSource:
     @patch("mat_vis_client.client._get_json")
     def test_synthesized_xml_does_not_fetch_pngs(self, mock_json, mock_client):
         """.xml only needs the rowmap + index, no texture byte fetches."""
-        mock_json.side_effect = [MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG]
+        mock_json.return_value = MOCK_INDEX_AMBIENTCG
         with patch("mat_vis_client.client._get") as mock_get:
-            xml = mock_client.mtlx("ambientcg", "Rock064", "1k").xml
+            xml = mock_client.mtlx("ambientcg", "Rock064", "1k").xml()
             # No _get (which fetches PNG bytes) should have been called.
             assert mock_get.call_count == 0
 
@@ -1090,17 +1188,17 @@ class TestMtlxSource:
     @patch("mat_vis_client.client._get_json")
     def test_synthesized_xml_is_cached(self, mock_json, mock_client):
         """Second .xml access returns the cached string."""
-        mock_json.side_effect = [MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG]
+        mock_json.return_value = MOCK_INDEX_AMBIENTCG
         source = mock_client.mtlx("ambientcg", "Rock064", "1k")
-        xml1 = source.xml
-        xml2 = source.xml
+        xml1 = source.xml()
+        xml2 = source.xml()
         assert xml1 is xml2
 
     @patch("mat_vis_client.client._get_json")
     @patch("mat_vis_client.client._get", side_effect=_mock_get)
     def test_synthesized_export_writes_files(self, mock_http, mock_json, mock_client):
         """.export(path) writes channel PNGs + a .mtlx file."""
-        mock_json.side_effect = [MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG, MOCK_ROWMAP]
+        mock_json.return_value = MOCK_INDEX_AMBIENTCG
         with tempfile.TemporaryDirectory() as tmp:
             mtlx_path = mock_client.mtlx("ambientcg", "Rock064", "1k").export(tmp)
             assert mtlx_path.exists()
@@ -1118,14 +1216,14 @@ class TestMtlxSource:
         """.original is None when the source has no upstream mtlx map."""
         mock_json.side_effect = Exception("404")
         source = mock_client.mtlx("ambientcg", "Rock064", "1k")
-        assert source.original is None
+        assert source.original() is None
 
     @patch("mat_vis_client.client._get_json")
     def test_original_returns_none_for_unknown_material(self, mock_json, mock_client):
         """.original is None when the material isn't in the upstream map."""
         mock_json.return_value = {"other-uuid": "<materialx version='1.38'/>"}
         source = mock_client.mtlx("gpuopen", "nonexistent-uuid", "1k")
-        assert source.original is None
+        assert source.original() is None
 
     @patch("mat_vis_client.client._get_json")
     def test_original_returns_mtlxsource_for_gpuopen(self, mock_json, mock_client):
@@ -1133,7 +1231,7 @@ class TestMtlxSource:
         upstream_xml = '<?xml version="1.0"?><materialx version="1.38"><nodegraph/></materialx>'
         mock_json.return_value = {"test-uuid": upstream_xml}
         source = mock_client.mtlx("gpuopen", "test-uuid", "1k")
-        orig = source.original
+        orig = source.original()
         assert orig is not None
         assert orig.is_original is True
         assert orig.source == "gpuopen"
@@ -1148,7 +1246,7 @@ class TestMtlxSource:
             "</materialx>"
         )
         mock_json.return_value = {"test-uuid": upstream_xml}
-        xml = mock_client.mtlx("gpuopen", "test-uuid", "1k").original.xml
+        xml = mock_client.mtlx("gpuopen", "test-uuid", "1k").original().xml()
         assert xml == upstream_xml
 
     def test_original_on_original_returns_none(self, mock_client):
@@ -1156,7 +1254,7 @@ class TestMtlxSource:
         from mat_vis_client import MtlxSource
 
         fake_original = MtlxSource(mock_client, "gpuopen", "x", "1k", is_original=True)
-        assert fake_original.original is None
+        assert fake_original.original() is None
 
     @patch("mat_vis_client.client._get_json")
     @patch("mat_vis_client.client._get", side_effect=_mock_get)
@@ -1168,14 +1266,31 @@ class TestMtlxSource:
             '<image name="img2"><input name="file" value="Roughness.png"/></image>'
             "</materialx>"
         )
-        # Calls in order: mtlx-originals map, rowmap (first materialize/channels call
-        # populates the in-process rowmap cache — subsequent calls are cached).
+        # Calls in order: mtlx-originals map, then catalog (first
+        # materialize/channels call hits _load_index_raw via the catalog).
+        # Build a minimal v3 catalog entry for the gpuopen UUID.
+        gpuopen_catalog = [
+            _v3_entry(
+                "test-uuid",
+                "Test Material",
+                "metal",
+                roughness=0.5,
+                metalness=1.0,
+                ior=1.5,
+                available_tiers=["1k"],
+                maps=["color", "roughness"],
+                updated="2025-01-01",
+            ),
+        ]
+        # _v3_entry pins source="ambientcg" — fix it for this gpuopen test.
+        gpuopen_catalog[0]["source"] = "gpuopen"
+        gpuopen_catalog[0]["upstream"]["source"] = "gpuopen"
         mock_json.side_effect = [
             {"test-uuid": upstream_xml},
-            MOCK_ROWMAP_GPUOPEN,
+            gpuopen_catalog,
         ]
         with tempfile.TemporaryDirectory() as tmp:
-            orig = mock_client.mtlx("gpuopen", "test-uuid", "1k").original
+            orig = mock_client.mtlx("gpuopen", "test-uuid", "1k").original()
             assert orig is not None
             mtlx_path = orig.export(tmp)
             content = mtlx_path.read_text()
@@ -1192,168 +1307,188 @@ class TestMtlxSource:
             mock_json.return_value = {"test-uuid": "<materialx/>"}
             s1 = mock_client.mtlx("gpuopen", "test-uuid", "1k")
             s2 = mock_client.mtlx("gpuopen", "another-uuid", "1k")
-            assert s1.original is not None
-            assert s2.original is None
+            assert s1.original() is not None
+            assert s2.original() is None
             # Only one network call for the whole source's map, shared by both.
             assert mock_json.call_count == 1
-
-    def test_deprecated_to_mtlx_warns(self, mock_client):
-        """client.to_mtlx emits DeprecationWarning pointing at .mtlx(...).export."""
-        import warnings
-
-        with (
-            patch("mat_vis_client.client._get_json") as mock_json,
-            patch("mat_vis_client.client._get", side_effect=_mock_get),
-        ):
-            mock_json.side_effect = [MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG, MOCK_ROWMAP]
-            with tempfile.TemporaryDirectory() as tmp:
-                with warnings.catch_warnings(record=True) as w:
-                    warnings.simplefilter("always")
-                    mock_client.to_mtlx("ambientcg", "Rock064", "1k", tmp)
-                assert any(
-                    issubclass(wi.category, DeprecationWarning) and "mtlx(" in str(wi.message)
-                    for wi in w
-                )
-
-    def test_deprecated_fetch_mtlx_original_warns(self, mock_client):
-        """client.fetch_mtlx_original emits DeprecationWarning."""
-        import warnings
-
-        with patch("mat_vis_client.client._get_json", return_value={}):
-            with warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always")
-                result = mock_client.fetch_mtlx_original("ambientcg", "Rock064")
-            assert result is None
-            assert any(issubclass(wi.category, DeprecationWarning) for wi in w)
-
-    def test_deprecated_materialize_mtlx_warns(self, mock_client):
-        """client.materialize_mtlx emits DeprecationWarning."""
-        import warnings
-
-        with (
-            patch("mat_vis_client.client._get_json") as mock_json,
-            patch("mat_vis_client.client._get", side_effect=_mock_get),
-        ):
-            # no-originals path: fetch originals (empty), then materialize + synthesize
-            mock_json.side_effect = [{}, MOCK_ROWMAP, MOCK_INDEX_AMBIENTCG, MOCK_ROWMAP]
-            with tempfile.TemporaryDirectory() as tmp:
-                with warnings.catch_warnings(record=True) as w:
-                    warnings.simplefilter("always")
-                    mock_client.materialize_mtlx("ambientcg", "Rock064", "1k", tmp)
-                assert any(issubclass(wi.category, DeprecationWarning) for wi in w)
-
-
-class TestFetchMtlxOriginal:
-    """Retained for backward compat — method still works, just warns."""
-
-    @patch("mat_vis_client.client._get_json")
-    def test_returns_xml_for_known_material(self, mock_json, mock_client):
-        import warnings
-
-        mock_json.return_value = {
-            "test-uuid": '<?xml version="1.0"?><materialx version="1.38"><nodegraph/></materialx>'
-        }
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            xml = mock_client.fetch_mtlx_original("gpuopen", "test-uuid")
-        assert xml is not None
-        assert "<materialx" in xml
-
-    @patch("mat_vis_client.client._get_json")
-    def test_returns_none_for_unknown(self, mock_json, mock_client):
-        import warnings
-
-        mock_json.return_value = {"other-uuid": "<materialx/>"}
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            xml = mock_client.fetch_mtlx_original("gpuopen", "nonexistent")
-        assert xml is None
-
-    @patch("mat_vis_client.client._get_json", side_effect=Exception("404"))
-    def test_returns_none_when_no_mtlx_asset(self, mock_json, mock_client):
-        import warnings
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            xml = mock_client.fetch_mtlx_original("ambientcg", "Rock064")
-        assert xml is None
 
 
 # ── Live tests (network required) ──────────────────────────────
 
 live = pytest.mark.skipif(
-    os.environ.get("MAT_VIS_SKIP_LIVE_TESTS") == "1",
-    reason="MAT_VIS_SKIP_LIVE_TESTS=1",
+    os.environ.get("MAT_VIS_LIVE_TESTS") != "1",
+    reason=(
+        "set MAT_VIS_LIVE_TESTS=1 to run live tests against the prod HF dataset. "
+        "Disabled by default until prod is rebaked under the per-file substrate "
+        "(#186 / ADR-0012); the current prod tags are tar-substrate and the "
+        "v0.6 client has dropped tar support."
+    ),
 )
+
+
+LIVE_TAG = os.environ.get("MAT_VIS_LIVE_TAG", "v2026.04.2")
+LIVE_SOURCE = "polyhaven"
+LIVE_TIER = "1k"
 
 
 @pytest.fixture
 def live_client():
-    """Client pointed at v2026.04.0 with temp cache."""
+    """Client pointed at the scoped-proof HF revision with a temp cache."""
     with tempfile.TemporaryDirectory() as tmp:
-        yield MatVisClient(tag="v2026.04.0", cache_dir=Path(tmp))
+        yield MatVisClient(tag=LIVE_TAG, cache_dir=Path(tmp))
 
 
 @live
 class TestLiveManifest:
     def test_fetch_manifest(self, live_client):
         m = live_client.manifest
-        assert m["schema_version"] == 1
-        assert "tiers" in m
+        # Per-file substrate emits schema_version 3 (#186 / ADR-0012).
+        # Old tar-substrate tags still emit 2 — accept both for backward
+        # compat through the v0.6.x release cycle.
+        assert m["schema_version"] in (2, 3)
+        assert "sources" in m
 
     def test_tiers(self, live_client):
         tiers = live_client.tiers()
-        assert "1k" in tiers
+        assert LIVE_TIER in tiers
 
     def test_sources(self, live_client):
-        sources = live_client.sources("1k")
-        assert "ambientcg" in sources
+        sources = live_client.sources(LIVE_TIER)
+        assert LIVE_SOURCE in sources
 
 
 @live
-class TestLiveRowmap:
-    def test_fetch_rowmap(self, live_client):
-        rm = live_client.rowmap("ambientcg", "1k")
-        assert "materials" in rm
-        assert len(rm["materials"]) > 0
-
+class TestLiveCatalog:
     def test_materials_list(self, live_client):
-        mats = live_client.materials("ambientcg", "1k")
+        mats = live_client.materials(LIVE_SOURCE, LIVE_TIER)
         assert len(mats) > 0
         assert all(isinstance(m, str) for m in mats)
 
     def test_channels(self, live_client):
-        mats = live_client.materials("ambientcg", "1k")
-        channels = live_client.channels("ambientcg", mats[0], "1k")
+        mats = live_client.materials(LIVE_SOURCE, LIVE_TIER)
+        channels = live_client.channels(LIVE_SOURCE, mats[0], LIVE_TIER)
         assert "color" in channels
 
 
 @live
 class TestLiveFetchTexture:
     def test_fetch_returns_png(self, live_client):
-        mats = live_client.materials("ambientcg", "1k")
-        data = live_client.fetch_texture("ambientcg", mats[0], "color", "1k")
+        mats = live_client.materials(LIVE_SOURCE, LIVE_TIER)
+        data = live_client.fetch_texture(LIVE_SOURCE, mats[0], "color", LIVE_TIER)
         assert data[:4] == b"\x89PNG"
         assert len(data) > 1000
 
     def test_fetch_caches_locally(self, live_client):
-        mats = live_client.materials("ambientcg", "1k")
+        mats = live_client.materials(LIVE_SOURCE, LIVE_TIER)
         mid = mats[0]
-        data1 = live_client.fetch_texture("ambientcg", mid, "color", "1k")
-        data2 = live_client.fetch_texture("ambientcg", mid, "color", "1k")
+        data1 = live_client.fetch_texture(LIVE_SOURCE, mid, "color", LIVE_TIER)
+        data2 = live_client.fetch_texture(LIVE_SOURCE, mid, "color", LIVE_TIER)
         assert data1 == data2
 
     def test_fetch_multiple_channels(self, live_client):
-        mats = live_client.materials("ambientcg", "1k")
+        mats = live_client.materials(LIVE_SOURCE, LIVE_TIER)
         mid = mats[0]
-        channels = live_client.channels("ambientcg", mid, "1k")
+        channels = live_client.channels(LIVE_SOURCE, mid, LIVE_TIER)
         for ch in channels[:3]:
-            data = live_client.fetch_texture("ambientcg", mid, ch, "1k")
+            data = live_client.fetch_texture(LIVE_SOURCE, mid, ch, LIVE_TIER)
             assert data[:4] == b"\x89PNG", f"{mid}/{ch} is not PNG"
 
     def test_fetch_nonexistent_material_raises(self, live_client):
-        # 0.4.0: KeyError replaced by MatVisError carrying an Available list.
         from mat_vis_client import MatVisError
 
         with pytest.raises(MatVisError, match="material 'NONEXISTENT_XYZ' not found"):
-            live_client.fetch_texture("ambientcg", "NONEXISTENT_XYZ", "color", "1k")
+            live_client.fetch_texture(LIVE_SOURCE, "NONEXISTENT_XYZ", "color", LIVE_TIER)
+
+
+# ── Phase 2 proof (physicallybased scalar catalog, live on HF) ──
+
+
+@live
+def test_proof_phase_2_fetch_physicallybased_index_from_hf():
+    """Scalar catalog for physicallybased is fetchable from HF substrate.
+
+    Uses ``LIVE_TAG`` (env-overridable) so this stays current as
+    the prod release tag rolls forward; #250 surfaced a hardcoded
+    v2026.04.1 here that broke once that tag was sunset.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        client = MatVisClient(tag=LIVE_TAG, cache_dir=Path(tmp))
+        idx = client.index("physicallybased")
+    assert len(idx) >= 50, f"expected ≥50 PB entries, got {len(idx)}"
+    assert all("id" in e and "source" in e for e in idx)
+    assert all(e["source"] == "physicallybased" for e in idx)
+
+
+class TestFetchTextureMagicAccepts:
+    """Regression: fetch_texture must accept both PNG and KTX2 payloads.
+
+    The 0.6.0 client initially hardcoded a PNG magic check that rejected
+    KTX2 tiers — a live smoke bake to gerchowl/mat-vis-tst caught it.
+    Per-file substrate (#186): magic-byte check still applies after the
+    plain GET; cache key now uses the actual extension on disk.
+    """
+
+    def _make_client(self, tmp: Path, tier: str) -> MatVisClient:
+        manifest = {
+            "schema_version": 3,
+            "release_tag": "test",
+            "sources": {
+                "polyhaven": {
+                    "catalog": "polyhaven.json",
+                    "materials_count": 1,
+                    "tiers": {tier: {"complete": True}},
+                },
+            },
+        }
+        client = MatVisClient(tag="test", cache_dir=tmp)
+        (tmp / "test").mkdir(parents=True, exist_ok=True)
+        (tmp / "test" / ".manifest.json").write_text(json.dumps(manifest))
+        (tmp / "test" / ".manifest.etag").write_text('"mock"')
+        # Skip the conditional GET in `manifest` (#258) by pre-setting
+        # the in-memory cache.
+        client._manifest = manifest
+        client._update_warned = True
+        # Pre-load the in-memory catalog so _resolve_material_id finds "M".
+        client._indexes["polyhaven"] = [
+            _v3_entry(
+                "M",
+                "M",
+                "other",
+                roughness=0.5,
+                metalness=0.0,
+                ior=1.5,
+                available_tiers=[tier],
+                maps=["color"],
+                updated="2025-01-01",
+            ),
+        ]
+        client._indexes["polyhaven"][0]["source"] = "polyhaven"
+        return client
+
+    def test_accepts_png(self, tmp_path):
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        client = self._make_client(tmp_path, "1k")
+        with patch("mat_vis_client.client._get", return_value=png):
+            data = client.fetch_texture("polyhaven", "M", "color", "1k")
+        assert data == png
+
+    def test_accepts_ktx2(self, tmp_path):
+        ktx2 = b"\xabKTX 20\xbb\r\n\x1a\n" + b"\x00" * 100
+        client = self._make_client(tmp_path, "ktx2-1k")
+
+        def _get(url, **_kw):
+            # PNG path 404s → fall back to KTX2.
+            if url.endswith(".png"):
+                raise OSError("404")
+            return ktx2
+
+        with patch("mat_vis_client.client._get", side_effect=_get):
+            data = client.fetch_texture("polyhaven", "M", "color", "ktx2-1k")
+        assert data == ktx2
+
+    def test_rejects_non_png_non_ktx2(self, tmp_path):
+        junk = b"NOPE" + b"\x00" * 100
+        client = self._make_client(tmp_path, "1k")
+        with patch("mat_vis_client.client._get", return_value=junk):
+            with pytest.raises(ValueError, match="Expected PNG or KTX2"):
+                client.fetch_texture("polyhaven", "M", "color", "1k")

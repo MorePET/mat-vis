@@ -231,6 +231,10 @@ cache/
 release-staging/
 *.parquet
 
+# Keep the bake-metrics history in the repo — it IS source of truth for
+# the regression gate. Not a binary artifact; not a release deliverable.
+!metrics/bake-metrics.parquet
+
 # Nix / devenv
 .devenv/
 .devenv.flake.nix
@@ -239,3 +243,24 @@ result
 # Dagger (generated SDK, not tracked)
 .dagger/sdk/
 .dagger/uv.lock
+
+# Agent-facing handoff doc — kept local for fresh sessions, not part of
+# the repo's user-facing documentation. ADRs + GH issues are the
+# canonical, tracked specification.
+docs/HANDOFF.md
+
+# Local agent / editor / tooling state (per-user, never committed)
+.claude/
+.cursor/
+.direnv/
+.playwright-mcp/
+
+# One-shot org bootstrap helper — explicitly local (header in file says so)
+scripts/bootstrap.sh
+
+# Local scratch material downloads (e.g. Rock064/ from ambientcg probes)
+/Rock064/
+
+# Per-language client lockfiles — generated fresh by their own dev workflows
+clients/python/uv.lock
+clients/rust/Cargo.lock

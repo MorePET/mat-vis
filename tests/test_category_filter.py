@@ -16,7 +16,13 @@ import sys
 
 import pytest
 
-from mat_vis_baker.common import CANONICAL_CATEGORIES, MaterialRecord
+from mat_vis_baker.common import (
+    CANONICAL_CATEGORIES,
+    AttributionBlock,
+    DatesBlock,
+    MaterialRecord,
+    MatVisBlock,
+)
 
 
 def _run_cli(*args: str) -> subprocess.CompletedProcess:
@@ -62,12 +68,13 @@ class TestCategoryFilterLogic:
             return MaterialRecord(
                 id=mid,
                 source="ambientcg",
-                name=mid,
-                category=cat,
-                tags=[],
-                source_url="",
-                source_license="CC0-1.0",
-                last_updated="2026-04-18",
+                mat_vis=MatVisBlock(
+                    name=mid,
+                    category=cat,
+                    upstream_id=mid,
+                    attribution=AttributionBlock(license_spdx="CC0-1.0"),
+                    dates=DatesBlock(published="2026-04-18", updated="2026-04-18"),
+                ),
                 available_tiers=["1k"],
                 maps=["color"],
                 texture_paths={},
@@ -83,19 +90,19 @@ class TestCategoryFilterLogic:
 
     def test_filter_keeps_only_target_category(self, mixed_batch):
         target = "stone"
-        kept = [rec for rec in mixed_batch if rec.category == target]
+        kept = [rec for rec in mixed_batch if rec.mat_vis.category == target]
         assert {r.id for r in kept} == {"Rock001", "Rock002"}
-        assert all(r.category == target for r in kept)
+        assert all(r.mat_vis.category == target for r in kept)
 
     def test_filter_empty_on_nonmatching_target(self, mixed_batch):
-        kept = [rec for rec in mixed_batch if rec.category == "glass"]
+        kept = [rec for rec in mixed_batch if rec.mat_vis.category == "glass"]
         assert kept == []
 
     def test_filter_is_identity_when_target_is_none(self, mixed_batch):
         # category_filter=None in cmd_all means "no filter" — batch passes through.
         category_filter = None
         kept = (
-            [rec for rec in mixed_batch if rec.category == category_filter]
+            [rec for rec in mixed_batch if rec.mat_vis.category == category_filter]
             if category_filter
             else mixed_batch
         )

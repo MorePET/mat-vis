@@ -25,7 +25,8 @@ def _schema() -> dict:
 @cache
 def CATEGORIES() -> tuple[str, ...]:  # noqa: N802 — public, stable accessor
     """The ten canonical material categories."""
-    return tuple(_schema()["items"]["properties"]["category"]["enum"])
+    # v3: category moved under items.properties.mat_vis.properties (ADR-0011).
+    return tuple(_schema()["items"]["properties"]["mat_vis"]["properties"]["category"]["enum"])
 
 
 @cache

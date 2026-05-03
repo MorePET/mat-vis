@@ -77,7 +77,7 @@ SOURCE_URLS = {
 SOURCE_LICENSES = {
     "ambientcg": "CC0-1.0",
     "polyhaven": "CC0-1.0",
-    "gpuopen": "TBV (per material)",
+    "gpuopen": "MIT (©2022 AMD)",
     "physicallybased": "CC0-1.0",
 }
 
@@ -200,10 +200,11 @@ def generate_catalog_from_release(
             )
         )
 
-        # Group by category
+        # Group by category (v3 shape: mat_vis.category)
         by_cat: dict[str, list[dict]] = defaultdict(list)
         for e in ok_entries:
-            by_cat[e.get("category", "other")].append(e)
+            mv = e.get("mat_vis") or {}
+            by_cat[mv.get("category", "other")].append(e)
 
         for cat in sorted(by_cat.keys()):
             cat_entries = sorted(by_cat[cat], key=lambda e: e["id"])
@@ -213,7 +214,8 @@ def generate_catalog_from_release(
 
             for entry in cat_entries:
                 mid = entry["id"]
-                name = entry.get("name", mid)
+                mv = entry.get("mat_vis") or {}
+                name = mv.get("name") or mid
                 link = _material_link(source, mid, name)
                 maps = ", ".join(entry.get("maps", []))
 
@@ -247,7 +249,8 @@ def generate_catalog_from_release(
 
         by_cat: dict[str, list[dict]] = defaultdict(list)
         for e in entries:
-            by_cat[e.get("category", "other")].append(e)
+            mv = e.get("mat_vis") or {}
+            by_cat[mv.get("category", "other")].append(e)
 
         for cat in sorted(by_cat.keys()):
             cat_entries = sorted(by_cat[cat], key=lambda e: e["id"])
@@ -256,11 +259,22 @@ def generate_catalog_from_release(
             sections.append("|---|---|---|---|---|")
 
             for entry in cat_entries:
-                name = entry.get("name", entry["id"])
-                color = entry.get("color_hex")
-                rough = entry.get("roughness")
-                metal = entry.get("metalness")
-                ior = entry.get("ior")
+                mv = entry.get("mat_vis") or {}
+                pbr = mv.get("pbr") or {}
+                name = mv.get("name") or entry["id"]
+                rgb = pbr.get("color_rgb")
+                if isinstance(rgb, list) and len(rgb) >= 3:
+                    r, g, b = rgb[:3]
+                    color = "#{:02X}{:02X}{:02X}".format(
+                        int(round(r * 255)),
+                        int(round(g * 255)),
+                        int(round(b * 255)),
+                    )
+                else:
+                    color = None
+                rough = pbr.get("roughness")
+                metal = pbr.get("metalness")
+                ior = pbr.get("ior")
 
                 color_cell = f"`{color}`" if color else "—"
                 rough_str = f"{rough:.2f}" if rough is not None else "—"

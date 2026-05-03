@@ -87,6 +87,13 @@ repos:
         files: ^\.dagger/src/.*\.py$
         pass_filenames: false
 
+      - id: check-calver-defaults
+        name: no hardcoded calver defaults in source (#109)
+        entry: python3 scripts/check-calver-defaults.py
+        language: system
+        files: ^(src/|scripts/|\.dagger/src/|\.github/workflows/)
+        pass_filenames: false
+
       - id: sync-spec
         name: sync docs/specs to baker's packaged _spec dir
         entry: python3 scripts/sync-spec.py
@@ -113,3 +120,20 @@ repos:
     rev: 07d900b8fa1097806b8adb6391b0d3e0ac2fdea7  # v1.39.0
     hooks:
       - id: typos
+
+  # Pre-push: fast pytest suite (tests/ + clients/python/, no network).
+  # Catches the failure modes that pre-commit's lint pass cannot —
+  # signature drift, mock regressions, schema changes — before CI sees
+  # them. Gated on `stages: [pre-push]` so it does NOT run on every
+  # commit (~22s is too slow for per-commit). Bypass with
+  # `git push --no-verify` if you really need to (e.g. emergency hotfix).
+  - repo: local
+    hooks:
+      - id: test-fast
+        name: test-fast (pytest, no network)
+        entry: just test-fast
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+        always_run: true
+        verbose: true
