@@ -20,6 +20,7 @@ def bake_argv(
     dry_run: bool,
     allow_prod: bool,
     batch_max_bytes: int = 700 * 1024 * 1024,
+    metrics_path: str | None = None,
 ) -> list[str]:
     """Build the ``mat-vis-baker hf-bake`` argv list.
 
@@ -35,6 +36,10 @@ def bake_argv(
     #228: ``--batch-max-bytes`` is always emitted. The CLI defaults
     match this default, but emitting unconditionally keeps the Dagger
     surface explicit (and lets a workflow input override it).
+
+    #263 phase C: ``--metrics-path`` is emitted only when explicitly
+    set so the existing test surface (which never passes a metrics
+    path) stays unchanged.
     """
     argv: list[str] = [
         "uv",
@@ -61,4 +66,6 @@ def bake_argv(
         argv.append("--dry-run")
     if allow_prod:
         argv.append("--allow-prod")
+    if metrics_path:
+        argv += ["--metrics-path", metrics_path]
     return argv

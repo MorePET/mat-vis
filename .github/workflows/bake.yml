@@ -223,3 +223,70 @@ jobs:
             runner disk filled during fetch, or HF push auth/size error.
             Check the hf-bake step logs. Atomic HF commits mean a failed
             bake leaves the target revision unchanged — safe to retry.
+
+  # #263 phase C: post-bake gate. Runs validate_release.py against the
+  # live HF substrate (no metrics parquet needed — uses
+  # baked_ids_from_release_manifest). Catches the v2026.04.0 class of
+  # regression by comparing the just-baked release-tag against the
+  # previous CalVer tag. Hard-fails the workflow on >5% drop or
+  # cross-tier parity skew >20%.
+  validate:
+    name: validate-release ${{ inputs.release-tag }}
+    needs: bake
+    if: inputs.dry-run != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need git tag history for previous-tag lookup
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Resolve previous release tag
+        id: prev
+        env:
+          CURRENT_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          # Newest v* tag strictly less than the current bake's release-tag.
+          # Empty result is fine — first-ever release has nothing to regress
+          # against, and validate_release.py treats the empty case as clean.
+          prev=$(git tag --list 'v*' --sort=-v:refname \
+            | awk -v cur="$CURRENT_TAG" '$0 < cur { print; exit }')
+          echo "previous_tag=${prev}" >>"${GITHUB_OUTPUT}"
+          echo "previous tag: ${prev:-<none>}"
+
+      - name: Validate per-file substrate against HF
+        env:
+          CURRENT_TAG: ${{ inputs.release-tag }}
+          PREVIOUS_TAG: ${{ steps.prev.outputs.previous_tag }}
+          REPO_ID: ${{ inputs.repo-id }}
+        run: |
+          set -euo pipefail
+          extra_args=()
+          if [ -n "${PREVIOUS_TAG:-}" ]; then
+            extra_args+=(--previous-tag "${PREVIOUS_TAG}")
+          fi
+          uv run --extra baker python scripts/validate_release.py \
+            --from-hf \
+            --repo-id "${REPO_ID}" \
+            --release-tag "${CURRENT_TAG}" \
+            "${extra_args[@]}"
+
+      - name: Notify on failure
+        if: failure()
+        uses: ./.github/actions/notify-on-failure
+        with:
+          label-prefix: "[validate-failed]"
+          workflow-name: "bake-post-gate"
+          target: "${{ inputs.release-tag }}"
+          context: >-
+            Post-bake validator tripped on the live HF substrate.
+            Likely causes: a (source, tier) regressed > 5% vs the
+            previous release (the v2026.04.0 gpuopen-1k-2234-to-10
+            class), or a tier within this release dropped below 80%
+            of its source's leader. Inspect the validate-release step
+            log for the offending pair. The bake itself succeeded —
+            this gate runs against the resulting HF state.
