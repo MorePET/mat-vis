@@ -94,6 +94,13 @@ permissions:
   contents: read
   issues: write          # needed by notify-on-failure composite action
 
+# #262: disable Dagger's dagger.cloud OTel export (5xx → SIGPIPE in CI).
+# Replace with self-hosted endpoint once #131 + #176 + the otlp-tailnet
+# composite action are wired in.
+env:
+  OTEL_SDK_DISABLED: "true"
+  DAGGER_NO_NAG: "1"
+
 # #235 hotfix: workflow-level budget — serialise *every* dispatch
 # against a given HF repo. Previously this was at workflow level, then
 # moved to job level by #233 to support matrix fan-out. The job-level
