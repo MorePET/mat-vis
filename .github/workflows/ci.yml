@@ -7,6 +7,17 @@ on:  # yamllint disable-line rule:truthy
     branches: [main, dev]
     tags: ["v*"]
 
+# #262: Dagger ships traces + metrics to dagger.cloud by default.
+# That collector flakes (5xx) and the metric exporter then SIGPIPEs
+# the dagger CLI (exit 141), bricking otherwise-green CI runs (e.g.
+# the v0.6.0 tag run 25287958789). Until #262 lands a self-hosted
+# OTLP collector + wires it via .github/actions/otlp-tailnet, fully
+# disable the OTel SDK in CI. DAGGER_NO_NAG silences the cosmetic
+# "Setup tracing at dagger.cloud" line.
+env:
+  OTEL_SDK_DISABLED: "true"
+  DAGGER_NO_NAG: "1"
+
 jobs:
   ci:
     name: Lint + Test + Container smoke
