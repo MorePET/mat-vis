@@ -1,0 +1,111 @@
+---
+# Release validator (#263 phase C) — runs scripts/validate_release.py
+# against the per-file-metrics parquet committed at the repo root.
+#
+# Catches the v2026.04.0 class of regression (gpuopen-1k 2234 -> 10
+# materials, shipped silently) by checking the per-(source, tier)
+# material totals against the previous release plus a cross-tier
+# parity threshold.
+#
+# Two trigger paths:
+#   1. Daily cron at 06:30 UTC — drift monitor. Scheduled AFTER e2e.yml
+#      (06:00 UTC) so the e2e tag has settled before the gate runs.
+#   2. workflow_dispatch — operator-driven validation against a specific
+#      tag, optionally with --repo-id for a live HF cross-check.
+
+name: Release validate
+
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: 'Release tag to validate (e.g. v2026.04.2)'
+        required: true
+        default: 'v2026.04.2'
+        type: string
+      repo-id:
+        description: >-
+          HF dataset repo for the optional live cross-check via
+          release-manifest.json. Production: gerchowl/mat-vis;
+          scratch: gerchowl/mat-vis-tst.
+        required: false
+        default: 'gerchowl/mat-vis'
+        type: string
+      allow-prod:
+        description: >-
+          Required when --repo-id targets the production dataset.
+          Read-only validator, but the flag mirrors bake.yml's
+          convention so dispatches stay symmetrical.
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    # Daily at 06:30 UTC — 30 min after e2e.yml's 06:00 slot so a
+    # newly tagged release has time to settle before the gate runs.
+    - cron: '30 6 * * *'
+
+permissions:
+  contents: read
+  issues: write          # needed by notify-on-failure composite action
+
+jobs:
+  validate:
+    name: validate-release ${{ inputs.release-tag || 'cron' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          # workflow_dispatch supplies inputs.release-tag; cron does not,
+          # so fall back to the latest released tag (most recent CalVer).
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="${INPUT_TAG}"
+          else
+            tag=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          fi
+          if [ -z "${tag}" ]; then
+            echo "ERROR: no release tag resolved (input empty, no v* tags)" >&2
+            exit 2
+          fi
+          echo "tag=${tag}" >>"${GITHUB_OUTPUT}"
+
+      - name: Validate per-file metrics
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          REPO_ID: ${{ inputs.repo-id }}
+        run: |
+          set -euo pipefail
+          extra_args=()
+          if [ -n "${REPO_ID:-}" ]; then
+            extra_args+=(--repo-id "${REPO_ID}")
+          fi
+          uv run --extra baker python scripts/validate_release.py \
+            --metrics metrics/per-file-metrics.parquet \
+            --release-tag "${RELEASE_TAG}" \
+            "${extra_args[@]}"
+
+      - name: Notify on failure
+        if: failure()
+        uses: ./.github/actions/notify-on-failure
+        with:
+          label-prefix: "[validate-failed]"
+          workflow-name: "release-validate"
+          target: "${{ steps.tag.outputs.tag }}"
+          context: >-
+            validate_release.py tripped a gate against
+            metrics/per-file-metrics.parquet. Likely causes: a tier
+            regressed > 5% vs the previous release (gpuopen-1k-2234-to-10
+            class), or a tier within a release dropped below 80% of its
+            source's leader. Inspect the run log for the offending
+            (source, tier). The metrics parquet is the source of truth;
+            cross-check against the live HF substrate with
+            `validate_release.py --repo-id gerchowl/mat-vis` if a row
+            looks suspect.
