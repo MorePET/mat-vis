@@ -28,6 +28,10 @@ SCAN_DIRS = ("src", "scripts", ".dagger/src")
 WORKFLOW_DEFAULT_ALLOWED = {
     Path(".github/workflows/bake.yml"),
     Path(".github/workflows/derive.yml"),
+    # release-validate.yml (#263 phase C) — validator dispatch input
+    # for the post-bake / drift-monitor gate. Same legitimate-default
+    # exception as bake.yml: humans bump it per release.
+    Path(".github/workflows/release-validate.yml"),
 }
 
 CALVER_RE = re.compile(r"v20\d{2}\.\d{2}\.\d+(-[A-Za-z0-9.]+)?")
