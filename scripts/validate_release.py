@@ -44,7 +44,6 @@ DEFAULT_EXCLUDE_TIER_PREFIXES = ("ktx2-",)
 
 
 __all__ = [
-    "baked_ids_from_rowmap_dir",
     "find_catalog_violations",
     "find_regressions",
     "find_tier_parity_violations",
@@ -254,29 +253,6 @@ def find_catalog_violations(
                 }
             )
     return violations
-
-
-def baked_ids_from_rowmap_dir(rowmap_dir: Path) -> dict[tuple[str, str], set[str]]:
-    """Scan ``rowmap_dir`` for ``{source}-{tier}-{category}-rowmap.json``
-    files, merge per (source, tier), return ``{(source, tier): {ids}}``.
-
-    Used at validation time to produce ``baked_per_tier`` for
-    :func:`find_catalog_violations`.
-    """
-    import json as _json
-    import re
-
-    pattern = re.compile(r"^(?P<source>[a-z0-9]+)-(?P<tier>[a-z0-9-]+?)-[a-z0-9]+-rowmap\.json$")
-    out: dict[tuple[str, str], set[str]] = {}
-    for rmp in Path(rowmap_dir).glob("*-rowmap.json"):
-        m = pattern.match(rmp.name)
-        if not m:
-            continue
-        key = (m.group("source"), m.group("tier"))
-        data = _json.loads(rmp.read_text())
-        ids = set(data.get("materials", {}).keys())
-        out.setdefault(key, set()).update(ids)
-    return out
 
 
 def main(argv: list[str] | None = None) -> int:
