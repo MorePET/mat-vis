@@ -25,9 +25,29 @@ Usage:
     dagger call push                 # preflight + build + push to GHCR
 """
 
-from typing import Annotated
+# #262: kill the Python OTel SDK *before* `import dagger` triggers its
+# auto-init. The Dagger Python SDK wires up an OTLP HTTP exporter to
+# dagger.cloud at module-import time; that endpoint flakes (5xx) and
+# the retry loop ends in SIGPIPE → exit 141, bricking otherwise-green
+# CI runs (e.g. dev pushes 25320342461 / 25320773716, the v0.6.0 tag
+# run 25287958789, and the per-PR Client-tests job).
+#
+# Workflow-level env (OTEL_SDK_DISABLED=true in ci.yml) covers the
+# dagger CLI itself but does NOT propagate into the container that
+# runs THIS python module — so the SDK boots up here regardless and
+# the export retry storm continues. Setting via os.environ.setdefault
+# at the top of the entrypoint fixes it for both local invocations
+# and the CI containers, while still letting an explicit override
+# (e.g. once #131 + #176 + the otlp-tailnet composite action ship a
+# self-hosted collector) re-enable the SDK by exporting the var.
+import os
 
-import dagger
+os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+os.environ.setdefault("DAGGER_NO_NAG", "1")
+
+from typing import Annotated  # noqa: E402
+
+import dagger  # noqa: E402
 from dagger import Doc, dag, function, object_type
 
 from mat_vis_ci._bake_cli import bake_argv as _bake_argv
