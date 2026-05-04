@@ -421,6 +421,7 @@ baker = [
     { name = "requests" },
 ]
 dev = [
+    { name = "mat-vis-client" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
@@ -437,6 +438,7 @@ observability = [
 [package.metadata]
 requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'baker'", specifier = ">=0.25" },
+    { name = "mat-vis-client", marker = "extra == 'dev'", editable = "clients/python" },
     { name = "materialx", marker = "extra == 'materialx'", specifier = ">=1.39" },
     { name = "openexr", marker = "extra == 'materialx'", specifier = ">=3.3" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'observability'", specifier = ">=1.27" },
@@ -449,6 +451,11 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
 ]
 provides-extras = ["baker", "materialx", "observability", "dev"]
+
+[[package]]
+name = "mat-vis-client"
+version = "0.6.3"
+source = { editable = "clients/python" }
 
 [[package]]
 name = "materialx"
