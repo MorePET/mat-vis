@@ -29,10 +29,24 @@ dev = [
     "pytest>=7",
     "pytest-cov>=4",
     "ruff>=0.4",
+    # Editable install of the reference Python client so tests/ can
+    # import `mat_vis_client` without a manual `pip install -e
+    # clients/python`. Path-based source below — uv only resolves it
+    # when the `dev` extra is requested. Workspace mode would have
+    # made `clients/python` a mandatory member for every uv command,
+    # which breaks Containerfile's `uv pip install .[baker]` (the
+    # container only COPYs pyproject.toml + README + src/, not the
+    # client tree).
+    "mat-vis-client",
 ]
 
 [project.scripts]
 mat-vis-baker = "mat_vis_baker.__main__:main"
+
+[tool.uv.sources]
+# Path source resolved ONLY when the `dev` extra pulls mat-vis-client
+# in. Container builds (which install just `.[baker]`) never look here.
+mat-vis-client = { path = "clients/python", editable = true }
 
 [build-system]
 requires = ["hatchling"]
