@@ -55,6 +55,7 @@ from PIL import Image
 from mat_vis_baker.common import CANONICAL_CHANNELS, TIER_TO_PX
 from mat_vis_baker.hf_bake_per_file import _guard_prod_target
 from mat_vis_baker.hf_retry import _create_commit_with_backoff
+from mat_vis_baker.per_file_metrics import record_batch
 from mat_vis_baker.progress import ProgressTracker, emit_bake_plan
 
 log = logging.getLogger("mat-vis-baker.hf_derive_per_file")
@@ -403,6 +404,8 @@ def _derive_driver(
     batch_size: int,
     batch_max_bytes: int,
     on_progress: Callable[[dict], None] | None,
+    operation: str,
+    metrics_path: Path | None,
 ) -> dict:
     """Shared driver behind :func:`derive_smaller_tier` and
     :func:`derive_ktx2_tier`. Single code path so the sentinel-last,
@@ -468,9 +471,11 @@ def _derive_driver(
     pending_mids: list[str] = []
     # #228: bytes accumulator drives the bytes-aware flush bound.
     pending_bytes = 0
+    # #263 phase B: 1-indexed counter for per-file metrics rows.
+    batch_seq_counter = 0
 
     def _flush_batch() -> str:
-        nonlocal last_commit_sha
+        nonlocal last_commit_sha, batch_seq_counter
         if not pending_ops:
             return last_commit_sha
         # Bytes accounting: the ops we built carry the transformed
@@ -511,6 +516,31 @@ def _derive_driver(
                 len(pending_ops),
                 sha[:12] if sha else "?",
             )
+        # #263 phase B: emit a per-file metrics row per successful batch.
+        # Skip on dry-run (no real commit OID).
+        batch_seq_counter += 1
+        if metrics_path is not None and not dry_run:
+            try:
+                record_batch(
+                    metrics_path,
+                    release_tag=release_tag,
+                    source=source,
+                    tier=target_tier,
+                    operation=operation,
+                    batch_seq=batch_seq_counter,
+                    materials_committed=len(pending_mids),
+                    files_committed=len(pending_ops),
+                    bytes_committed=batch_bytes,
+                    hf_commit_oid=sha,
+                    repo_id=repo_id,
+                )
+            except Exception as e:  # noqa: BLE001 — observability, not gating
+                log.warning(
+                    "%s per-file metrics record failed (%s): %s — derive continues",
+                    label,
+                    type(e).__name__,
+                    e,
+                )
         # #217: structured progress line — emit AFTER the commit lands.
         progress.record_batch(materials=len(pending_mids), bytes_added=batch_bytes)
         progress.emit_progress()
@@ -747,6 +777,7 @@ def derive_smaller_tier(
     batch_size: int = DEFAULT_BATCH_SIZE,
     batch_max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
     on_progress: Callable[[dict], None] | None = None,
+    metrics_path: Path | None = None,
 ) -> dict:
     """Resize every channel from ``source_tier`` (PNG) into ``target_tier``
     (PNG) on the per-file substrate.
@@ -796,6 +827,8 @@ def derive_smaller_tier(
         batch_size=batch_size,
         batch_max_bytes=batch_max_bytes,
         on_progress=on_progress,
+        operation="derive_resize",
+        metrics_path=metrics_path,
     )
 
 
@@ -814,6 +847,7 @@ def derive_ktx2_tier(
     batch_size: int = DEFAULT_BATCH_SIZE,
     batch_max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
     on_progress: Callable[[dict], None] | None = None,
+    metrics_path: Path | None = None,
 ) -> dict:
     """Transcode every channel from ``source_tier`` (PNG) into
     ``target_tier`` (KTX2) on the per-file substrate.
@@ -852,4 +886,6 @@ def derive_ktx2_tier(
         batch_size=batch_size,
         batch_max_bytes=batch_max_bytes,
         on_progress=on_progress,
+        operation="derive_ktx2",
+        metrics_path=metrics_path,
     )

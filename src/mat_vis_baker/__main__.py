@@ -228,6 +228,7 @@ def cmd_hf_derive(args: argparse.Namespace) -> int:
         limit=args.limit,
         batch_size=args.batch_size,
         batch_max_bytes=args.batch_max_bytes,
+        metrics_path=Path(args.metrics_path) if args.metrics_path else None,
     )
     log.info("hf-derive result: %s", result)
     if "error" in result:
@@ -254,6 +255,7 @@ def cmd_hf_derive_ktx2(args: argparse.Namespace) -> int:
         limit=args.limit,
         batch_size=args.batch_size,
         batch_max_bytes=args.batch_max_bytes,
+        metrics_path=Path(args.metrics_path) if args.metrics_path else None,
     )
     log.info("hf-derive-ktx2 result: %s", result)
     if "error" in result:
@@ -283,6 +285,7 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
         batch_max_bytes=args.batch_max_bytes,
         dry_run=args.dry_run,
         allow_prod=args.allow_prod,
+        metrics_path=Path(args.metrics_path) if args.metrics_path else None,
     )
     log.info("hf-bake result: %s", result)
     if "error" in result:
@@ -444,6 +447,16 @@ def main() -> int:
             "else requires this flag."
         ),
     )
+    p_hf.add_argument(
+        "--metrics-path",
+        default=None,
+        help=(
+            "Per-file metrics parquet path (#263). When set, every successful "
+            "batch commit appends a row capturing (release_tag, source, tier, "
+            "batch_seq, materials/files/bytes committed, HF commit OID). "
+            "Consumed by validate_release.py. Omit to disable emission."
+        ),
+    )
 
     # ── per-file derive (#204) ────────────────────────────────────
     p_hfd = sub.add_parser(
@@ -504,6 +517,11 @@ def main() -> int:
         action="store_true",
         help="Required to target any non-*-tst HF dataset repo.",
     )
+    p_hfd.add_argument(
+        "--metrics-path",
+        default=None,
+        help="Per-file metrics parquet path (#263). See `hf-bake --help` for shape.",
+    )
 
     p_hfk = sub.add_parser(
         "hf-derive-ktx2",
@@ -561,6 +579,11 @@ def main() -> int:
         "--allow-prod",
         action="store_true",
         help="Required to target any non-*-tst HF dataset repo.",
+    )
+    p_hfk.add_argument(
+        "--metrics-path",
+        default=None,
+        help="Per-file metrics parquet path (#263). See `hf-bake --help` for shape.",
     )
 
     p_mtlx = sub.add_parser(

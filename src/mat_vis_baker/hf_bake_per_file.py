@@ -46,6 +46,7 @@ from mat_vis_baker.common import (
 )
 from mat_vis_baker.hf_retry import _create_commit_with_backoff
 from mat_vis_baker.index_builder import build_index
+from mat_vis_baker.per_file_metrics import record_batch
 from mat_vis_baker.progress import ProgressTracker, emit_bake_plan
 from mat_vis_baker.source_tiers import is_supported, unsupported_tier_message
 
@@ -243,6 +244,7 @@ def bake_one_per_file(
     batch_max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
     dry_run: bool = False,
     storage_tier: str | None = None,
+    metrics_path: Path | None = None,
     _pre_manifest_hook=None,
 ) -> dict:
     """Bake one (source, tier) into per-file HF commits.
@@ -373,13 +375,18 @@ def bake_one_per_file(
     pending_batch: list[tuple[MaterialRecord, list]] = []
     pending_bytes = 0
 
+    # #263 phase B: 1-indexed batch counter for the metrics row's
+    # batch_seq column. Incremented each time _flush_batch actually
+    # emits an upload (skipped on empty pending_batch / dry-run-with-no-ops).
+    batch_seq_counter = 0
+
     def _flush_batch(batch: list[tuple[MaterialRecord, list]]) -> str:
         """Upload every baked record's files as one atomic commit, then
         free the local texture bytes for that batch. Keeping the wipe
         coupled to the flush bounds peak disk at one batch — a crash
         mid-commit just orphans LFS blobs; HF's Xet dedup makes the
         re-upload free on the next run."""
-        nonlocal last_commit_sha, n_ok
+        nonlocal last_commit_sha, n_ok, batch_seq_counter
         ops = []
         for _rec, rec_ops in batch:
             ops.extend(rec_ops)
@@ -419,6 +426,33 @@ def bake_one_per_file(
                 len(ops),
                 sha[:12] if sha else "?",
             )
+        # #263 phase B: emit a per-file metrics row per successful batch
+        # commit. Production bake.yml passes a metrics_path; tests omit
+        # it (or pass tmp_path) and the metrics file is git-tracked at
+        # the repo root. Skip on dry-run — the row would carry an empty
+        # OID and confuse the validator into thinking a commit happened.
+        batch_seq_counter += 1
+        if metrics_path is not None and not dry_run:
+            try:
+                record_batch(
+                    metrics_path,
+                    release_tag=release_tag,
+                    source=source,
+                    tier=storage_tier,
+                    operation="bake",
+                    batch_seq=batch_seq_counter,
+                    materials_committed=len(batch),
+                    files_committed=len(ops),
+                    bytes_committed=batch_bytes,
+                    hf_commit_oid=sha,
+                    repo_id=repo_id,
+                )
+            except Exception as e:  # noqa: BLE001 — metrics are observability, not gating
+                log.warning(
+                    "per-file metrics record failed (%s): %s — bake continues",
+                    type(e).__name__,
+                    e,
+                )
         # #217: structured progress line — emit AFTER the commit lands so
         # a crash mid-commit doesn't credit the operator with progress
         # the substrate doesn't actually hold.
