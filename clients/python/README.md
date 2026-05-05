@@ -28,8 +28,16 @@ Python 3.10+.
 from mat_vis_client import MatVisClient
 
 client = MatVisClient()  # latest release
-png = client.fetch_texture("ambientcg", "Rock064", "color", tier="1k")
 
+# Ergonomic path — VisAsset binds (source, material_id, tier) and
+# exposes lazy scalars/textures + format adapters.
+asset = client.asset("ambientcg", "Rock064", tier="1k")
+three  = asset.to_threejs()   # MeshPhysicalMaterial dict
+gltf   = asset.to_gltf()      # glTF 2.0 material dict
+mtlx   = asset.to_mtlx()      # MtlxSource (.xml() / .export(dir))
+
+# Lower-level — when you just want the bytes for one channel.
+png = client.fetch_texture("ambientcg", "Rock064", "color", tier="1k")
 with open("rock.png", "wb") as f:
     f.write(png)
 ```
@@ -105,6 +113,12 @@ Backed by GitHub's unauthenticated rate limit (60 req/h). The client:
 - Raises `mat_vis_client.RateLimitError` when retries are exhausted
 
 ## Adapters
+
+The recommended entry point is `client.asset(...).to_threejs()` (see Quick
+start). The free functions below are the **lower-level primitive layer** —
+use them when you've already got `scalars` and `textures` dicts in hand
+(e.g. building a custom pipeline, porting to another language, or
+unit-testing without instantiating a client).
 
 ```python
 from mat_vis_client import to_threejs, to_gltf, export_mtlx
