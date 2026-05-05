@@ -1,6 +1,7 @@
 ---
 # Release validator (#263 phase C) — runs scripts/validate_release.py
-# against the per-file-metrics parquet committed at the repo root.
+# in --from-hf mode against the live HF per-file substrate, mirroring
+# bake.yml's post-bake validate job (lines 268-283 of bake.yml).
 #
 # Catches the v2026.04.0 class of regression (gpuopen-1k 2234 -> 10
 # materials, shipped silently) by checking the per-(source, tier)
@@ -10,8 +11,15 @@
 # Two trigger paths:
 #   1. Daily cron at 06:30 UTC — drift monitor. Scheduled AFTER e2e.yml
 #      (06:00 UTC) so the e2e tag has settled before the gate runs.
+#      Cron has no inputs; release-tag falls back to the latest v* tag,
+#      repo-id defaults to gerchowl/mat-vis.
 #   2. workflow_dispatch — operator-driven validation against a specific
-#      tag, optionally with --repo-id for a live HF cross-check.
+#      tag, optionally pointed at gerchowl/mat-vis-tst for scratch.
+#
+# #271: prior version used `actions/checkout@v4` defaults (no tags)
+# and `--metrics metrics/per-file-metrics.parquet` (no such file in
+# the repo). Both broke the very first cron firing — now mirrors the
+# bake.yml pattern exactly.
 
 name: Release validate
 
@@ -48,20 +56,29 @@ permissions:
   contents: read
   issues: write          # needed by notify-on-failure composite action
 
+env:
+  # Default HF dataset when not supplied via workflow_dispatch (cron).
+  DEFAULT_REPO_ID: gerchowl/mat-vis
+
 jobs:
   validate:
     name: validate-release ${{ inputs.release-tag || 'cron' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need git tag history for cron tag resolution + previous-tag lookup
 
       - uses: astral-sh/setup-uv@v6
 
-      - name: Resolve release tag
+      - name: Resolve release tag + repo-id
         id: tag
         env:
           INPUT_TAG: ${{ inputs.release-tag }}
+          INPUT_REPO_ID: ${{ inputs.repo-id }}
         run: |
           set -euo pipefail
           # workflow_dispatch supplies inputs.release-tag; cron does not,
@@ -75,21 +92,42 @@ jobs:
             echo "ERROR: no release tag resolved (input empty, no v* tags)" >&2
             exit 2
           fi
-          echo "tag=${tag}" >>"${GITHUB_OUTPUT}"
+          repo_id="${INPUT_REPO_ID:-${DEFAULT_REPO_ID}}"
+          {
+            echo "tag=${tag}"
+            echo "repo_id=${repo_id}"
+          } >>"${GITHUB_OUTPUT}"
+          echo "Resolved: tag=${tag} repo_id=${repo_id}"
 
-      - name: Validate per-file metrics
+      - name: Resolve previous release tag
+        id: prev
         env:
-          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
-          REPO_ID: ${{ inputs.repo-id }}
+          CURRENT_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Newest v* tag strictly less than the current tag. Empty is
+          # fine — first-ever release has nothing to regress against,
+          # and validate_release.py treats the empty case as clean.
+          prev=$(git tag --list 'v*' --sort=-v:refname \
+            | awk -v cur="$CURRENT_TAG" '$0 < cur { print; exit }')
+          echo "previous_tag=${prev}" >>"${GITHUB_OUTPUT}"
+          echo "previous tag: ${prev:-<none>}"
+
+      - name: Validate per-file substrate against HF
+        env:
+          CURRENT_TAG: ${{ steps.tag.outputs.tag }}
+          PREVIOUS_TAG: ${{ steps.prev.outputs.previous_tag }}
+          REPO_ID: ${{ steps.tag.outputs.repo_id }}
         run: |
           set -euo pipefail
           extra_args=()
-          if [ -n "${REPO_ID:-}" ]; then
-            extra_args+=(--repo-id "${REPO_ID}")
+          if [ -n "${PREVIOUS_TAG:-}" ]; then
+            extra_args+=(--previous-tag "${PREVIOUS_TAG}")
           fi
           uv run --extra baker python scripts/validate_release.py \
-            --metrics metrics/per-file-metrics.parquet \
-            --release-tag "${RELEASE_TAG}" \
+            --from-hf \
+            --repo-id "${REPO_ID}" \
+            --release-tag "${CURRENT_TAG}" \
             "${extra_args[@]}"
 
       - name: Notify on failure
@@ -98,14 +136,11 @@ jobs:
         with:
           label-prefix: "[validate-failed]"
           workflow-name: "release-validate"
-          target: "${{ steps.tag.outputs.tag }}"
+          target: "${{ steps.tag.outputs.tag }} @ ${{ steps.tag.outputs.repo_id }}"
           context: >-
-            validate_release.py tripped a gate against
-            metrics/per-file-metrics.parquet. Likely causes: a tier
-            regressed > 5% vs the previous release (gpuopen-1k-2234-to-10
-            class), or a tier within a release dropped below 80% of its
-            source's leader. Inspect the run log for the offending
-            (source, tier). The metrics parquet is the source of truth;
-            cross-check against the live HF substrate with
-            `validate_release.py --repo-id gerchowl/mat-vis` if a row
-            looks suspect.
+            validate_release.py --from-hf tripped a gate against the
+            live HF substrate. Likely causes: a (source, tier) regressed
+            > 5% vs the previous release (gpuopen-1k-2234-to-10 class),
+            or a tier within this release dropped below 80% of its
+            source's leader. Inspect the validate step log for the
+            offending pair.
