@@ -1,7 +1,22 @@
-"""Tests for the Python reference client and adapters.
+"""Legacy half of the Python reference client suite (#274).
+
+Pre-#274 this lived as ``clients/python/test_client.py`` and was
+collected by an explicit ``pytest test_client.py -v`` arg from the
+Dagger ``test_client_python`` function. Its companion at
+``tests/test_client.py`` was collected by the standard pytest
+``testpaths`` config. The two suites had disjoint coverage and the
+nested ``LIVE_TAG`` had drifted to ``v2026.04.1`` after the prod bump.
+
+#274 consolidated both under ``tests/`` so a single ``pytest`` run
+collects everything and a single ``LIVE_TAG`` (``tests/_live.py``)
+governs the live skip-by-default suite. Class names overlap with
+``test_client.py`` (``TestLiveManifest`` etc.) — they remain distinct
+under pytest because the module path is part of the node ID. No tests
+were renamed during the move.
 
 Unit tests (mocked) run unconditionally.
-Live tests hit the real release and are skipped with MAT_VIS_SKIP_LIVE_TESTS=1.
+Live tests hit the real release and are skipped unless
+``MAT_VIS_LIVE_TESTS=1``.
 """
 
 from __future__ import annotations
@@ -11,13 +26,12 @@ import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
-import sys
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent))
-from mat_vis_client import MatVisClient, _in_range  # noqa: E402
-from adapters import (  # noqa: E402
+from mat_vis_client import MatVisClient
+from mat_vis_client.client import _in_range
+from mat_vis_client.adapters import (
     to_threejs,
     to_gltf,
     export_mtlx,
@@ -1314,28 +1328,16 @@ class TestMtlxSource:
 
 
 # ── Live tests (network required) ──────────────────────────────
-
-live = pytest.mark.skipif(
-    os.environ.get("MAT_VIS_LIVE_TESTS") != "1",
-    reason=(
-        "set MAT_VIS_LIVE_TESTS=1 to run live tests against the prod HF dataset. "
-        "Disabled by default until prod is rebaked under the per-file substrate "
-        "(#186 / ADR-0012); the current prod tags are tar-substrate and the "
-        "v0.6 client has dropped tar support."
-    ),
-)
+#
+# The ``live`` marker and ``LIVE_TAG`` constant live in
+# ``tests/_live.py``; the ``live_client`` fixture is in
+# ``tests/conftest.py``. Both modules in this dir share them. See #274.
 
 
-LIVE_TAG = os.environ.get("MAT_VIS_LIVE_TAG", "v2026.04.2")
+from tests._live import LIVE_TAG, live  # noqa: E402
+
 LIVE_SOURCE = "polyhaven"
 LIVE_TIER = "1k"
-
-
-@pytest.fixture
-def live_client():
-    """Client pointed at the scoped-proof HF revision with a temp cache."""
-    with tempfile.TemporaryDirectory() as tmp:
-        yield MatVisClient(tag=LIVE_TAG, cache_dir=Path(tmp))
 
 
 @live

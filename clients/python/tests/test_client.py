@@ -7,7 +7,6 @@ Live tests hit the real release and are skipped with MAT_VIS_SKIP_LIVE_TESTS=1.
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -731,26 +730,13 @@ class TestDefaultTag:
 
 
 # ── Live tests (network required) ──────────────────────────────
+#
+# The ``live`` marker and ``LIVE_TAG`` constant live in
+# ``tests/_live.py`` so a single override (or env-var bump) propagates
+# to every live module. The ``live_client`` fixture is in
+# ``tests/conftest.py`` and gets auto-injected. See #274.
 
-live = pytest.mark.skipif(
-    os.environ.get("MAT_VIS_LIVE_TESTS") != "1",
-    reason=(
-        "set MAT_VIS_LIVE_TESTS=1 to run live tests against the prod HF dataset. "
-        "Disabled by default until prod is rebaked under the per-file substrate "
-        "(#186 / ADR-0012); current prod tags are tar-substrate and the v0.6 "
-        "client has dropped tar support. See #179."
-    ),
-)
-
-
-LIVE_TAG = os.environ.get("MAT_VIS_LIVE_TAG", "v2026.04.1")
-
-
-@pytest.fixture
-def live_client():
-    """Client pointed at the prod HF revision with a temp cache."""
-    with tempfile.TemporaryDirectory() as tmp:
-        yield MatVisClient(tag=LIVE_TAG, cache_dir=Path(tmp))
+from tests._live import live  # noqa: E402
 
 
 @live
