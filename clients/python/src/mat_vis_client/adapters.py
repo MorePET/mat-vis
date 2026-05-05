@@ -85,6 +85,8 @@ def to_threejs(
     Returns:
         Dict suitable for `new THREE.MeshPhysicalMaterial(result)`.
         Textures are embedded as base64 data URIs.
+
+    Recommended ergonomic alternative: ``client.asset(src, mid, tier).to_threejs()``.
     """
     textures = textures or {}
     result: dict = {"type": "MeshPhysicalMaterial"}
@@ -133,6 +135,8 @@ def to_gltf(
         is emitted instead and the separate textures are dropped from
         the output (callers can install ``mat-vis-client[gltf]`` to
         enable packing).
+
+    Recommended ergonomic alternative: ``client.asset(src, mid, tier).to_gltf()``.
     """
     textures = textures or {}
     pbr: dict = {}
@@ -415,6 +419,8 @@ def export_mtlx(
 
     Returns:
         Path to the written .mtlx file.
+
+    Recommended ergonomic alternative: ``client.asset(src, mid, tier).to_mtlx().export(dir)``.
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)

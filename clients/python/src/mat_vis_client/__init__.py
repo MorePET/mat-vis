@@ -28,6 +28,7 @@ import logging
 from typing import Any
 
 from mat_vis_client.adapters import export_mtlx, to_gltf, to_threejs
+from mat_vis_client.asset import VisAsset
 from mat_vis_client.client import (
     AmbiguousMaterialError,
     ChannelNotFoundError,
@@ -62,6 +63,7 @@ __all__ = [
     "SourceNotFoundError",
     "TierNotFoundError",
     "UnknownMaterialError",
+    "VisAsset",
     "__version__",
     "_in_range",
     "get_client",
