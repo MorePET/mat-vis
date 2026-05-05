@@ -35,6 +35,10 @@ import urllib.request
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mat_vis_client.asset import VisAsset
 
 REPO = "MorePET/mat-vis"
 GITHUB_API = f"https://api.github.com/repos/{REPO}"  # update-check only
@@ -1362,6 +1366,24 @@ class MatVisClient:
         if tag is not None and tag != self._tag:
             return self.at(tag).mtlx(source, material_id, tier)
         return MtlxSource(self, source, material_id, tier, is_original=False)
+
+    def asset(
+        self,
+        source: str,
+        material_id: str,
+        tier: str = "1k",
+    ) -> "VisAsset":
+        """Return a :class:`VisAsset` ergonomic wrapper for ``(source, material_id, tier)``.
+
+        VisAsset bundles identity, lazy scalars, lazy textures, and adapter
+        methods (``.to_threejs() / .to_gltf() / .to_mtlx()``) that delegate
+        to the free-function primitive layer in :mod:`mat_vis_client.adapters`.
+        Creation is free — no network IO until ``.scalars`` / ``.textures``
+        / an adapter method is accessed. Mat-vis#93.
+        """
+        from mat_vis_client.asset import VisAsset
+
+        return VisAsset(self, source, material_id, tier)
 
     def _scalars_for(self, source: str, material_id: str) -> dict:
         """Look up PBR scalars for a material from the source index.
