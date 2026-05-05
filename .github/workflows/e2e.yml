@@ -27,12 +27,19 @@ permissions:
   contents: read
   issues: write          # needed by notify-on-failure composite action
 
-# #262: disable Dagger's dagger.cloud OTel export (5xx → SIGPIPE in CI).
-# Replace with self-hosted endpoint once #131 + #176 + the otlp-tailnet
-# composite action are wired in.
+# #262 / #278: disable Dagger's dagger.cloud OTel export at every layer.
+# OTEL_SDK_DISABLED reaches the dagger CLI but the Go engine kept ID-generating
+# (traceparent in error messages) → SIGPIPE on stdout collection. The four
+# extra envs leave the engine no exporter target and no auth. Replace with
+# self-hosted endpoint once #131 + #176 + the otlp-tailnet composite action
+# are wired in.
 env:
   OTEL_SDK_DISABLED: "true"
   DAGGER_NO_NAG: "1"
+  DAGGER_CLOUD_TOKEN: ""
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  OTEL_TRACES_EXPORTER: "none"
+  OTEL_METRICS_EXPORTER: "none"
 
 jobs:
   e2e:
