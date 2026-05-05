@@ -40,7 +40,6 @@
   - changed-files:
       - any-glob-to-any-file:
           - tests/**
-          - clients/python/test_client.py
           - clients/**/test_*.mjs
           - clients/**/test_*.py
 

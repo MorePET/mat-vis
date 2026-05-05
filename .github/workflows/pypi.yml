@@ -47,7 +47,8 @@ jobs:
       - name: Run full pytest suite (skip live network tests)
         env:
           MAT_VIS_SKIP_LIVE_TESTS: "1"
-        run: uv run --no-sync pytest tests/ clients/python/test_client.py
+        # #274 consolidated client tests under ``clients/python/tests/``.
+        run: uv run --no-sync pytest tests/ clients/python/tests/
 
   publish:
     name: Publish mat-vis-client to PyPI
