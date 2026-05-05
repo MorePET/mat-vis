@@ -297,7 +297,15 @@ class MatVisCi:
             Doc("Set MAT_VIS_LIVE_TESTS=1 + MAT_VIS_LIVE_TAG=tag to enable @live tests (#248)"),
         ] = False,
     ) -> str:
-        """Run pytest on the Python reference client against a live release."""
+        """Run pytest on the Python reference client against a live release.
+
+        Test collection is driven by the package's ``testpaths = ["tests"]``
+        config — see ``clients/python/pyproject.toml``. #274 consolidated
+        the previously-disjoint top-level ``test_client.py`` and nested
+        ``tests/test_client.py`` suites under ``tests/``; the explicit
+        filename arg this function used to pass is no longer needed and
+        would have masked the nested suite again if reintroduced.
+        """
         context = src or dag.host().directory(".")
         pip_cache = dag.cache_volume("pip-cache")
         ctr = (
@@ -313,7 +321,7 @@ class MatVisCi:
             ctr = ctr.with_env_variable("MAT_VIS_LIVE_TESTS", "1").with_env_variable(
                 "MAT_VIS_LIVE_TAG", tag
             )
-        return await ctr.with_exec(["pytest", "test_client.py", "-v"]).stdout()
+        return await ctr.with_exec(["pytest", "-v"]).stdout()
 
     @function
     async def test_client_js(
