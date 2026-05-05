@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import xml.etree.ElementTree as ET
+from io import BytesIO
 from pathlib import Path
 
 from mat_vis_client.schema import (
@@ -22,6 +23,15 @@ from mat_vis_client.schema import (
     THREEJS_MAP as _THREEJS_TEX_MAP,
     USD_PREVIEW_MAP as _USD_PREVIEW_TEX_MAP,
 )
+
+# Pillow is a soft dependency — only needed to pack metalness/roughness
+# into a single glTF metallicRoughnessTexture (G=rough, B=metal, R=AO).
+# Install via the optional `[gltf]` extra. Without it, to_gltf() emits a
+# `_note_no_pillow` placeholder so consumers can detect the limitation.
+try:
+    from PIL import Image  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - exercised via monkeypatch
+    Image = None  # type: ignore[assignment]
 
 # Renderer-prop maps come from schema.CHANNELS — do not hand-maintain
 # parallel dicts here. Adding a channel is one edit in schema.py.
@@ -114,17 +124,15 @@ def to_gltf(
 
     Returns:
         Dict conforming to glTF 2.0 material schema. Textures are
-        embedded as base64 data URIs in the 'uri' field. Does NOT
-        pack metalness+roughness into a single texture (that requires
-        image compositing which needs PIL or similar). Instead, scalar
-        factors are used when separate maps are provided.
-
-    Note:
-        Full glTF compliance for metallicRoughnessTexture packing
-        requires image processing (PIL/Pillow). This adapter provides
-        a best-effort output using scalar factors and separate texture
-        references. For production glTF export, consider using a
-        library like pygltflib.
+        embedded as base64 data URIs in the 'uri' field. When both
+        metalness and roughness PNGs are present AND Pillow is
+        installed (via the ``[gltf]`` extra), the two channels are
+        packed into a single ``metallicRoughnessTexture`` per the
+        glTF 2.0 spec (R=AO if available else 255, G=roughness,
+        B=metalness). Without Pillow, a ``_note_no_pillow`` placeholder
+        is emitted instead and the separate textures are dropped from
+        the output (callers can install ``mat-vis-client[gltf]`` to
+        enable packing).
     """
     textures = textures or {}
     pbr: dict = {}
@@ -159,17 +167,60 @@ def to_gltf(
             else:
                 pbr[prop] = _tex_ref(textures[channel])
 
-    # metallicRoughnessTexture: only if BOTH metalness and roughness
-    # textures are available (proper packing needs image processing,
-    # so we note this limitation)
+    # metallicRoughnessTexture: pack metalness + roughness into one
+    # PNG per the glTF 2.0 spec (G=rough, B=metal, R=AO/255). Needs
+    # Pillow — install ``mat-vis-client[gltf]`` to enable.
     if "metalness" in textures and "roughness" in textures:
-        pbr["_note_metallicRoughnessTexture"] = (
-            "Separate metalness and roughness textures provided. "
-            "Pack into a single metallicRoughnessTexture (B=metal, G=rough) "
-            "for full glTF compliance."
-        )
+        if Image is None:
+            pbr["_note_no_pillow"] = (
+                "Pillow is required to pack metallicRoughnessTexture "
+                "(install `mat-vis-client[gltf]`). Separate metalness "
+                "and roughness PNGs were dropped from the output."
+            )
+        else:
+            packed_uri = _pack_metallic_roughness(
+                metalness_png=textures["metalness"],
+                roughness_png=textures["roughness"],
+                ao_png=textures.get("ao"),
+            )
+            pbr["metallicRoughnessTexture"] = {"source": {"uri": packed_uri}}
 
     return material
+
+
+def _pack_metallic_roughness(
+    *,
+    metalness_png: bytes,
+    roughness_png: bytes,
+    ao_png: bytes | None = None,
+) -> str:
+    """Pack metalness/roughness (and optional AO) into a glTF-compliant PNG.
+
+    Per glTF 2.0: R=occlusion, G=roughness, B=metalness. If AO is not
+    provided, R is filled with 255 (opaque white = no occlusion). The
+    metalness image's dimensions are the reference — both roughness and
+    AO are resized to match if they differ. Metalness is the reference
+    because it is the channel most likely to be authored at the
+    material's "true" resolution; roughness is often broadband.
+    """
+    assert Image is not None  # caller checks
+    metal = Image.open(BytesIO(metalness_png)).convert("L")
+    rough = Image.open(BytesIO(roughness_png)).convert("L")
+    if rough.size != metal.size:
+        rough = rough.resize(metal.size)
+
+    if ao_png is not None:
+        ao = Image.open(BytesIO(ao_png)).convert("L")
+        if ao.size != metal.size:
+            ao = ao.resize(metal.size)
+        r_channel = ao
+    else:
+        r_channel = Image.new("L", metal.size, 255)
+
+    packed = Image.merge("RGB", (r_channel, rough, metal))
+    buf = BytesIO()
+    packed.save(buf, format="PNG")
+    return _to_data_uri(buf.getvalue())
 
 
 # ── MaterialX adapter ──────────────────────────────────────────

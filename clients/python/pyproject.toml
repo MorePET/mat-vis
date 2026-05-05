@@ -20,6 +20,13 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+# Enables glTF metallicRoughnessTexture packing in adapters.to_gltf().
+# Without this extra, to_gltf() emits a `_note_no_pillow` placeholder
+# when both metalness and roughness PNGs are present (it remains a
+# zero-dependency client by default).
+gltf = ["pillow>=10.0"]
+
 [project.scripts]
 mat-vis-client = "mat_vis_client.client:main"
 

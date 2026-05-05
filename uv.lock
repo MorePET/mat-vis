@@ -457,6 +457,10 @@ name = "mat-vis-client"
 version = "0.6.3"
 source = { editable = "clients/python" }
 
+[package.metadata]
+requires-dist = [{ name = "pillow", marker = "extra == 'gltf'", specifier = ">=10.0" }]
+provides-extras = ["gltf"]
+
 [[package]]
 name = "materialx"
 version = "1.39.4"
