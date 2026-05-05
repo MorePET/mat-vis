@@ -14,9 +14,22 @@ on:  # yamllint disable-line rule:truthy
 # OTLP collector + wires it via .github/actions/otlp-tailnet, fully
 # disable the OTel SDK in CI. DAGGER_NO_NAG silences the cosmetic
 # "Setup tracing at dagger.cloud" line.
+#
+# #278: kitchen-sink null below — OTEL_SDK_DISABLED reaches the dagger CLI
+# but not consistently the Go engine subprocess; the engine kept ID-generating
+# (traceparent injected into error messages) and the resulting pipe could
+# SIGPIPE during stdout collection on completed sibling containers (run
+# 25370432027 reproduced this twice on the same content that PR #277 had
+# passed). The four extra envs (DAGGER_CLOUD_TOKEN, OTEL_EXPORTER_OTLP_ENDPOINT,
+# OTEL_TRACES_EXPORTER, OTEL_METRICS_EXPORTER) leave the engine no exporter
+# target and no auth even if SDK_DISABLED is ignored.
 env:
   OTEL_SDK_DISABLED: "true"
   DAGGER_NO_NAG: "1"
+  DAGGER_CLOUD_TOKEN: ""
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  OTEL_TRACES_EXPORTER: "none"
+  OTEL_METRICS_EXPORTER: "none"
 
 jobs:
   ci:
