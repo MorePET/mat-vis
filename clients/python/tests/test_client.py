@@ -629,12 +629,24 @@ class TestToGltf:
         assert ext["transmissionFactor"] == 0.8
 
     def test_packed_texture_note(self):
+        # #91 renamed the marker from _note_metallicRoughnessTexture to
+        # _note_no_pillow and gated emission on Pillow being absent. With
+        # Pillow installed, packing succeeds and emits the packed
+        # ``metallicRoughnessTexture`` instead of any marker. Skip this
+        # test when Pillow is available — the no-Pillow branch is covered
+        # in tests/test_adapters.py::TestToGltfPackingFallback.
+        from mat_vis_client.adapters import Image as _PIL
+
+        if _PIL is not None:
+            import pytest
+
+            pytest.skip("Pillow installed: packing path covered in test_adapters.py")
         result = to_gltf(
             {},
             {"metalness": TINY_PNG, "roughness": TINY_PNG},
         )
         pbr = result["pbrMetallicRoughness"]
-        assert "_note_metallicRoughnessTexture" in pbr
+        assert "_note_no_pillow" in pbr
 
     def test_empty_scalars(self):
         result = to_gltf({})

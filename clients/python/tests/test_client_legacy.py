@@ -1010,12 +1010,21 @@ class TestToGltf:
         assert ext["transmissionFactor"] == 0.8
 
     def test_packed_texture_note(self):
+        # #91 renamed the marker; when Pillow is installed the packing
+        # path runs and no marker is emitted. Coverage for the no-Pillow
+        # fallback lives in tests/test_adapters.py.
+        from mat_vis_client.adapters import Image as _PIL
+
+        if _PIL is not None:
+            import pytest
+
+            pytest.skip("Pillow installed: packing path covered in test_adapters.py")
         result = to_gltf(
             {},
             {"metalness": TINY_PNG, "roughness": TINY_PNG},
         )
         pbr = result["pbrMetallicRoughness"]
-        assert "_note_metallicRoughnessTexture" in pbr
+        assert "_note_no_pillow" in pbr
 
     def test_empty_scalars(self):
         result = to_gltf({})
