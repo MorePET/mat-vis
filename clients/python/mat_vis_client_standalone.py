@@ -26,6 +26,7 @@ Usage as CLI:
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import os
@@ -168,14 +169,33 @@ class UnknownMaterialError(MaterialNotFoundError):
 class MaterialNotStagedError(MatVisError):
     """Material is in the index but the release asset isn't baked yet."""
 
-    def __init__(self, source: str, material_id: str, tier: str) -> None:
+    def __init__(
+        self,
+        source: str,
+        material_id: str,
+        tier: str,
+        *,
+        original_name: str | None = None,
+    ) -> None:
         self.source = source
         self.material_id = material_id
         self.tier = tier
-        super().__init__(
-            f"material {material_id!r} exists in {source!r} index "
-            f"but is not staged for tier {tier!r}. Needs a re-bake."
-        )
+        # ``original_name`` carries what the caller typed *before* name→id
+        # resolution (#280). When present and different from material_id
+        # we surface both so batch logs name which item broke.
+        self.original_name = original_name
+        if original_name is not None and original_name != material_id:
+            msg = (
+                f"material {original_name!r} (resolved id {material_id!r}) "
+                f"exists in {source!r} index but is not staged for "
+                f"tier {tier!r}. Needs a re-bake."
+            )
+        else:
+            msg = (
+                f"material {material_id!r} exists in {source!r} index "
+                f"but is not staged for tier {tier!r}. Needs a re-bake."
+            )
+        super().__init__(msg)
 
 
 class AmbiguousMaterialError(MatVisError):
@@ -979,12 +999,21 @@ class MatVisClient:
         norm_query = self._normalize_name(material_id)
         by_id: dict | None = None
         by_name: list[dict] = []
+
+        # Per-entry display name. v3 entries carry it under the
+        # ``mat_vis`` envelope; ambientcg/polyhaven flat-v2 entries
+        # carry it at the top level (#284). Fall back to the canonical
+        # id so the name-list never holds an empty string.
+        def _display_name(entry: dict) -> str:
+            envelope = entry.get("mat_vis") or {}
+            return envelope.get("name") or entry.get("name") or entry.get("id", "")
+
         for entry in idx:
             if not isinstance(entry, dict):
                 continue
             if entry.get("id") == material_id:
                 by_id = entry
-            entry_name = (entry.get("mat_vis") or {}).get("name") or ""
+            entry_name = _display_name(entry)
             if entry_name and self._normalize_name(entry_name) == norm_query:
                 by_name.append(entry)
 
@@ -994,27 +1023,53 @@ class MatVisClient:
         if by_id is not None:
             if _is_staged(by_id):
                 return material_id
+            # Direct-UUID path: original_name stays None so the legacy
+            # single-id message is preserved (#280).
             raise MaterialNotStagedError(source=source, material_id=material_id, tier=tier)
 
         if len(by_name) > 1:
+            # #286: surface human names (or fall back to id) so the
+            # disambiguation list is actually useful when names exist.
             raise AmbiguousMaterialError(
                 source=source,
                 name=material_id,
-                candidates=[e.get("id", "") for e in by_name if e.get("id")],
+                candidates=[_display_name(e) for e in by_name if e.get("id")],
             )
 
         if len(by_name) == 1:
             resolved = by_name[0].get("id", "")
             if _is_staged(by_name[0]):
                 return resolved
-            raise MaterialNotStagedError(source=source, material_id=resolved, tier=tier)
+            # #280: the user passed a name; carry it through so the
+            # error message names *which* material in their batch broke.
+            raise MaterialNotStagedError(
+                source=source,
+                material_id=resolved,
+                tier=tier,
+                original_name=material_id,
+            )
 
-        staged_ids = sorted(
-            e["id"] for e in idx if isinstance(e, dict) and _is_staged(e) and e.get("id")
+        # Build the "available materials at this tier" hint from the
+        # catalog. #286: prefer human names over UUIDs and surface
+        # close-matches before the full list.
+        staged_names = sorted(
+            _display_name(e) for e in idx if isinstance(e, dict) and _is_staged(e) and e.get("id")
         )
+        close = difflib.get_close_matches(material_id, staged_names, n=5, cutoff=0.6)
+        max_full = 50
+        if len(staged_names) > max_full:
+            shown = staged_names[:max_full]
+            shown.append(f"(... {len(staged_names) - max_full} more)")
+            available = shown
+        else:
+            available = staged_names
+        if close:
+            ordered = list(close) + [a for a in available if a not in close]
+        else:
+            ordered = available
         raise UnknownMaterialError(
             key=material_id,
-            available=staged_ids,
+            available=ordered,
             context=f"{source}/{tier}",
         )
 
@@ -1235,6 +1290,17 @@ class MatVisClient:
                 return cache_path.read_bytes()
 
         self._assert_tier_complete(source, tier)
+
+        # #287: emit one progress notice per real network fetch. Cache
+        # hits (returned above) stay silent. Library users wire their
+        # own progress UIs onto this logger.
+        log.info(
+            "Downloading %s/%s/%s @ %s ...",
+            source,
+            resolved,
+            channel,
+            tier,
+        )
 
         last_exc: Exception | None = None
         for ext in ("png", "ktx2"):
@@ -1668,14 +1734,44 @@ class VisAsset:
 
     @property
     def textures(self) -> dict[str, bytes]:
-        """Lazy channel -> PNG bytes mapping (cached after first access)."""
+        """Lazy channel -> PNG bytes mapping (cached after first access).
+
+        Scalar-only sources (``available_tiers=[]``, e.g.
+        ``physicallybased``) short-circuit to ``{}`` so ``to_threejs`` /
+        ``to_gltf`` produce a valid scalars-only material instead of
+        raising :class:`MaterialNotStagedError` from the texture-fetch
+        path (mat-vis#288).
+        """
         if self._textures_cache is None:
-            object.__setattr__(
-                self,
-                "_textures_cache",
-                self._client.fetch_all_textures(self._source, self._material_id, self._tier),
-            )
+            if self._is_scalar_only_entry():
+                fetched: dict[str, bytes] = {}
+            else:
+                fetched = self._client.fetch_all_textures(
+                    self._source, self._material_id, self._tier
+                )
+            object.__setattr__(self, "_textures_cache", fetched)
         return self._textures_cache
+
+    def _is_scalar_only_entry(self) -> bool:
+        """True if this asset's index entry advertises no staged tiers."""
+        try:
+            entries = self._client.index(self._source)
+        except Exception:
+            return False
+        if not isinstance(entries, list):
+            return False
+        norm = self._client._normalize_name(self._material_id)
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if (
+                entry.get("id") == self._material_id
+                or self._client._normalize_name((entry.get("mat_vis") or {}).get("name") or "")
+                == norm
+            ):
+                tiers = entry.get("available_tiers")
+                return not tiers
+        return False
 
     def to_threejs(self) -> dict:
         """Return a Three.js ``MeshPhysicalMaterial`` parameter dict."""

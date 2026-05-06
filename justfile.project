@@ -85,22 +85,24 @@ clean-artifacts:
 # Two invocations because the two `tests/` dirs both have __init__.py
 # and pytest's rootdir discovery conflates them in one run.
 # `--with clients/python` adds the mat-vis-client wheel to the same
-# env (tests/test_version_sync.py imports it). `--reinstall-package`
-# forces a rebuild from clients/python/ even when the cached archive
-# is stale, so signature drift catches pre-CI.
+# env (tests/test_version_sync.py imports it). UV_NO_CACHE=1 is
+# required: `--reinstall-package` does NOT invalidate path-based
+# `--with` dependencies in uv's archive cache, so without no-cache
+# the recipe runs against a stale wheel and fails to catch source
+# changes that would land in CI.
 [group('test')]
 test-all *args:
-    MAT_VIS_LIVE_TESTS=1 uv run --reinstall-package mat-vis-client \
+    MAT_VIS_LIVE_TESTS=1 UV_NO_CACHE=1 uv run --reinstall-package mat-vis-client \
         --with clients/python pytest tests/ {{ args }}
-    MAT_VIS_LIVE_TESTS=1 uv run --reinstall-package mat-vis-client \
+    MAT_VIS_LIVE_TESTS=1 UV_NO_CACHE=1 uv run --reinstall-package mat-vis-client \
         --with clients/python --with pytest pytest clients/python {{ args }}
 
 # Run only fast tests (no network). Default for pre-push hook.
 [group('test')]
 test-fast *args:
-    uv run --reinstall-package mat-vis-client \
+    UV_NO_CACHE=1 uv run --reinstall-package mat-vis-client \
         --with clients/python pytest tests/ {{ args }}
-    uv run --reinstall-package mat-vis-client \
+    UV_NO_CACHE=1 uv run --reinstall-package mat-vis-client \
         --with clients/python --with pytest pytest clients/python {{ args }}
 
 # Sync every client's version literal from its package manifest

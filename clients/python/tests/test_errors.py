@@ -291,8 +291,10 @@ def test_ambiguous_material_error_lists_candidates():
     with pytest.raises(AmbiguousMaterialError) as exc:
         client.fetch_all_textures("gpuopen", "Brick Wall", tier="1k")
     assert exc.value.source == "gpuopen"
-    assert sorted(exc.value.candidates) == ["uuid-a", "uuid-b"]
-    assert "uuid-a" in str(exc.value) and "uuid-b" in str(exc.value)
+    # #286: candidates list is now human names (with id fallback) — UUIDs
+    # were unhelpful when each entry had a perfectly good display name.
+    assert sorted(exc.value.candidates) == ["Brick Wall", "brick wall"]
+    assert "Brick Wall" in str(exc.value) and "brick wall" in str(exc.value)
 
 
 # ── fetch_texture surfaces typed errors ────────────────────────
@@ -347,3 +349,177 @@ def test_fetch_texture_404_raises_material_not_found_or_http_fetch_error():
         assert not isinstance(exc.value, urllib.error.HTTPError)
         # But HTTPFetchError carries the code
         assert exc.value.code == 404
+
+
+# ── Hotfix #280: MaterialNotStagedError keeps user-given name ──
+
+
+def test_material_not_staged_error_preserves_user_given_name():
+    """When the user passes a human name (not the UUID) and the resolved
+    entry exists but is unstaged, the raised error should preserve the
+    original name they typed — losing it makes batch debugging painful
+    (#280).
+    """
+    from mat_vis_client import MaterialNotStagedError
+
+    client = _client_with_index(
+        rowmap_materials={},  # nothing baked → unstaged
+        index_entries=[
+            {"id": "34f2c1f9-aaaa-bbbb-cccc-deadbeefcafe", "mat_vis": {"name": "Chrome"}},
+        ],
+    )
+    with pytest.raises(MaterialNotStagedError) as exc:
+        client.fetch_all_textures("gpuopen", "Chrome", tier="1k")
+    # Resolved id is still the canonical attribute (existing API).
+    assert exc.value.material_id == "34f2c1f9-aaaa-bbbb-cccc-deadbeefcafe"
+    # New: original_name field carries the user's input.
+    assert exc.value.original_name == "Chrome"
+    # And the error string mentions both — so a batch log shows which
+    # human-named material in the run hit this.
+    msg = str(exc.value)
+    assert "Chrome" in msg
+    assert "34f2c1f9-aaaa-bbbb-cccc-deadbeefcafe" in msg
+
+
+def test_material_not_staged_error_direct_uuid_unchanged():
+    """When the user passes the UUID directly, original_name is None and
+    the message is the legacy single-id form (back-compat)."""
+    from mat_vis_client import MaterialNotStagedError
+
+    client = _client_with_index(
+        rowmap_materials={},
+        index_entries=[{"id": "25b88a68", "name": "Aluminum"}],
+    )
+    with pytest.raises(MaterialNotStagedError) as exc:
+        client.fetch_all_textures("gpuopen", "25b88a68", tier="1k")
+    assert exc.value.material_id == "25b88a68"
+    assert exc.value.original_name is None
+    msg = str(exc.value)
+    # Legacy phrasing: no "(resolved id ...)" parenthetical.
+    assert "resolved id" not in msg
+
+
+# ── Hotfix #284: ambientCG/polyhaven flat-v2 name addressability ──
+
+
+def test_resolve_name_falls_back_to_top_level_name_field():
+    """ambientcg/polyhaven catalogs use a flat v2 schema with top-level
+    ``name`` (no ``mat_vis`` envelope). Name lookup must hit those too
+    (#284).
+    """
+    from unittest.mock import patch
+
+    client = _client_with_index(
+        rowmap_materials={"Bricks104": {"color": {"offset": 0, "length": 10}}},
+        # NB: no mat_vis envelope; flat top-level name field.
+        index_entries=[{"id": "Bricks104", "name": "Bricks 104"}],
+    )
+    with patch.object(client, "fetch_texture", return_value=b"\x89PNG") as ft:
+        out = client.fetch_all_textures("gpuopen", "Bricks 104", tier="1k")
+    assert out == {"color": b"\x89PNG"}
+    ft.assert_called_once_with("gpuopen", "Bricks104", "color", "1k")
+
+
+def test_resolve_name_prefers_mat_vis_name_over_top_level():
+    """When both ``mat_vis.name`` and top-level ``name`` are present, the
+    canonical envelope wins (v3 entries shouldn't regress)."""
+    from unittest.mock import patch
+
+    client = _client_with_index(
+        rowmap_materials={"abc": {"color": {"offset": 0, "length": 10}}},
+        index_entries=[
+            {
+                "id": "abc",
+                "name": "Top Level",
+                "mat_vis": {"name": "Envelope Name"},
+            }
+        ],
+    )
+    with patch.object(client, "fetch_texture", return_value=b""):
+        # Envelope name resolves
+        client.fetch_all_textures("gpuopen", "Envelope Name", tier="1k")
+
+
+# ── Hotfix #286: error lists show names + close-matches, not UUIDs ──
+
+
+def test_unknown_material_error_lists_names_not_uuids_with_close_matches():
+    """When the user typos a name (the bernhard repro: ``"TH Large Red
+    Bricks"`` missing the colon), the surfaced ``available`` list and
+    the rendered message should contain human names — and prioritize
+    a close-match suggestion (#286).
+    """
+    import re
+    from mat_vis_client import UnknownMaterialError
+
+    client = _client_with_index(
+        rowmap_materials={
+            "uuid-aa-aaaaaaaa-aaaa-aaaaaaaaaaaa": {"color": {"offset": 0, "length": 10}},
+            "uuid-bb-bbbbbbbb-bbbb-bbbbbbbbbbbb": {"color": {"offset": 0, "length": 10}},
+            "uuid-cc-cccccccc-cccc-cccccccccccc": {"color": {"offset": 0, "length": 10}},
+        },
+        index_entries=[
+            {
+                "id": "uuid-aa-aaaaaaaa-aaaa-aaaaaaaaaaaa",
+                "mat_vis": {"name": "TH: Large Red Bricks"},
+            },
+            {
+                "id": "uuid-bb-bbbbbbbb-bbbb-bbbbbbbbbbbb",
+                "mat_vis": {"name": "TH: Small Red Bricks"},
+            },
+            {"id": "uuid-cc-cccccccc-cccc-cccccccccccc", "mat_vis": {"name": "Concrete Slab"}},
+        ],
+    )
+    with pytest.raises(UnknownMaterialError) as exc:
+        client.fetch_all_textures("gpuopen", "TH Large Red Bricks", tier="1k")
+
+    msg = str(exc.value)
+    # Close match should appear in message (and ideally before any
+    # full-list dump).
+    assert "TH: Large Red Bricks" in msg
+    # No raw UUID-looking strings should be in the message.
+    assert not re.search(r"uuid-[a-f0-9-]{8,}", msg)
+    # Available list should also be names, not UUIDs.
+    assert "TH: Large Red Bricks" in exc.value.available
+    assert all(not a.startswith("uuid-") for a in exc.value.available)
+
+
+def test_unknown_material_error_caps_full_list_when_huge():
+    """A 200-entry catalog should not vomit all 200 names into the
+    message — cap it (#286)."""
+    from mat_vis_client import UnknownMaterialError
+
+    rowmap = {f"uuid-{i:03d}": {"color": {"offset": 0, "length": 10}} for i in range(200)}
+    entries = [
+        {"id": f"uuid-{i:03d}", "mat_vis": {"name": f"NameThing{i:03d}"}} for i in range(200)
+    ]
+    client = _client_with_index(rowmap_materials=rowmap, index_entries=entries)
+    with pytest.raises(UnknownMaterialError) as exc:
+        client.fetch_all_textures("gpuopen", "totally-unknown-key-xyz", tier="1k")
+    msg = str(exc.value)
+    # Sentinel that we truncated (allow either format).
+    assert "more)" in msg or "..." in msg
+    # And the full message shouldn't contain *every* name.
+    assert msg.count("NameThing") < 200
+
+
+def test_ambiguous_material_error_lists_names():
+    """Ambiguous-name candidates should be listed by human name when
+    available, not raw ids (#286)."""
+    from mat_vis_client import AmbiguousMaterialError
+
+    client = _client_with_index(
+        rowmap_materials={
+            "uuid-x": {"color": {"offset": 0, "length": 10}},
+            "uuid-y": {"color": {"offset": 0, "length": 10}},
+        },
+        index_entries=[
+            # Two distinct flat-v2 entries that normalize to the same name.
+            {"id": "uuid-x", "name": "Brick Wall"},
+            {"id": "uuid-y", "name": "brick wall"},
+        ],
+    )
+    with pytest.raises(AmbiguousMaterialError) as exc:
+        client.fetch_all_textures("gpuopen", "Brick Wall", tier="1k")
+    # Candidates should be names, not UUIDs.
+    assert any("Brick" in c for c in exc.value.candidates)

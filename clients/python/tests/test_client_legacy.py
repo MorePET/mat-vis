@@ -791,8 +791,10 @@ class TestFriendlyNotFoundErrors:
         msg = str(exc.value)
         assert "material 'DOES_NOT_EXIST' not found" in msg
         assert "ambientcg/1k" in msg
-        assert "Rock064" in msg
-        assert "Metal032" in msg
+        # #286: available list now shows human names (with id fallback)
+        # — these v3 entries carry display names so we get those.
+        assert "Rough Granite" in msg
+        assert "Brushed Steel" in msg
 
     @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
     @patch("mat_vis_client.client._get", side_effect=_mock_get)
