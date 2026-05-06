@@ -14,6 +14,7 @@ Field name mapping follows docs/specs/field-name-mapping.md.
 from __future__ import annotations
 
 import base64
+import math
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from pathlib import Path
@@ -44,6 +45,56 @@ def _to_data_uri(png_bytes: bytes) -> str:
     """Encode PNG bytes as a base64 data URI."""
     b64 = base64.b64encode(png_bytes).decode("ascii")
     return f"data:image/png;base64,{b64}"
+
+
+# Spec defaults for KHR extensions — emitting an extension entry that
+# matches the spec default is a no-op that bloats glTF output, so the
+# adapter omits it. mat-vis#290.
+_KHR_IOR_DEFAULT = 1.5
+_KHR_TRANSMISSION_DEFAULT = 0.0
+
+
+def _ior_at_default(ior: float | None) -> bool:
+    """True if ``ior`` is None or matches the KHR spec default (1.5).
+
+    Uses ``math.isclose`` because real corpus emits 1.5000000476837158
+    (fp32 round-trip drift) for explicit ``specular_IOR=1.5``; raw
+    ``!= 1.5`` would let the no-op extension through.
+    """
+    return ior is None or math.isclose(ior, _KHR_IOR_DEFAULT, rel_tol=1e-5)
+
+
+def _transmission_at_default(t: float | None) -> bool:
+    """True if ``t`` is None or matches the KHR spec default (0.0)."""
+    return t is None or math.isclose(t, _KHR_TRANSMISSION_DEFAULT, abs_tol=1e-9)
+
+
+def _apply_metallic_colormap_convention(scalars: dict, textures: dict | None) -> dict:
+    """If metallic AND has colorMap AND no authored color, neutralize.
+
+    For three.js / glTF-MR: BaseColorFactor x BaseColorTexture is the
+    spec contract. When ``metalness >= 0.9`` and a color texture is
+    bound but no scalar color was authored, set color=[1,1,1] so the
+    texture is the sole color contributor (else the renderer's default
+    grey double-tints the texture). mat-vis#290 review consensus: the
+    convention belongs in the adapter, not the baker, so ``to_mtlx()``
+    can preserve authored truth.
+
+    Returns a shallow-copied dict — never mutates the caller's input.
+
+    Note: only ``color_hex`` is set on the returned dict; ``color_rgb``
+    is intentionally NOT written because neither :func:`to_threejs` nor
+    :func:`to_gltf` reads it (both consume ``color_hex`` only). Setting
+    it would be misleading dead state.
+    """
+    metalness = scalars.get("metalness") or 0
+    has_color_map = "color" in (textures or {})
+    color_unauthored = scalars.get("color_rgb") is None and scalars.get("color_hex") is None
+    if metalness >= 0.9 and has_color_map and color_unauthored:
+        out = {**scalars}
+        out["color_hex"] = "#FFFFFF"
+        return out
+    return scalars
 
 
 def _color_hex_to_int(hex_str: str) -> int:
@@ -89,6 +140,11 @@ def to_threejs(
     Recommended ergonomic alternative: ``client.asset(src, mid, tier).to_threejs()``.
     """
     textures = textures or {}
+    # Apply the metallic+colorMap neutralization convention BEFORE we
+    # read scalar fields (mat-vis#290). The helper returns the same
+    # dict if no convention applies, or a shallow copy with color set.
+    scalars = _apply_metallic_colormap_convention(scalars, textures)
+
     result: dict = {"type": "MeshPhysicalMaterial"}
 
     # Scalars
@@ -139,6 +195,11 @@ def to_gltf(
     Recommended ergonomic alternative: ``client.asset(src, mid, tier).to_gltf()``.
     """
     textures = textures or {}
+    # Apply the metallic+colorMap neutralization convention BEFORE we
+    # read scalar fields (mat-vis#290). The helper returns the same
+    # dict if no convention applies, or a shallow copy with color set.
+    scalars = _apply_metallic_colormap_convention(scalars, textures)
+
     pbr: dict = {}
     material: dict = {"pbrMetallicRoughness": pbr}
 
@@ -150,14 +211,18 @@ def to_gltf(
     if "color_hex" in scalars and scalars["color_hex"] is not None:
         pbr["baseColorFactor"] = _color_hex_to_rgba(scalars["color_hex"])
 
-    # IOR extension
-    if "ior" in scalars and scalars["ior"] is not None:
-        material.setdefault("extensions", {})["KHR_materials_ior"] = {"ior": scalars["ior"]}
+    # IOR extension — omit when the value matches the spec default 1.5
+    # (a no-op extension entry only bloats glTF output). mat-vis#290.
+    # ``math.isclose`` tolerates fp32 round-trip drift (1.5000000476837158).
+    ior = scalars.get("ior")
+    if not _ior_at_default(ior):
+        material.setdefault("extensions", {})["KHR_materials_ior"] = {"ior": ior}
 
-    # Transmission extension
-    if "transmission" in scalars and scalars["transmission"] is not None:
+    # Transmission extension — omit when zero/None (spec default).
+    transmission = scalars.get("transmission")
+    if not _transmission_at_default(transmission):
         material.setdefault("extensions", {})["KHR_materials_transmission"] = {
-            "transmissionFactor": scalars["transmission"]
+            "transmissionFactor": transmission
         }
 
     # Textures

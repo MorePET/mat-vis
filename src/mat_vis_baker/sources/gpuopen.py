@@ -29,12 +29,14 @@ from pathlib import Path
 
 import requests
 
+from mat_vis_baker._mtlx_scalars import parse_standard_surface_scalars
 from mat_vis_baker.common import (
     TIER_TO_PX,
     AttributionBlock,
     DatesBlock,
     MaterialRecord,
     MatVisBlock,
+    PBRBlock,
     PhysicalBlock,
     UpstreamBlock,
     _filter_upstream,
@@ -331,7 +333,10 @@ def _fetch_one(
         raw=_filter_upstream(mat, UPSTREAM_ALLOWLIST),
     )
 
-    def _mat_vis(maps: list[str] | None = None) -> MatVisBlock:
+    def _mat_vis(
+        maps: list[str] | None = None,
+        pbr: PBRBlock | None = None,
+    ) -> MatVisBlock:
         return MatVisBlock(
             name=name,
             category=category,
@@ -339,6 +344,13 @@ def _fetch_one(
             description=description,
             upstream_id=mid,
             physical=PhysicalBlock(max_resolution_px=_max_resolution_px(tier)),
+            # PBR scalars parsed from the .mtlx <standard_surface> shader
+            # at fetch time (mat-vis#290). Texture-bound inputs leave the
+            # corresponding PBRBlock field as None — adapters apply their
+            # own neutral defaults (e.g. baseColorFactor [1,1,1] when a
+            # colorMap is bound). On the failed-fetch path pbr=None and
+            # we fall back to the dataclass default (an empty PBRBlock).
+            pbr=pbr if pbr is not None else PBRBlock(),
             attribution=AttributionBlock(
                 authors=_authors(mat),
                 # Upstream ``license`` is a freeform string (the current
@@ -359,7 +371,7 @@ def _fetch_one(
     failed = lambda: MaterialRecord(  # noqa: E731 — local shorthand
         id=mid,
         source="gpuopen",
-        mat_vis=_mat_vis(),
+        mat_vis=_mat_vis(pbr=None),
         upstream=upstream,
         status="failed",
     )
@@ -385,6 +397,23 @@ def _fetch_one(
             log.warning("%s: no textures or mtlx in ZIP", mid)
             return failed()
 
+        # Parse <standard_surface> scalars from the .mtlx so PBRBlock is
+        # populated alongside texture_paths (mat-vis#290). Texture-bound
+        # inputs leave the corresponding field as None.
+        parsed_pbr: PBRBlock | None = None
+        if mtlx_path is not None:
+            try:
+                parsed_pbr = parse_standard_surface_scalars(
+                    mtlx_path.read_text(encoding="utf-8"),
+                    material_id=mid,
+                )
+            except Exception:
+                # Contract: scalar parsing must NEVER break the fetch
+                # path. Catch broadly (e.g. UnicodeDecodeError on non-utf8
+                # mtlx, or any future parser failure) and continue without
+                # the parsed PBRBlock — texture_paths still flow through.
+                log.exception("%s: could not read mtlx for scalar parse", mid)
+
         texture_paths = dict(textures)
         if mtlx_path:
             texture_paths["_mtlx"] = mtlx_path
@@ -392,7 +421,7 @@ def _fetch_one(
         return MaterialRecord(
             id=mid,
             source="gpuopen",
-            mat_vis=_mat_vis(),
+            mat_vis=_mat_vis(pbr=parsed_pbr),
             upstream=upstream,
             available_tiers=[tier] if textures else [],
             maps=sorted(textures.keys()),
