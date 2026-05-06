@@ -210,3 +210,81 @@ def test_visasset_importable_from_package_root():
     from mat_vis_client import VisAsset as Imported
 
     assert Imported is VisAsset
+
+
+# ── Scalar-only sources short-circuit texture fetch (mat-vis#288) ──
+
+
+def _scalar_only_index_entry(material_id: str) -> dict:
+    """Build a scalar-only v3 index entry (available_tiers=[]) like physicallybased."""
+    return {
+        "id": material_id,
+        "source": "physicallybased",
+        "mat_vis": {
+            "name": material_id,
+            "category": "metal",
+            "pbr": {
+                "color_rgb": [0.91, 0.92, 0.92],
+                "roughness": 0.5,
+                "metalness": 1.0,
+                "ior": 1.39,
+            },
+        },
+        "available_tiers": [],
+        "maps": [],
+    }
+
+
+def test_textures_returns_empty_for_scalar_only_source():
+    """VisAsset.textures must short-circuit when the index entry has
+    no staged tiers (scalar-only source like physicallybased), instead
+    of calling fetch_all_textures (which raises MaterialNotStagedError)."""
+    c = MatVisClient()
+    a = VisAsset(c, "physicallybased", "Aluminum", "1k")
+    entries = [_scalar_only_index_entry("Aluminum")]
+    with (
+        patch.object(c, "index", return_value=entries),
+        patch.object(c, "fetch_all_textures") as fetch_mock,
+    ):
+        assert a.textures == {}
+    fetch_mock.assert_not_called()
+
+
+def test_to_threejs_scalar_only_source_returns_scalars_no_textures():
+    """Repro for mat-vis#288: physicallybased + to_threejs should return
+    scalars-only output, not raise MaterialNotStagedError."""
+    c = MatVisClient()
+    a = VisAsset(c, "physicallybased", "Aluminum", "1k")
+    entries = [_scalar_only_index_entry("Aluminum")]
+    with patch.object(c, "index", return_value=entries):
+        result = a.to_threejs()
+    # Scalars come through.
+    assert result["type"] == "MeshPhysicalMaterial"
+    assert result.get("metalness") == 1.0
+    assert result.get("roughness") == 0.5
+    assert result.get("ior") == 1.39
+    assert "color" in result
+    # No texture maps were fetched.
+    for k in ("map", "normalMap", "roughnessMap", "metalnessMap", "aoMap"):
+        assert k not in result
+
+
+def test_textures_still_fetched_for_staged_source():
+    """Regression: textured sources (e.g. gpuopen Chrome staged for 1k)
+    must still route through fetch_all_textures normally."""
+    c = MatVisClient()
+    a = VisAsset(c, "gpuopen", "Chrome", "1k")
+    staged_entry = {
+        "id": "Chrome",
+        "source": "gpuopen",
+        "mat_vis": {"name": "Chrome", "pbr": {}},
+        "available_tiers": ["1k"],
+        "maps": ["color", "normal"],
+    }
+    expected = {"color": b"PNG-color", "normal": b"PNG-normal"}
+    with (
+        patch.object(c, "index", return_value=[staged_entry]),
+        patch.object(c, "fetch_all_textures", return_value=expected) as fetch_mock,
+    ):
+        assert a.textures == expected
+    fetch_mock.assert_called_once_with("gpuopen", "Chrome", "1k")
