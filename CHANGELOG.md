@@ -19,6 +19,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## mat-vis-client 0.6.4
+
+Five client-side hotfixes off bernhard-42's
+[build123d#1270](https://github.com/gumyr/build123d/pull/1270) review
+thread. All on the existing substrate — no re-bake required.
+
+### Fixed
+
+- `MaterialNotStagedError` now preserves the user-given name when
+  name resolution succeeds but the resolved entry isn't staged for
+  the requested tier
+  ([#280](https://github.com/MorePET/mat-vis/issues/280)). Adds
+  optional `original_name` kwarg + dual-id message; the direct-UUID
+  path emits the legacy single-id form unchanged so existing callers
+  see no diff.
+- `_resolve_material_id` falls back to the top-level `name` field so
+  ambientcg / polyhaven flat-v2 entries become name-addressable,
+  matching the gpuopen UX shipped in
+  [#143](https://github.com/MorePET/mat-vis/issues/143)
+  ([#284](https://github.com/MorePET/mat-vis/issues/284)).
+  Bypasses the v3-schema migration tail
+  ([#291](https://github.com/MorePET/mat-vis/issues/291)).
+- `UnknownMaterialError` and `AmbiguousMaterialError` now list display
+  names instead of UUIDs, prepend `difflib.get_close_matches` (n=5,
+  cutoff=0.6) before the full list, and cap full output at 50 entries
+  with a `(... N more)` tail
+  ([#286](https://github.com/MorePET/mat-vis/issues/286)).
+- `VisAsset.textures` short-circuits to `{}` for scalar-only index
+  entries (`available_tiers=[]`) so `to_threejs` / `to_gltf` produce a
+  valid scalars-only material on `physicallybased` instead of raising
+  `MaterialNotStagedError` from the texture-fetch path
+  ([#288](https://github.com/MorePET/mat-vis/issues/288)).
+  Texture-bearing sources still route through the strict resolver.
+
+### Added
+
+- `fetch_texture` emits one
+  `log.info("Downloading {source}/{id}/{channel} @ {tier} ...")` per
+  cache miss at the network boundary
+  ([#287](https://github.com/MorePET/mat-vis/issues/287)). Cache hits
+  stay silent; consumers wire their own progress UIs onto the logger.
+  No tqdm dependency.
+
+### Changed
+
+- All four client package versions aligned to **0.6.4**. Only the
+  Python client's behavior changed; the JS / Rust / shell clients ship
+  a version bump for cross-client coherence.
+
+### Notes
+
+- The hotfix bundle does **not** address
+  [#285](https://github.com/MorePET/mat-vis/issues/285) (gpuopen
+  baking errors — defaulted PBR scalars on layered MaterialX
+  materials). That requires baker work and a substrate re-bake,
+  tracked at [#290](https://github.com/MorePET/mat-vis/issues/290).
+- bernhard-42's question on `Vis` import path
+  ([#282](https://github.com/MorePET/mat-vis/issues/282)) is upstream
+  of mat-vis; tracked at
+  [MorePET/mat#187](https://github.com/MorePET/mat/issues/187).
+
 ## mat-vis-client 0.6.3
 
 ETag-aware manifest cache across all four reference clients, plus a

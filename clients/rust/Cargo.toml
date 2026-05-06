@@ -1,6 +1,6 @@
 [package]
 name = "mat-vis-client"
-version = "0.6.3"
+version = "0.6.4"
 edition = "2021"
 description = "mat-vis PBR texture client — per-file HF dataset (ADR-0012)"
 license = "MIT"
