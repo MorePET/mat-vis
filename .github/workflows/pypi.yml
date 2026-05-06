@@ -48,7 +48,14 @@ jobs:
         env:
           MAT_VIS_SKIP_LIVE_TESTS: "1"
         # #274 consolidated client tests under ``clients/python/tests/``.
-        run: uv run --no-sync pytest tests/ clients/python/tests/
+        # Two invocations because the two ``tests/`` dirs both have
+        # ``__init__.py`` and pytest's rootdir discovery conflates them
+        # into a single ``tests.conftest`` module name in one run,
+        # raising ImportPathMismatchError. ``justfile.project::test-fast``
+        # uses the same two-invocation split for the same reason.
+        run: |
+          uv run --no-sync pytest tests/
+          uv run --no-sync pytest clients/python/tests/
 
   publish:
     name: Publish mat-vis-client to PyPI
