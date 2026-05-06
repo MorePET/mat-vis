@@ -28,7 +28,7 @@ const HF_BASE =
 // SSoT: clients/js/package.json. Kept in sync by
 // scripts/sync-js-version.py (pre-commit) — a drift test in tests/
 // fails CI if these disagree. Do not hand-edit.
-export const VERSION = '0.6.3';
+export const VERSION = '0.6.4';
 const UA = `mat-vis-client/${VERSION} (JavaScript)`;
 
 // Default tag when the caller doesn't pin one (#242). The dataset's
