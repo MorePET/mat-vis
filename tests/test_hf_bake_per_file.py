@@ -648,3 +648,189 @@ class TestBytesAwareBatching:
             f"expected 2 texture commits across 3 unskipped materials "
             f"(batch_size=2); got {len(texture_calls)}"
         )
+
+
+# ── #292: upstream-MTLX pack-and-push ────────────────────────────────
+
+
+def _catalog_commit_call(api):
+    """Find the create_commit call that carries release-manifest.json
+    (the catalog + manifest commit, where the per-source ``mtlx`` field
+    and ``<source>-mtlx.json`` blob land)."""
+    for c in api.create_commit.call_args_list:
+        for op in c.kwargs["operations"]:
+            if op.path_in_repo == "release-manifest.json":
+                return c
+    raise AssertionError("no catalog+manifest commit found")
+
+
+class TestMtlxPackAndPush:
+    """#292: bake_one_per_file packs upstream .mtlx files into
+    ``<source>-mtlx.json`` and ships it in the same atomic commit as
+    the catalog + manifest, with ``sources.<src>.mtlx`` stamped on
+    the manifest. Without this wire-up, ``client.mtlx(...).original``
+    returns None for every gpuopen material in v2026.04.0/.1/.2."""
+
+    def test_packs_and_pushes_mtlx_when_fetcher_writes_files(self, tmp_path):
+        """Fetcher writes .mtlx files into ``mtlx_dir/<source>/...`` (the
+        layout both gpuopen and polyhaven use). The bake must (a) pack
+        them into ``<source>-mtlx.json``, (b) include the JSON blob in
+        the catalog commit, and (c) stamp ``sources.<src>.mtlx`` on the
+        release manifest."""
+        PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+        fake_records = [
+            _fake_record(f"mat_{i}", {"color": PNG_MAGIC + b"\x00" * 32}, tmp_path)
+            for i in range(2)
+        ]
+
+        def _writing_fetch(tier, textures_dir, *, limit=None, offset=0, mtlx_dir=None, **kw):
+            # Mirror the gpuopen fetch contract: write upstream .mtlx
+            # files into ``mtlx_dir/<source>/<mid>/material.mtlx`` so
+            # ``pack_original_mtlx_json`` can pick them up.
+            end = None if limit is None else offset + limit
+            slice_ = fake_records[offset:end]
+            if mtlx_dir is not None:
+                for rec in slice_:
+                    p = Path(mtlx_dir) / "polyhaven" / rec.id / "material.mtlx"
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text(f"<materialx>{rec.id}</materialx>")
+            return slice_
+
+        with (
+            patch("mat_vis_baker.hf_bake_per_file._get_fetcher") as fetcher,
+            patch("mat_vis_baker.hf_bake_per_file.HfApi") as api_cls,
+            patch(
+                "mat_vis_baker.hf_bake_per_file.bake_material",
+                side_effect=lambda r, *a, **k: r,
+            ),
+        ):
+            fetcher.return_value = _writing_fetch
+            api = api_cls.return_value
+            api.list_repo_tree.return_value = []
+            # Empty manifest on first read → merge starts from {}.
+            api.hf_hub_download.side_effect = FileNotFoundError("no manifest yet")
+
+            bake_one_per_file(
+                source="polyhaven",
+                tier="1k",
+                release_tag="v0.0.0-test",
+                work_dir=tmp_path,
+                hf_token="t",
+                repo_id="gerchowl/mat-vis-tst",
+            )
+
+        # (a) The packed JSON must exist on disk.
+        packed_path = tmp_path / "polyhaven-mtlx.json"
+        assert packed_path.exists(), "expected polyhaven-mtlx.json packed in work_dir"
+        import json as _json
+
+        packed = _json.loads(packed_path.read_text())
+        assert set(packed.keys()) == {"mat_0", "mat_1"}
+        assert packed["mat_0"] == "<materialx>mat_0</materialx>"
+
+        # (b) The catalog+manifest commit must include the mtlx blob.
+        catalog_call = _catalog_commit_call(api)
+        commit_paths = {op.path_in_repo for op in catalog_call.kwargs["operations"]}
+        assert "polyhaven-mtlx.json" in commit_paths, (
+            f"polyhaven-mtlx.json missing from catalog commit; got {sorted(commit_paths)}"
+        )
+        # And it should be bundled with the catalog + manifest, atomically.
+        assert "polyhaven.json" in commit_paths
+        assert "release-manifest.json" in commit_paths
+
+        # (c) The committed manifest must stamp sources.polyhaven.mtlx.
+        manifest_op = next(
+            op
+            for op in catalog_call.kwargs["operations"]
+            if op.path_in_repo == "release-manifest.json"
+        )
+        manifest_payload = _json.loads(Path(manifest_op.path_or_fileobj).read_text())
+        assert manifest_payload["sources"]["polyhaven"]["mtlx"] == "polyhaven-mtlx.json"
+
+    def test_no_mtlx_files_means_no_blob_no_manifest_field(self, tmp_path):
+        """ambientcg-shaped sources don't ship upstream .mtlx. The bake
+        must NOT publish an empty ``<source>-mtlx.json`` and must NOT
+        stamp ``sources.<src>.mtlx`` on the manifest — both would
+        mislead clients into thinking originals are available."""
+        PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+        fake_records = [
+            _fake_record(f"mat_{i}", {"color": PNG_MAGIC + b"\x00" * 32}, tmp_path)
+            for i in range(2)
+        ]
+
+        with (
+            patch("mat_vis_baker.hf_bake_per_file._get_fetcher") as fetcher,
+            patch("mat_vis_baker.hf_bake_per_file.HfApi") as api_cls,
+            patch(
+                "mat_vis_baker.hf_bake_per_file.bake_material",
+                side_effect=lambda r, *a, **k: r,
+            ),
+        ):
+
+            def _sliced(tier, textures_dir, *, limit=None, offset=0, **kw):
+                end = None if limit is None else offset + limit
+                return fake_records[offset:end]
+
+            fetcher.return_value = _sliced
+            api = api_cls.return_value
+            api.list_repo_tree.return_value = []
+            api.hf_hub_download.side_effect = FileNotFoundError("no manifest yet")
+
+            bake_one_per_file(
+                source="polyhaven",
+                tier="1k",
+                release_tag="v0.0.0-test",
+                work_dir=tmp_path,
+                hf_token="t",
+                repo_id="gerchowl/mat-vis-tst",
+            )
+
+        catalog_call = _catalog_commit_call(api)
+        commit_paths = {op.path_in_repo for op in catalog_call.kwargs["operations"]}
+        assert "polyhaven-mtlx.json" not in commit_paths
+
+        import json as _json
+
+        manifest_op = next(
+            op
+            for op in catalog_call.kwargs["operations"]
+            if op.path_in_repo == "release-manifest.json"
+        )
+        manifest_payload = _json.loads(Path(manifest_op.path_or_fileobj).read_text())
+        assert "mtlx" not in manifest_payload["sources"]["polyhaven"]
+
+
+class TestMergeManifestMtlxField:
+    """Unit-level: ``_merge_manifest_for_source`` accepts an optional
+    ``mtlx_filename`` kwarg and stamps ``sources.<src>.mtlx`` only when
+    it's set. Locks the field name down so a future rename can't drift
+    out of sync with ``MatVisClient._fetch_mtlx_original_map``."""
+
+    def test_mtlx_filename_stamped_when_provided(self):
+        from mat_vis_baker.hf_bake_per_file import _merge_manifest_for_source
+
+        merged = _merge_manifest_for_source(
+            {}, "gpuopen", "1k", "v0.0.0-test", mtlx_filename="gpuopen-mtlx.json"
+        )
+        assert merged["sources"]["gpuopen"]["mtlx"] == "gpuopen-mtlx.json"
+        assert merged["sources"]["gpuopen"]["catalog"] == "gpuopen.json"
+
+    def test_mtlx_field_absent_when_not_provided(self):
+        from mat_vis_baker.hf_bake_per_file import _merge_manifest_for_source
+
+        merged = _merge_manifest_for_source({}, "ambientcg", "1k", "v0.0.0-test")
+        assert "mtlx" not in merged["sources"]["ambientcg"]
+
+    def test_mtlx_field_preserved_across_subsequent_tier_merges(self):
+        """If a later derive (KTX2 transcode) re-merges without the
+        kwarg, the previously-stamped mtlx field must NOT be wiped —
+        otherwise the catalog and the mtlx file fall out of sync after
+        a derive run."""
+        from mat_vis_baker.hf_bake_per_file import _merge_manifest_for_source
+
+        m = _merge_manifest_for_source(
+            {}, "gpuopen", "1k", "v0.0.0-test", mtlx_filename="gpuopen-mtlx.json"
+        )
+        m = _merge_manifest_for_source(m, "gpuopen", "ktx2-1k", "v0.0.0-test")
+        assert m["sources"]["gpuopen"]["mtlx"] == "gpuopen-mtlx.json"
+        assert "ktx2-1k" in m["sources"]["gpuopen"]["tiers"]
