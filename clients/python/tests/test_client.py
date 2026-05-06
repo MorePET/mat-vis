@@ -620,13 +620,23 @@ class TestToGltf:
         assert "normalTexture" in result
 
     def test_ior_extension(self):
-        result = to_gltf({"ior": 1.5})
-        assert result["extensions"]["KHR_materials_ior"]["ior"] == 1.5
+        # mat-vis#290: ior=1.5 (the spec default) is now suppressed —
+        # use a non-default value to verify the extension is emitted.
+        result = to_gltf({"ior": 1.6})
+        assert result["extensions"]["KHR_materials_ior"]["ior"] == 1.6
 
     def test_transmission_extension(self):
         result = to_gltf({"transmission": 0.8})
         ext = result["extensions"]["KHR_materials_transmission"]
         assert ext["transmissionFactor"] == 0.8
+
+    def test_to_gltf_omits_khr_ior_at_default(self):
+        # mat-vis#290 round-2: ior=1.5 matches the spec default and must
+        # NOT emit a KHR_materials_ior entry. Mirrors the dedicated test
+        # in test_adapters_metalcolormap.py — kept here in the broad
+        # regression suite so deletion of that file doesn't lose coverage.
+        result = to_gltf({"ior": 1.5}, {})
+        assert "KHR_materials_ior" not in result.get("extensions", {})
 
     def test_packed_texture_note(self):
         # #91 renamed the marker from _note_metallicRoughnessTexture to

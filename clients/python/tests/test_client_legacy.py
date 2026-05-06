@@ -1003,8 +1003,10 @@ class TestToGltf:
         assert "normalTexture" in result
 
     def test_ior_extension(self):
-        result = to_gltf({"ior": 1.5})
-        assert result["extensions"]["KHR_materials_ior"]["ior"] == 1.5
+        # mat-vis#290: ior=1.5 (the spec default) is now suppressed —
+        # use a non-default value to verify the extension is emitted.
+        result = to_gltf({"ior": 1.6})
+        assert result["extensions"]["KHR_materials_ior"]["ior"] == 1.6
 
     def test_transmission_extension(self):
         result = to_gltf({"transmission": 0.8})
