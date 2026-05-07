@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- shape: F_gun_metal | uuid: 9deaf864-9f7f-4e4a-9e8f-ade76c3229d2 | source: gpuopen v2026.04.3 -->
+<!-- minimal-reduced metalness subgraph for #346 walker tests -->
+<materialx version="1.38">
+  <nodegraph name="NG_Gun_Metal">
+    <output name="metalness_output" type="float" nodename="node_mix_1" />
+    <multiply name="node_multiply_6" type="vector2">
+      <input name="in1" type="vector2" nodename="node_texcoord_vector2_7" />
+      <input name="in2" type="float" nodename="scale" />
+    </multiply>
+    <texcoord name="node_texcoord_vector2_7" type="vector2">
+      <input name="index" type="integer" value="0" />
+    </texcoord>
+    <extract name="node_extract_12" type="float">
+      <input name="in" type="vector4" nodename="node_image_vector4_13" />
+      <input name="index" type="integer" value="2" />
+    </extract>
+    <image name="node_image_vector4_13" type="vector4" GLSLFX_usage="roughness" expose="true">
+      <input name="texcoord" type="vector2" nodename="node_multiply_6" />
+      <input name="file" type="filename" value="textures/Gun_Metal_roughness.png" />
+      <input name="layer" type="string" value="" />
+      <input name="default" type="vector4" value=" 0.000000, 0.000000, 0.000000, 0.000000" />
+      <input name="uaddressmode" type="string" value="periodic" />
+      <input name="vaddressmode" type="string" value="periodic" />
+      <input name="filtertype" type="string" value="linear" />
+      <input name="framerange" type="string" value="" />
+      <input name="frameoffset" type="integer" value="0" />
+      <input name="frameendaction" type="string" value="constant" />
+    </image>
+    <image name="node_image_float_23" type="float" GLSLFX_usage="metallic" expose="true">
+      <input name="texcoord" type="vector2" nodename="node_multiply_6" />
+      <input name="file" type="filename" value="textures/Gun_Metal_metallic.png" />
+      <input name="layer" type="string" value="" />
+      <input name="default" type="float" value="0.0" />
+      <input name="uaddressmode" type="string" value="periodic" />
+      <input name="vaddressmode" type="string" value="periodic" />
+      <input name="filtertype" type="string" value="linear" />
+      <input name="framerange" type="string" value="" />
+      <input name="frameoffset" type="integer" value="0" />
+      <input name="frameendaction" type="string" value="constant" />
+    </image>
+    <mix name="node_mix_1" type="float">
+      <input name="fg" type="float" nodename="node_extract_12" />
+      <input name="bg" type="float" nodename="node_image_float_23" />
+      <input name="mix" type="float" nodename="Scratches_amount_1" />
+    </mix>
+    <constant name="scale" type="float">
+      <input name="value" type="float" value="2.0" />
+    </constant>
+    <constant name="Scratches_amount_1" type="float">
+      <input name="value" type="float" value="0.0" />
+    </constant>
+  </nodegraph>
+  <standard_surface name="SR_Gun_Metal" type="surfaceshader">
+    <input name="metalness" type="float" output="metalness_output" nodegraph="NG_Gun_Metal" />
+  </standard_surface>
+  <surfacematerial name="Gun_Metal" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_Gun_Metal" />
+  </surfacematerial>
+</materialx>

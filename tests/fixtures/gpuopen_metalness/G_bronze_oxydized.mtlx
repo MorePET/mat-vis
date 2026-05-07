@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- shape: G_bronze_oxydized | uuid: 1610803b-dad9-4c84-bc03-7a69c17d5074 | source: gpuopen v2026.04.3 -->
+<!-- minimal-reduced metalness subgraph for #346 walker tests -->
+<materialx version="1.38">
+  <nodegraph name="NG_Bronze_Oxydized">
+    <output name="metalness_output" type="float" nodename="node_mix_1" />
+    <multiply name="node_multiply_9" type="vector2">
+      <input name="in1" type="vector2" nodename="node_texcoord_vector2_10" />
+      <input name="in2" type="float" nodename="Oxyde_scale" />
+    </multiply>
+    <texcoord name="node_texcoord_vector2_10" type="vector2">
+      <input name="index" type="integer" value="0" />
+    </texcoord>
+    <image name="node_image_vector4_27" type="vector4" GLSLFX_usage="roughness" expose="true">
+      <input name="texcoord" type="vector2" nodename="node_multiply_9" />
+      <input name="file" type="filename" value="textures/Bronze_Oxydized_roughness.png" />
+      <input name="layer" type="string" value="" />
+      <input name="default" type="vector4" value=" 0.000000, 0.000000, 0.000000, 0.000000" />
+      <input name="uaddressmode" type="string" value="periodic" />
+      <input name="vaddressmode" type="string" value="periodic" />
+      <input name="filtertype" type="string" value="linear" />
+      <input name="framerange" type="string" value="" />
+      <input name="frameoffset" type="integer" value="0" />
+      <input name="frameendaction" type="string" value="constant" />
+    </image>
+    <extract name="node_extract_29" type="float">
+      <input name="in" type="vector4" nodename="node_image_vector4_27" />
+      <input name="index" type="integer" value="3" />
+    </extract>
+    <constant name="node_float_26" type="float">
+      <input name="value" type="float" value="1.0" />
+    </constant>
+    <mix name="node_mix_1" type="float">
+      <input name="fg" type="float" nodename="node_mix_30" />
+      <input name="bg" type="float" nodename="node_extract_29" />
+      <input name="mix" type="float" nodename="node_float_26" />
+    </mix>
+    <mix name="node_mix_30" type="float">
+      <input name="fg" type="float" nodename="node_extract_29" />
+      <input name="bg" type="float" nodename="node_float_32" />
+      <input name="mix" type="float" nodename="Oxyde_amount" />
+    </mix>
+    <constant name="node_float_32" type="float">
+      <input name="value" type="float" value="1.0" />
+    </constant>
+    <constant name="Oxyde_scale" type="float">
+      <input name="value" type="float" value="1.0" />
+    </constant>
+    <constant name="Oxyde_amount" type="float">
+      <input name="value" type="float" value="1.0" />
+    </constant>
+  </nodegraph>
+  <standard_surface name="SR_Bronze_Oxydized" type="surfaceshader">
+    <input name="metalness" type="float" output="metalness_output" nodegraph="NG_Bronze_Oxydized" />
+  </standard_surface>
+  <surfacematerial name="Bronze_Oxydized" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_Bronze_Oxydized" />
+  </surfacematerial>
+</materialx>

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- shape: H_chrome_parametric | uuid: 71d68adb-79e8-4e49-a4cc-189cef542e11 | source: gpuopen v2026.04.3 -->
+<!-- minimal-reduced metalness subgraph for #346 walker tests -->
+<materialx version="1.38">
+  <nodegraph name="NG_Chrome_Parametric">
+    <output name="metalness_output" type="float" nodename="node_mix_1" />
+    <texcoord name="node_texcoord_vector2_6" type="vector2">
+      <input name="index" type="integer" value="0" />
+    </texcoord>
+    <constant name="node_float_18" type="float">
+      <input name="value" type="float" value="1.0" />
+    </constant>
+    <image name="node_image_vector4_25" type="vector4" GLSLFX_usage="roughness" expose="true">
+      <input name="texcoord" type="vector2" nodename="node_multiply_26" />
+      <input name="file" type="filename" value="textures/Chrome_Parametric_roughness.png" />
+      <input name="layer" type="string" value="" />
+      <input name="default" type="vector4" value=" 0.000000, 0.000000, 0.000000, 0.000000" />
+      <input name="uaddressmode" type="string" value="periodic" />
+      <input name="vaddressmode" type="string" value="periodic" />
+      <input name="filtertype" type="string" value="linear" />
+      <input name="framerange" type="string" value="" />
+      <input name="frameoffset" type="integer" value="0" />
+      <input name="frameendaction" type="string" value="constant" />
+    </image>
+    <multiply name="node_multiply_26" type="vector2">
+      <input name="in1" type="vector2" nodename="node_texcoord_vector2_6" />
+      <input name="in2" type="float" nodename="Dust_scale" />
+    </multiply>
+    <extract name="node_extract_15" type="float">
+      <input name="in" type="vector4" nodename="node_image_vector4_25" />
+      <input name="index" type="integer" value="3" />
+    </extract>
+    <mix name="node_mix_37" type="float">
+      <input name="fg" type="float" nodename="node_extract_15" />
+      <input name="bg" type="float" value="0.0" />
+      <input name="mix" type="float" nodename="Dust_amount" />
+    </mix>
+    <mix name="node_mix_1" type="float">
+      <input name="fg" type="float" nodename="node_mix_37" />
+      <input name="bg" type="float" nodename="node_float_18" />
+      <input name="mix" type="float" value="0.0" />
+    </mix>
+    <constant name="Dust_amount" type="float">
+      <input name="value" type="float" value="0.08900000154972076" />
+    </constant>
+    <constant name="Dust_scale" type="float">
+      <input name="value" type="float" value="5.0" />
+    </constant>
+  </nodegraph>
+  <standard_surface name="SR_Chrome_Parametric" type="surfaceshader">
+    <input name="metalness" type="float" output="metalness_output" nodegraph="NG_Chrome_Parametric" />
+  </standard_surface>
+  <surfacematerial name="Chrome_Parametric" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_Chrome_Parametric" />
+  </surfacematerial>
+</materialx>
