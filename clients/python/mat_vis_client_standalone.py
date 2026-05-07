@@ -34,6 +34,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from typing import Literal
 
 REPO = "MorePET/mat-vis"
 GITHUB_API = f"https://api.github.com/repos/{REPO}"  # update-check only
@@ -1773,11 +1774,15 @@ class VisAsset:
                 return not tiers
         return False
 
-    def to_threejs(self) -> dict:
-        """Return a Three.js ``MeshPhysicalMaterial`` parameter dict."""
+    def to_threejs(self, *, color_format: Literal["hex", "int"] | None = None) -> dict:
+        """Return a Three.js ``MeshPhysicalMaterial`` parameter dict.
+
+        ``color_format`` forwards to the underlying adapter — see
+        ADR-0013 / #298 for the 0.6.x → 0.7.0 migration story.
+        """
         from mat_vis_client.adapters import to_threejs
 
-        return to_threejs(self.scalars, self.textures)
+        return to_threejs(self.scalars, self.textures, color_format=color_format)
 
     def to_gltf(self) -> dict:
         """Return a glTF 2.0 material dict."""

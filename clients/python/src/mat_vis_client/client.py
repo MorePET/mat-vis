@@ -36,6 +36,7 @@ import urllib.request
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
+from typing import Literal
 
 REPO = "MorePET/mat-vis"
 GITHUB_API = f"https://api.github.com/repos/{REPO}"  # update-check only
@@ -2098,15 +2099,16 @@ class VisAsset:
                 return not tiers
         return False
 
-    def to_threejs(self) -> dict:
+    def to_threejs(self, *, color_format: Literal["hex", "int"] | None = None) -> dict:
         """Return a Three.js ``MeshPhysicalMaterial`` parameter dict.
 
         Wraps :func:`mat_vis_client.adapters.to_threejs` with this asset's
-        identity-bound scalars and textures.
+        identity-bound scalars and textures. ``color_format`` is forwarded —
+        see ADR-0013 / #298 for the 0.6.x → 0.7.0 migration story.
         """
         from mat_vis_client.adapters import to_threejs
 
-        return to_threejs(self.scalars, self.textures)
+        return to_threejs(self.scalars, self.textures, color_format=color_format)
 
     def to_gltf(self) -> dict:
         """Return a glTF 2.0 material dict.

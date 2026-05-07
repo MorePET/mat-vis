@@ -547,7 +547,10 @@ class TestAdapterHelpers:
 
 class TestToThreejs:
     def test_scalars_only(self):
-        result = to_threejs({"metalness": 1.0, "roughness": 0.3, "color_hex": "#C0C0C0"})
+        result = to_threejs(
+            {"metalness": 1.0, "roughness": 0.3, "color_hex": "#C0C0C0"},
+            color_format="int",
+        )
         assert result["type"] == "MeshPhysicalMaterial"
         assert result["metalness"] == 1.0
         assert result["roughness"] == 0.3

@@ -132,8 +132,8 @@ def test_to_threejs_matches_free_function():
         patch.object(c, "_scalars_for", return_value=scalars),
         patch.object(c, "fetch_all_textures", return_value=textures),
     ):
-        got = a.to_threejs()
-    assert got == to_threejs(scalars, textures)
+        got = a.to_threejs(color_format="int")
+    assert got == to_threejs(scalars, textures, color_format="int")
 
 
 def test_to_gltf_matches_free_function():
@@ -257,7 +257,7 @@ def test_to_threejs_scalar_only_source_returns_scalars_no_textures():
     a = VisAsset(c, "physicallybased", "Aluminum", "1k")
     entries = [_scalar_only_index_entry("Aluminum")]
     with patch.object(c, "index", return_value=entries):
-        result = a.to_threejs()
+        result = a.to_threejs(color_format="int")
     # Scalars come through.
     assert result["type"] == "MeshPhysicalMaterial"
     assert result.get("metalness") == 1.0
