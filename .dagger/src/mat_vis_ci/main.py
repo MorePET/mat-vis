@@ -9,6 +9,8 @@ Usage:
     dagger call smoke-materialx      # verify MaterialX import (heavy)
     dagger call smoke-baker          # verify baker container (#135)
     dagger call bake                 # per-file hf-bake → atomic HF commit (#136 / ADR-0012)
+    dagger call bake-matrix          # bake every cell in a release line (#306)
+    dagger call release-matrix       # JSON cells for a release line (#306)
     dagger call smoke-bake           # dry-run bake against gerchowl/mat-vis-tst (#136)
     dagger call derive               # per-file hf-derive (resize) (#204)
     dagger call derive-ktx-2         # per-file hf-derive-ktx2 (#204; #240)
@@ -677,6 +679,128 @@ class MatVisCi:
             allow_prod=allow_prod,
         )
         return await ctr.with_exec(argv).stdout()
+
+    # ── release matrix (mat-vis#306) ──────────────────────────────
+    #
+    # The (source × tier) cells that constitute a release line live in
+    # mat_vis_baker.release_matrix as a single Python module — the
+    # canonical source of truth. Dagger wraps the baker CLI subcommand
+    # `mat-vis-baker matrix list` rather than re-declaring the matrix
+    # here, so cells stay in one place and the Dagger module stays
+    # standalone (per the _bake_cli pattern: Dagger orchestrates,
+    # baker container holds the data + logic).
+
+    @function
+    async def release_matrix(
+        self,
+        line: Annotated[str, Doc("Release line, e.g. 'v2026.04'")],
+        context: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        filter_source: Annotated[
+            str,
+            Doc("Restrict to one source (empty = all). Spot-test selector for bake_matrix."),
+        ] = "",
+        filter_tier: Annotated[
+            str,
+            Doc("Restrict to one tier (empty = all). Spot-test selector for bake_matrix."),
+        ] = "",
+    ) -> str:
+        """Return the canonical (source × tier) cells for a release line as JSON.
+
+        Reads the matrix from `mat_vis_baker.release_matrix` via the
+        `mat-vis-baker matrix list` CLI subcommand. Output shape:
+
+            {"line": "v2026.04", "cells": [{"source": "ambientcg", "tier": "1k"}, ...]}
+
+        Filtering is applied baker-side (one CLI invocation; no
+        round-trip cost). Empty result is not an error — caller decides
+        what an empty filter means.
+        """
+        ctx = context or dag.host().directory(".")
+        ctr = self._baker_container(ctx)
+        argv = ["uv", "run", "mat-vis-baker", "matrix", "list", line]
+        if filter_source:
+            argv.extend(["--filter-source", filter_source])
+        if filter_tier:
+            argv.extend(["--filter-tier", filter_tier])
+        return await ctr.with_exec(argv).stdout()
+
+    @function
+    async def bake_matrix(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        line: Annotated[str, Doc("Release line declared in mat_vis_baker.release_matrix")],
+        release_tag: Annotated[
+            str, Doc("Calver patch tag, e.g. v2026.04.3 (must match the line's CalVer prefix)")
+        ],
+        hf_token: Annotated[dagger.Secret, Doc("HF write token for the atomic push")],
+        filter_source: Annotated[
+            str, Doc("Bake only one source (empty = all cells in the line)")
+        ] = "",
+        filter_tier: Annotated[str, Doc("Bake only one tier (empty = all cells in the line)")] = "",
+        repo_id: Annotated[str, Doc("Target HF dataset repo")] = "gerchowl/mat-vis-tst",
+        allow_prod: Annotated[
+            bool, Doc("Opt-in flag required to target any non-*-tst repo (e.g. gerchowl/mat-vis)")
+        ] = False,
+        limit: Annotated[int, Doc("Per-cell max materials (0 = no limit)")] = 0,
+        offset: Annotated[int, Doc("Per-cell skip first N materials")] = 0,
+        batch_size: Annotated[int, Doc("Materials per atomic commit (count ceiling, #228)")] = 300,
+        batch_max_bytes: Annotated[
+            int,
+            Doc(
+                "Bytes per atomic commit (default 700 MiB). #228: flush trips on first-of-N-or-bytes."
+            ),
+        ] = 700 * 1024 * 1024,
+        dry_run: Annotated[bool, Doc("Build locally; skip HF push")] = False,
+    ) -> str:
+        """Bake every cell in a release line, sequentially.
+
+        Reads cells via `release_matrix(line)`, applies `filter_source`
+        and/or `filter_tier`, then dispatches `bake()` per cell. Sequential
+        so a per-cell failure surfaces with the cell that produced it
+        (and so the GH-Actions concurrency queue can't drop middle cells
+        — the bake.yml-side latest-pending-only quirk that bit us during
+        v2026.04.3 verification).
+
+        Returns one stdout block per cell, separated by
+        `=== <source>×<tier> ===` headers; first failing cell raises
+        and aborts the rest.
+        """
+        import json
+
+        # Reuse release_matrix() to keep matrix-source-of-truth single.
+        # That's an extra container call but it's cheap (CLI+JSON), and
+        # bake_matrix is a long-running orchestration anyway.
+        matrix_json = await self.release_matrix(
+            line=line,
+            context=context,
+            filter_source=filter_source,
+            filter_tier=filter_tier,
+        )
+        cells = json.loads(matrix_json)["cells"]
+        if not cells:
+            raise ValueError(
+                f"bake_matrix: no cells matched line={line!r} "
+                f"filter_source={filter_source!r} filter_tier={filter_tier!r}"
+            )
+
+        sections: list[str] = []
+        for cell in cells:
+            out = await self.bake(
+                context=context,
+                source=cell["source"],
+                tier=cell["tier"],
+                release_tag=release_tag,
+                hf_token=hf_token,
+                repo_id=repo_id,
+                allow_prod=allow_prod,
+                limit=limit,
+                offset=offset,
+                batch_size=batch_size,
+                batch_max_bytes=batch_max_bytes,
+                dry_run=dry_run,
+            )
+            sections.append(f"=== {cell['source']}×{cell['tier']} ===\n{out}")
+        return "\n\n".join(sections)
 
     @function
     async def test_e2e(
