@@ -838,6 +838,7 @@ class MatVisClient:
                 # which requires we had a cached body alongside it.
                 assert cached_body is not None
                 self._manifest = json.loads(cached_body)
+                self._emit("etag_not_modified", url=self._manifest_url)
             else:
                 if isinstance(body, bytes):
                     body_text = body.decode("utf-8")
