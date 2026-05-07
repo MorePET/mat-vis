@@ -448,6 +448,20 @@ class PBRBlock:
     # / metalness_mean see the graph estimate.
     metalness_source: str | None = None
 
+    # Full MeshPhysicalMaterial PBR surface coverage (#340). Each field
+    # extracted from <standard_surface> at bake time when authored;
+    # left None when the input is at MaterialX default. Adapter layer
+    # routes these to KHR_materials_specular / _volume / _dispersion /
+    # _clearcoat extensions for glTF and to MeshPhysicalMaterial native
+    # properties for Three.js. py-mat #100.
+    clearcoat_roughness: float | None = None  # <standard_surface>.coat_roughness
+    specular_intensity: float | None = None  # <standard_surface>.specular
+    specular_color: list[float] | None = None  # <standard_surface>.specular_color, LINEAR RGB
+    # KHR_materials_volume.thicknessFactor — only meaningful when
+    # transmission > 0; baker emits None for opaque materials.
+    thickness: float | None = None  # <standard_surface>.transmission_depth
+    dispersion: float | None = None  # <standard_surface>.transmission_dispersion
+
 
 def apply_pbr_neutral_multiplier_conventions(
     pbr: PBRBlock,
