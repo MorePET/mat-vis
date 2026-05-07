@@ -259,6 +259,14 @@ jobs:
 
   bake:
     needs: plan
+    # mat-vis#356: GH Actions auto-cascades a `skipped` ancestor through
+    # the dependency chain unless every downstream job explicitly opts
+    # out via `if:`. The plan job has its own override; bake + validate-
+    # release need theirs too. Without this, dispatches with allow-prod=
+    # false (preflight skipped) silently skip the entire bake matrix.
+    if: |
+      always() &&
+      needs.plan.result == 'success'
     name: hf-bake ${{ matrix.cell.source }} ${{ matrix.cell.tier }}
     runs-on: ubuntu-latest
     # GH-hosted runners hard-cap at 360 min; 350 leaves headroom for
@@ -379,7 +387,12 @@ jobs:
   validate:
     name: validate-release ${{ inputs.release-tag }}
     needs: bake
-    if: inputs.dry-run != true
+    # mat-vis#356: skip-cascade through preflight/plan/bake; require
+    # explicit always() so the dry-run check actually evaluates.
+    if: |
+      always() &&
+      needs.bake.result == 'success' &&
+      inputs.dry-run != true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
