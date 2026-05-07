@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- shape: D_brass_satin | uuid: a3ca4598-2be9-4f18-acec-6d21a323b218 | source: gpuopen v2026.04.3 -->
+<!-- minimal-reduced metalness subgraph for #346 walker tests -->
+<materialx version="1.38">
+  <nodegraph name="NG_Brass_Satin">
+    <output name="metalness_output" type="float" nodename="node_mix_1" />
+    <texcoord name="node_texcoord_vector2_6" type="vector2">
+      <input name="index" type="integer" value="0" />
+    </texcoord>
+    <constant name="node_float_15" type="float">
+      <input name="value" type="float" value="1.0" />
+    </constant>
+    <multiply name="node_multiply_20" type="vector2">
+      <input name="in1" type="vector2" nodename="node_texcoord_vector2_6" />
+      <input name="in2" type="float" nodename="Dust_scale_1" />
+    </multiply>
+    <image name="node_image_vector4_22" type="vector4" GLSLFX_usage="roughness" expose="true">
+      <input name="texcoord" type="vector2" nodename="node_multiply_20" />
+      <input name="file" type="filename" value="textures/Brass_Satin_roughness.png" />
+      <input name="layer" type="string" value="" />
+      <input name="default" type="vector4" value=" 0.000000, 0.000000, 0.000000, 0.000000" />
+      <input name="uaddressmode" type="string" value="periodic" />
+      <input name="vaddressmode" type="string" value="periodic" />
+      <input name="filtertype" type="string" value="linear" />
+      <input name="framerange" type="string" value="" />
+      <input name="frameoffset" type="integer" value="0" />
+      <input name="frameendaction" type="string" value="constant" />
+    </image>
+    <extract name="node_extract_23" type="float">
+      <input name="in" type="vector4" nodename="node_image_vector4_22" />
+      <input name="index" type="integer" value="3" />
+    </extract>
+    <mix name="node_mix_1" type="float">
+      <input name="fg" type="float" nodename="node_extract_23" />
+      <input name="bg" type="float" nodename="node_float_15" />
+      <input name="mix" type="float" nodename="Dust_amount" />
+    </mix>
+    <constant name="Dust_amount" type="float">
+      <input name="value" type="float" value="0.16600000858306885" />
+    </constant>
+    <constant name="Dust_scale_1" type="float">
+      <input name="value" type="float" value="3.056000232696533" />
+    </constant>
+  </nodegraph>
+  <standard_surface name="SR_Brass_Satin" type="surfaceshader">
+    <input name="metalness" type="float" output="metalness_output" nodegraph="NG_Brass_Satin" />
+  </standard_surface>
+  <surfacematerial name="Brass_Satin" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_Brass_Satin" />
+  </surfacematerial>
+</materialx>

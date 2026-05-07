@@ -225,6 +225,229 @@ def _resolve_input_constant(graph: ET.Element, inp: ET.Element) -> float | None:
     return None
 
 
+_MIX_RECURSION_DEPTH = 3
+
+
+def _resolve_mix_input(
+    graph: ET.Element,
+    inp: ET.Element,
+    depth: int,
+    visited: frozenset[str],
+) -> tuple[str, float | None, bool]:
+    """Resolve a single ``<mix>`` input element to a typed result.
+
+    Returns ``(kind, value, saw_one)`` where:
+
+    - ``kind="const"``: input resolves to a scalar constant; ``value``
+      is that float.
+    - ``kind="texture"``: input is bound to an ``<extract>`` / ``<image>``
+      (per-pixel value). ``value`` is None.
+    - ``kind="estimate"``: input is a nested ``<mix>`` whose recursive
+      evaluation yielded an estimate. ``value`` is the estimate mean.
+    - ``kind="unresolved"``: structure unrecognized (unknown node type,
+      depth-cap, cycle, missing target). ``value`` is None.
+
+    ``saw_one``: did the input's resolution chain encounter at least
+    one constant ≈1.0 in a ``<mix>`` ``fg``/``bg`` slot? Propagated
+    upward so a top-level walker can stamp ``is_conductor=True`` on
+    nested-mix graphs whose computational output is texture-bound but
+    whose structural intent is metal-side (Bronze Oxydized pattern).
+    Only counts ``<mix>`` slots — never ``<multiply>``/``<add>``/etc.
+    """
+    # Inline value= without a binding — direct scalar.
+    nm = inp.attrib.get("nodename")
+    if nm is None:
+        raw = inp.attrib.get("value")
+        if raw is not None:
+            v = _parse_float(raw)
+            if v is not None:
+                return "const", v, abs(v - 1.0) < 1e-6
+        return "unresolved", None, False
+
+    # Bound via nodename — locate the target node.
+    target = _find_named_node(graph, nm)
+    if target is None:
+        # External reference (graph <input> pin or other). If the
+        # mix-input also carries an inline value=, honor it as the
+        # author's default for non-rendering consumers.
+        raw = inp.attrib.get("value")
+        if raw is not None:
+            v = _parse_float(raw)
+            if v is not None:
+                return "const", v, abs(v - 1.0) < 1e-6
+        return "texture", None, False
+
+    tag = _strip_ns(target.tag)
+    if tag == "constant":
+        v = _node_constant_value(target)
+        if v is not None:
+            return "const", v, abs(v - 1.0) < 1e-6
+        return "unresolved", None, False
+    if tag == "mix":
+        if depth <= 0 or nm in visited:
+            return "unresolved", None, False
+        kind, value, _is_cond, saw_one = _evaluate_mix_node(
+            graph, target, depth - 1, visited | {nm}
+        )
+        return kind, value, saw_one
+    if tag in ("extract", "image"):
+        # Honor an inline value= default even when the input is bound
+        # to a texture node — authors leave defaults for non-rendering
+        # consumers (Bronze-like pattern with explicit value="0.7" on
+        # a texture-bound mix slot). Tagged as "textural_default" not
+        # "const" so the full-fold path doesn't fire (rendering is
+        # per-pixel — folding to a single scalar would lie). The
+        # conductor heuristic still uses the value as t_eff. #316.
+        raw = inp.attrib.get("value")
+        if raw is not None:
+            v = _parse_float(raw)
+            if v is not None:
+                return "textural_default", v, abs(v - 1.0) < 1e-6
+        return "texture", None, False
+    # Unknown / unhandled shape (multiply, add, switch, …). Honor an
+    # inline value= default if present, otherwise unresolved.
+    raw = inp.attrib.get("value")
+    if raw is not None:
+        v = _parse_float(raw)
+        if v is not None:
+            return "const", v, abs(v - 1.0) < 1e-6
+    return "unresolved", None, False
+
+
+def _evaluate_mix_node(
+    graph: ET.Element,
+    mix: ET.Element,
+    depth: int,
+    visited: frozenset[str],
+) -> tuple[str, float | None, bool, bool]:
+    """Recursive evaluator for a ``<mix>`` node.
+
+    Returns ``(kind, value, is_conductor, saw_one)``:
+
+    - ``("const", v, False, saw_one)``: fully constant-foldable; ``v``
+      is the folded scalar.
+    - ``("estimate", mean, is_cond, saw_one)``: heuristic estimate;
+      ``is_cond=True`` indicates the conductor heuristic fired.
+    - ``("texture", None, False, saw_one)``: chain ends in a texture
+      passthrough (no rigorous scalar). ``saw_one`` propagates
+      structural metal-side intent.
+    - ``("unresolved", None, False, False)``: parse failure / depth-cap /
+      cycle.
+
+    Phase 1.5 enhancements:
+      1. mix=0 / mix=1 special-case fold: when ``mix`` resolves to 0.0
+         or 1.0, return the corresponding branch's result directly. The
+         discarded branch's resolvability doesn't matter.
+      2. Symmetric conductor heuristic: stamps when EITHER ``fg≈1.0``
+         with a dielectric/texture ``bg`` (Phase 1 case) OR ``bg≈1.0``
+         with a dielectric/texture ``fg`` (NEW — Brass Satin pattern).
+      3. Bounded recursion: nested ``<mix>`` resolved up to 3 levels
+         with cycle protection via ``visited`` set.
+      4. Structural conductor signal: when the chain contains a
+         constant ≈1.0 in a ``<mix>`` slot, ``saw_one`` propagates so
+         that texture-bound nested graphs (Bronze) still classify as
+         conductor at the top level.
+    """
+    # Type guard — only scalar mixes.
+    if mix.attrib.get("type") not in (None, "float"):
+        return "unresolved", None, False, False
+
+    fg_inp: ET.Element | None = None
+    bg_inp: ET.Element | None = None
+    mix_inp: ET.Element | None = None
+    for sub in mix:
+        if _strip_ns(sub.tag) != "input":
+            continue
+        nm = sub.attrib.get("name")
+        if nm == "fg":
+            fg_inp = sub
+        elif nm == "bg":
+            bg_inp = sub
+        elif nm == "mix":
+            mix_inp = sub
+    if fg_inp is None or bg_inp is None or mix_inp is None:
+        return "unresolved", None, False, False
+
+    fg_kind, fg_val, fg_saw = _resolve_mix_input(graph, fg_inp, depth, visited)
+    bg_kind, bg_val, bg_saw = _resolve_mix_input(graph, bg_inp, depth, visited)
+    mix_kind, mix_val, _mix_saw = _resolve_mix_input(graph, mix_inp, depth, visited)
+
+    # Aggregate "saw_one" across all three slots — chain-level signal.
+    saw_one = fg_saw or bg_saw or _mix_saw
+
+    # (1) mix=0 / mix=1 special-case fold. Discarded branch's kind is
+    # irrelevant for these terminal cases — output is wholly the
+    # selected side.
+    if mix_kind == "const" and mix_val is not None:
+        if abs(mix_val) < 1e-6:
+            # mix=0 → output = bg
+            return bg_kind, bg_val, False, saw_one
+        if abs(mix_val - 1.0) < 1e-6:
+            # mix=1 → output = fg
+            return fg_kind, fg_val, False, saw_one
+
+    # (2) Full constant-fold: fg, bg, mix all resolve to constants.
+    if (
+        fg_kind == "const"
+        and bg_kind == "const"
+        and mix_kind == "const"
+        and fg_val is not None
+        and bg_val is not None
+        and mix_val is not None
+    ):
+        metal = bg_val + (fg_val - bg_val) * mix_val
+        return "const", metal, False, saw_one
+
+    # (3) Conductor heuristic (symmetric).
+    # ``textural_default`` accepted alongside ``const`` for the metal
+    # side — author's per-pixel default flagging the input intent.
+    _const_kinds = ("const", "textural_default")
+    fg_is_metal = fg_kind in _const_kinds and fg_val is not None and abs(fg_val - 1.0) < 1e-6
+    bg_is_metal = bg_kind in _const_kinds and bg_val is not None and abs(bg_val - 1.0) < 1e-6
+
+    def _is_dielectric_or_texture(kind: str, val: float | None) -> bool:
+        # Constant ≈0, texture-bound, or a sub-mix that resolved to an
+        # estimate < 0.5 all count as the "non-metal" side.
+        if kind in _const_kinds:
+            return val is not None and abs(val) < 1e-6
+        if kind == "texture":
+            return True
+        if kind == "estimate":
+            return val is not None and val < 0.5
+        return False
+
+    bg_is_nonmetal = _is_dielectric_or_texture(bg_kind, bg_val)
+    fg_is_nonmetal = _is_dielectric_or_texture(fg_kind, fg_val)
+
+    fg_side_conductor = fg_is_metal and bg_is_nonmetal
+    bg_side_conductor = bg_is_metal and fg_is_nonmetal
+
+    if fg_side_conductor or bg_side_conductor:
+        # Compute the heuristic mean. Defaults: 0.5 for unresolvable
+        # fg/bg/mix (mid-mask). Saturates when conductor side dominates.
+        fg_eff = fg_val if fg_val is not None else 0.5
+        bg_eff = bg_val if bg_val is not None else 0.5
+        t_eff = mix_val if (mix_kind in _const_kinds and mix_val is not None) else 0.5
+        mean = bg_eff + (fg_eff - bg_eff) * t_eff
+        # Clamp to a sane range — heuristic shouldn't produce weird
+        # negatives or >1 values from edge-case combinations.
+        mean = max(0.0, min(1.0, mean))
+        return "estimate", mean, True, saw_one
+
+    # (4) Texture-bound passthrough with structural conductor signal.
+    # The chain has a constant ≈1.0 somewhere in <mix> slots — interpret
+    # as "intended-as-metal" even if the rigorous output is texture.
+    # Library-browser facet, not a render value (#346 issue body).
+    if (fg_kind == "texture" or bg_kind == "texture") and saw_one:
+        return "estimate", 1.0, True, saw_one
+
+    # (5) Pure texture passthrough, no metal signal.
+    if fg_kind == "texture" or bg_kind == "texture":
+        return "texture", None, False, saw_one
+
+    return "unresolved", None, False, saw_one
+
+
 def _walk_mix_metalness(
     root: ET.Element,
     nodegraph_name: str,
@@ -232,29 +455,19 @@ def _walk_mix_metalness(
 ) -> tuple[float | None, bool | None, float | None, str | None]:
     """Inspect a ``<mix>`` graph terminal for a metalness binding.
 
-    Returns ``(metalness, is_conductor, metalness_mean, source)`` where:
+    Returns ``(metalness, is_conductor, metalness_mean, source)``.
 
-      - If the mix is **fully constant-foldable** (``fg``, ``bg``,
-        ``mix`` all resolve to scalar constants): ``metalness`` is the
-        folded value and ``source="graph_constant"``. ``is_conductor``
-        and ``metalness_mean`` stay ``None`` (the scalar already
-        captures the truth — no metadata duplication).
+    Phase 1 (#316): direct ``<mix>`` with all-constant fg/bg/mix
+    siblings folded to ``graph_constant``; ``fg≈1.0`` + dielectric bg
+    with texture-bound mix stamped ``graph_estimate`` + ``is_conductor``.
 
-      - If only the ``fg`` branch resolves to ``1.0`` (the "pure metal"
-        side of a metal/dielectric mix), emit ``is_conductor=True`` +
-        ``metalness_mean = bg + (fg - bg) * t`` (using the mix
-        constant when resolvable, else falling back to ``0.5`` for a
-        texture-bound mask). ``metalness`` stays ``None`` —
-        the per-pixel value can't be honestly collapsed.
-        ``source="graph_estimate"``.
-
-      - Otherwise: all four return values are ``None`` (parser leaves
-        metalness texture-bound for downstream convention helper).
-
-    The walker only considers ``<mix>`` terminals; other procedural
-    shapes (``<multiply>``, ``<add>``, ``<convert>``, …) fall through.
-    Adding more is straightforward but conservative is preferred —
-    each new shape needs its own correctness argument. #316.
+    Phase 1.5 (#346) extends to: nested ``<mix>`` (depth ≤ 3) with
+    cycle protection; ``mix=0`` / ``mix=1`` special-case fold (discarded
+    branch's resolvability irrelevant); symmetric conductor heuristic
+    (``bg≈1.0`` with dielectric/texture ``fg`` — Brass Satin pattern);
+    texture-passthrough chains carrying a constant ≈1.0 stamped as
+    structural conductor (Bronze Oxydized pattern). See
+    :func:`_evaluate_mix_node` for the recursive design.
     """
     # Locate the named nodegraph + the terminal node referenced by the output.
     target_ng: ET.Element | None = None
@@ -279,70 +492,22 @@ def _walk_mix_metalness(
     terminal = _find_named_node(target_ng, terminal_node_name)
     if terminal is None or _strip_ns(terminal.tag) != "mix":
         return None, None, None, None
-    # Defense against future schema drift: a <mix type="color3"> would
-    # nominally pass the tag check above, then ``_node_constant_value``
-    # would harmlessly fall through (a 3-float ``value=`` string fails
-    # ``_parse_float``), but be explicit. We only handle scalar mixes.
-    if terminal.attrib.get("type") not in (None, "float"):
-        return None, None, None, None
 
-    # Read fg / bg / mix child inputs.
-    fg_inp: ET.Element | None = None
-    bg_inp: ET.Element | None = None
-    mix_inp: ET.Element | None = None
-    for sub in terminal:
-        if _strip_ns(sub.tag) != "input":
-            continue
-        nm = sub.attrib.get("name")
-        if nm == "fg":
-            fg_inp = sub
-        elif nm == "bg":
-            bg_inp = sub
-        elif nm == "mix":
-            mix_inp = sub
-    if fg_inp is None or bg_inp is None or mix_inp is None:
-        return None, None, None, None
-
-    fg = _resolve_input_constant(target_ng, fg_inp)
-    bg = _resolve_input_constant(target_ng, bg_inp)
-    t = _resolve_input_constant(target_ng, mix_inp)
-
-    # Case 1: fully foldable (function evaluation, not heuristic).
-    if fg is not None and bg is not None and t is not None:
-        # Only when mix is itself a constant — if mix came from the
-        # ``value=`` default on a texture-bound input, the actual
-        # render value is per-pixel and folding to a single scalar
-        # would lie. Detect texture-bound by presence of ``nodename``
-        # whose target is NOT a <constant>.
-        nm = mix_inp.attrib.get("nodename")
-        mix_is_textural = False
-        if nm is not None:
-            target = _find_named_node(target_ng, nm)
-            if target is not None and _node_constant_value(target) is None:
-                mix_is_textural = True
-        if not mix_is_textural:
-            metal = bg + (fg - bg) * t
-            return metal, None, None, "graph_constant"
-        # Fall through to the estimate branch — fg/bg are constants
-        # but t comes from a texture mask; this is the Bronze case
-        # with an explicit ``value=`` default on the mix input.
-
-    # Case 2: fg≈1.0 (pure metal) blended with a dielectric (bg≈0.0).
-    # Tightening: also require bg≈0 so partial-conductor blends
-    # (fg=1.0, bg=0.3) don't get falsely tagged is_conductor=True.
-    # bg defaults to 0.0 when unresolvable so the texture-bound-bg
-    # case still fires for the canonical Bronze pattern.
-    fg_is_metal = fg is not None and abs(fg - 1.0) < 1e-6
-    bg_is_dielectric = bg is None or abs(bg) < 1e-6
-    if fg_is_metal and bg_is_dielectric:
-        bg_eff = bg if bg is not None else 0.0
-        # When ``mix`` is unresolvable (texture-bound, no ``value=``
-        # default), fall back to a mid-mask 0.5 — the most defensible
-        # mean for a binary-ish mask without sampling the texture.
-        t_eff = t if t is not None else 0.5
-        mean = bg_eff + (fg - bg_eff) * t_eff
-        return None, True, mean, "graph_estimate"
-
+    kind, value, is_cond, saw_one = _evaluate_mix_node(
+        target_ng, terminal, _MIX_RECURSION_DEPTH, frozenset({terminal_node_name})
+    )
+    if kind == "const" and value is not None:
+        return value, None, None, "graph_constant"
+    if kind == "estimate" and is_cond:
+        return None, True, value, "graph_estimate"
+    # Structural conductor signal: chain ends in texture passthrough
+    # but contains a constant ≈1.0 in a <mix> fg/bg/mix slot. Bronze
+    # Oxydized's nested mix=1 chain is the canonical case — rigorous
+    # evaluation reduces to a texture extract, but the all-1.0
+    # structural intent classifies it as conductor for the
+    # library-browser facet (#346 issue body).
+    if kind == "texture" and saw_one:
+        return None, True, 1.0, "graph_estimate"
     return None, None, None, None
 
 
