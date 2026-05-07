@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
 
 from mat_vis_client.adapters import export_mtlx, to_gltf, to_threejs
 from mat_vis_client.asset import VisAsset
@@ -48,11 +47,13 @@ from mat_vis_client.client import (
     __version__,
     _in_range,
 )
+from mat_vis_client.match import Match
 
 __all__ = [
     "AmbiguousMaterialError",
     "ChannelNotFoundError",
     "HTTPFetchError",
+    "Match",
     "MatVisClient",
     "MatVisError",
     "MaterialNotFoundError",
@@ -186,28 +187,41 @@ def get_manifest(release_tag: str | None = None) -> dict:
 def search(
     *,
     category: str | None = None,
+    query: str | None = None,
+    name: str | None = None,
+    tag: str | None = None,
+    is_conductor: bool | None = None,
+    has_map: str | None = None,
+    transmission_range: tuple[float, float] | None = None,
+    dispersion_range: tuple[float, float] | None = None,
     roughness: float | None = None,
     metalness: float | None = None,
     source: str | None = None,
     tier: str = "1k",
-    tag: str | None = None,
+    release: str | None = None,
     limit: int = 20,
-) -> list[dict[str, Any]]:
-    """Search the mat-vis index by category and scalar similarity.
+) -> list[Match]:
+    """Search the mat-vis index. Thin forwarder to :meth:`MatVisClient.search`
+    with ``distance=True`` (scalar-similarity sort) and a default ``limit=20``.
 
-    Thin forwarder to :meth:`MatVisClient.search` with ``score=True`` —
-    the scoring/sorting + default ``limit=20`` are the only module-level
-    convenience on top of the method. Every other argument is just passed
-    through.
+    Every other argument is passed through. See the method for the full
+    filter/query semantics.
     """
     return get_client().search(
         category,
+        query=query,
+        name=name,
+        tag=tag,
+        is_conductor=is_conductor,
+        has_map=has_map,
+        transmission_range=transmission_range,
+        dispersion_range=dispersion_range,
         roughness=roughness,
         metalness=metalness,
         source=source,
         tier=tier,
-        tag=tag,
-        score=True,
+        release=release,
+        distance=True,
         limit=limit,
     )
 

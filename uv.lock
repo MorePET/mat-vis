@@ -458,8 +458,11 @@ version = "0.6.4"
 source = { editable = "clients/python" }
 
 [package.metadata]
-requires-dist = [{ name = "pillow", marker = "extra == 'gltf'", specifier = ">=10.0" }]
-provides-extras = ["gltf"]
+requires-dist = [
+    { name = "pillow", marker = "extra == 'gltf'", specifier = ">=10.0" },
+    { name = "rapidfuzz", marker = "extra == 'search'", specifier = ">=3.0" },
+]
+provides-extras = ["gltf", "search"]
 
 [[package]]
 name = "materialx"

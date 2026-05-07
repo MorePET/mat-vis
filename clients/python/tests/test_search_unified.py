@@ -111,20 +111,22 @@ def test_method_search_accepts_scalar_metalness():
     assert "Wood002" not in ids
 
 
-def test_method_search_score_option_sorts_by_distance():
-    """search(roughness=0.3, score=True) sorts by |r - 0.3|."""
+def test_method_search_distance_option_sorts_by_distance():
+    """search(roughness=0.3, distance=True) sorts by |r - 0.3| (#359 rename)."""
     from mat_vis_client import MatVisClient
 
     c = MatVisClient()
     with patch.object(c, "sources", return_value=["ambientcg"]):
         with patch.object(c, "index", return_value=MOCK_INDEX):
             with patch.object(c, "categories", return_value=frozenset(["metal", "wood"])):
-                results = c.search(category="metal", roughness=0.3, score=True)
-    # Metal032 (0.3, diff 0) comes before Metal050A (0.5, diff 0.2)
+                results = c.search(category="metal", roughness=0.3, distance=True)
+    # Metal032 (0.3, diff 0) comes before Metal050A (0.5, diff 0.2).
+    # Results are now list[Match] (#359), but the dict-subclass means
+    # ``r["material_id"]`` (the fixture key) still works.
     ids = [r["material_id"] for r in results]
     assert ids[0] == "Metal032"
     for r in results:
-        assert "score" in r
+        assert "distance" in r
 
 
 def test_method_search_rejects_both_scalar_and_range():
@@ -157,9 +159,9 @@ def test_module_search_forwards_to_client_method():
     with patch.object(client2, "sources", return_value=["ambientcg"]):
         with patch.object(client2, "index", return_value=MOCK_INDEX):
             with patch.object(client2, "categories", return_value=frozenset(["metal", "wood"])):
-                method_results = client2.search(category="metal", roughness=0.3, score=True)
+                method_results = client2.search(category="metal", roughness=0.3, distance=True)
 
-    # Module-level is equivalent to method-level with score=True
+    # Module-level is equivalent to method-level with distance=True (#359 rename).
     assert [r["material_id"] for r in mod_results] == [r["material_id"] for r in method_results]
 
 
@@ -288,18 +290,18 @@ def test_standalone_search_scalar_roughness_widens():
     assert "Metal050A" in ids
 
 
-def test_standalone_search_score_sorts_ascending_by_distance():
-    """Standalone: ``search(roughness=0.3, score=True)`` attaches + sorts by distance."""
+def test_standalone_search_distance_sorts_ascending_by_distance():
+    """Standalone: ``search(roughness=0.3, distance=True)`` attaches + sorts (#359)."""
     std = _load_standalone()
     c = std.MatVisClient()
     with patch.object(c, "sources", return_value=["ambientcg"]):
         with patch.object(c, "index", return_value=MOCK_INDEX):
             with patch.object(c, "categories", return_value=frozenset(["metal", "wood"])):
-                results = c.search(category="metal", roughness=0.3, score=True)
+                results = c.search(category="metal", roughness=0.3, distance=True)
     ids = [r["material_id"] for r in results]
     assert ids[0] == "Metal032"  # diff 0 comes first
     for r in results:
-        assert "score" in r
+        assert "distance" in r
 
 
 def test_standalone_search_limit_truncates():
@@ -313,12 +315,8 @@ def test_standalone_search_limit_truncates():
     assert len(results) == 1
 
 
-def test_standalone_search_tag_kwarg_accepted():
-    """Standalone: ``search(tag=...)`` dispatches to a pinned client without TypeError.
-
-    We don't assert on the pinned client's behaviour — only that the call
-    signature accepts the kwarg and forwards it through ``self.at(tag)``.
-    """
+def test_standalone_search_release_kwarg_accepted():
+    """Standalone: ``search(release=...)`` dispatches to a pinned client (#359 rename)."""
     std = _load_standalone()
     c = std.MatVisClient()
 
@@ -330,7 +328,7 @@ def test_standalone_search_tag_kwarg_accepted():
             return []
 
     with patch.object(c, "at", return_value=_FakePinned()):
-        out = c.search(category="metal", tag="v2026.04.1")
+        out = c.search(category="metal", release="v2026.04.1")
     assert out == []
     assert _FakePinned.calls and _FakePinned.calls[0]["category"] == "metal"
 
@@ -343,8 +341,8 @@ def test_standalone_search_rejects_both_scalar_and_range():
         c.search(roughness=0.3, roughness_range=(0.1, 0.5))
 
 
-def test_standalone_module_level_search_forwards_with_score_and_limit():
-    """Standalone's module-level ``search()`` applies score=True + default limit=20."""
+def test_standalone_module_level_search_forwards_with_distance_and_limit():
+    """Standalone's module-level ``search()`` applies distance=True + default limit=20 (#359)."""
     std = _load_standalone()
     # Reset the standalone's own singleton so the patch targets a fresh client.
     std._client = None
@@ -353,7 +351,7 @@ def test_standalone_module_level_search_forwards_with_score_and_limit():
         with patch.object(client, "index", return_value=MOCK_INDEX):
             with patch.object(client, "categories", return_value=frozenset(["metal", "wood"])):
                 mod_results = std.search(category="metal", roughness=0.3)
-    # score=True was applied, so results carry a 'score' field and are sorted.
+    # distance=True is applied, so results carry a 'distance' field and are sorted.
     assert mod_results
-    assert "score" in mod_results[0]
+    assert "distance" in mod_results[0]
     assert mod_results[0]["material_id"] == "Metal032"

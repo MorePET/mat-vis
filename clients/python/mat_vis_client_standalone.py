@@ -141,7 +141,11 @@ class MatVisError(Exception):
 
 
 class NotFoundError(MatVisError):
-    """A key was not found in a mat-vis registry."""
+    """A key was not found in a mat-vis registry.
+
+    #359: ``candidates`` carries top-3 fuzzy did-you-mean suggestions
+    auto-computed from ``available`` when not provided explicitly.
+    """
 
     kind: str = "item"
 
@@ -150,13 +154,23 @@ class NotFoundError(MatVisError):
         key: str,
         available: list[str] | None = None,
         context: str = "",
+        candidates: list[str] | None = None,
     ) -> None:
+        import difflib as _difflib
+
         self.key = key
         self.available = list(available or [])
         self.context = context
+        if candidates is None and available:
+            candidates = _difflib.get_close_matches(key, list(available), n=3, cutoff=0.6)
+        self.candidates = list(candidates or [])
         where = f" in {context}" if context else ""
-        hint = f". Available: {self.available}" if self.available else ""
-        super().__init__(f"{self.kind} {key!r} not found{where}{hint}")
+        msg_bits = [f"{self.kind} {key!r} not found{where}"]
+        if self.candidates:
+            msg_bits.append(f"Did you mean: {', '.join(repr(c) for c in self.candidates)}?")
+        if self.available:
+            msg_bits.append(f"Available: {self.available}")
+        super().__init__(". ".join(msg_bits))
 
 
 class MaterialNotFoundError(NotFoundError):
@@ -893,46 +907,47 @@ class MatVisClient:
         self,
         category: str | None = None,
         *,
+        query: str | None = None,
+        name: str | None = None,
+        tag: str | None = None,
+        is_conductor: bool | None = None,
+        has_map: str | None = None,
+        transmission_range: tuple[float, float] | None = None,
+        dispersion_range: tuple[float, float] | None = None,
         roughness: float | None = None,
         metalness: float | None = None,
         roughness_range: tuple[float, float] | None = None,
         metalness_range: tuple[float, float] | None = None,
         source: str | None = None,
         tier: str = "1k",
-        tag: str | None = None,
-        score: bool = False,
+        release: str | None = None,
+        distance: bool = False,
         limit: int | None = None,
     ) -> list[dict]:
-        """Search materials by category and scalar ranges.
+        """Discover materials. See packaged-client docstring for full semantics.
 
-        Fetches index JSON for the given source (or all sources for the
-        tier) and filters locally. Returns matching index entries.
-
-        Args:
-            category: Filter by material category (e.g. "metal", "wood").
-            roughness: Scalar shorthand. Matches within ± ``_SCALAR_WIDEN``.
-                Mutually exclusive with ``roughness_range``.
-            metalness: Scalar shorthand. Same semantics as ``roughness``.
-            roughness_range: (min, max) roughness filter, inclusive.
-            metalness_range: (min, max) metalness filter, inclusive.
-            source: Limit search to one source. If None, searches all
-                    sources available for the given tier.
-            tier: Only return materials that have this tier available.
-            tag: Optional release tag override (see .at()).
-            score: When True and a scalar shorthand is passed, attach a
-                ``score`` field (absolute distance) and sort ascending.
-            limit: Cap the returned list length.
+        Standalone keeps the dict return shape (no Match class) — Match
+        is a packaged-only convenience; standalone consumers don't have
+        the import surface for it. Filter parity matches the packaged
+        client (#359).
         """
-        if tag is not None and tag != self._tag:
-            return self.at(tag).search(
+        if release is not None and release != self._tag:
+            return self.at(release).search(
                 category,
+                query=query,
+                name=name,
+                tag=tag,
+                is_conductor=is_conductor,
+                has_map=has_map,
+                transmission_range=transmission_range,
+                dispersion_range=dispersion_range,
                 roughness=roughness,
                 metalness=metalness,
                 roughness_range=roughness_range,
                 metalness_range=metalness_range,
                 source=source,
                 tier=tier,
-                score=score,
+                distance=distance,
                 limit=limit,
             )
         # Scalar + range on the same dimension is ambiguous — reject.
@@ -954,8 +969,6 @@ class MatVisClient:
         if category:
             valid = self.categories()  # discovered from manifest
             if valid and category not in valid:
-                # Soft-warn rather than raise — the honest answer to "find
-                # materials in a category that has none" is an empty list.
                 log.warning(
                     "search: category %r not in manifest %s; returning empty",
                     category,
@@ -964,6 +977,8 @@ class MatVisClient:
                 return []
 
         sources = [source] if source else self.sources(tier)
+        name_q = name.casefold() if name else None
+        tag_q = tag.casefold() if tag else None
         results: list[dict] = []
 
         for src in sources:
@@ -972,29 +987,59 @@ class MatVisClient:
                 pbr = mv.get("pbr") or {}
                 if category and mv.get("category") != category:
                     continue
+                if name_q and name_q not in (mv.get("name") or "").casefold():
+                    continue
+                if tag_q is not None:
+                    tags = mv.get("tags") or []
+                    if not any(tag_q in (t or "").casefold() for t in tags):
+                        continue
+                if is_conductor is not None and pbr.get("is_conductor") != is_conductor:
+                    continue
+                if has_map is not None and has_map not in (entry.get("maps") or []):
+                    continue
+                if transmission_range is not None and not _in_range(
+                    pbr.get("transmission"), *transmission_range
+                ):
+                    continue
+                if dispersion_range is not None and not _in_range(
+                    pbr.get("dispersion"), *dispersion_range
+                ):
+                    continue
                 if roughness_range and not _in_range(pbr.get("roughness"), *roughness_range):
                     continue
                 if metalness_range and not _in_range(pbr.get("metalness"), *metalness_range):
                     continue
-                # Scalar-only entries (e.g. physicallybased) advertise no
-                # textures — treat missing/empty ``available_tiers`` as
-                # tier-independent so they pass any tier filter (#167).
-                # Textured entries still get gated to the requested tier.
                 entry_tiers = entry.get("available_tiers")
                 if entry_tiers and tier not in entry_tiers:
                     continue
                 results.append(entry)
 
-        if score and (roughness is not None or metalness is not None):
+        if query:
+            # Standalone: pure-Python token-AND substring; no rapidfuzz
+            # path (the standalone is intentionally zero-dep). Stable
+            # id-sort within matched set.
+            tokens = [t.casefold() for t in query.split() if t]
+            filtered = []
+            for r in results:
+                mv = r.get("mat_vis") or {}
+                n = (mv.get("name") or "").casefold()
+                tg = " ".join((t or "").casefold() for t in (mv.get("tags") or []))
+                if all((tok in n) or (tok in tg) for tok in tokens):
+                    filtered.append(r)
+            filtered.sort(key=lambda r: r.get("id", ""))
+            results = filtered
+        elif distance and (roughness is not None or metalness is not None):
             for r in results:
                 pbr = (r.get("mat_vis") or {}).get("pbr") or {}
-                s = 0.0
+                d = 0.0
                 if roughness is not None and pbr.get("roughness") is not None:
-                    s += abs(pbr["roughness"] - roughness)
+                    d += abs(pbr["roughness"] - roughness)
                 if metalness is not None and pbr.get("metalness") is not None:
-                    s += abs(pbr["metalness"] - metalness)
-                r["score"] = s
-            results.sort(key=lambda r: r["score"])
+                    d += abs(pbr["metalness"] - metalness)
+                r["distance"] = d
+            results.sort(key=lambda r: r["distance"])
+        else:
+            results.sort(key=lambda r: r.get("id") or "")
 
         if limit is not None:
             results = results[:limit]
@@ -1179,18 +1224,52 @@ class MatVisClient:
 
     def asset(
         self,
-        source: str,
-        material_id: str,
-        tier: str = "1k",
+        ref=None,
+        material_id: str | None = None,
+        tier: str | None = None,
+        *,
+        source: str | None = None,
+        id: str | None = None,
     ) -> "VisAsset":
-        """Return a :class:`VisAsset` ergonomic wrapper for ``(source, material_id, tier)``.
+        """Return a :class:`VisAsset` for a material. Polymorphic dispatch (#359).
 
-        VisAsset bundles identity, lazy scalars, lazy textures, and adapter
-        methods (``.to_threejs() / .to_gltf() / .to_mtlx()``). Creation is
-        free — no network IO until ``.scalars`` / ``.textures`` / an adapter
-        method is accessed. Mat-vis#93.
+        Three input shapes:
+
+        - ``asset("ambientcg/Rock064")`` — string ``"source/id"`` ref.
+        - ``asset(source="ambientcg", id="Rock064")`` — explicit kwargs.
+        - ``asset("ambientcg", "Rock064", "1k")`` — legacy 3-positional.
+
+        (Standalone has no Match class; that input shape is packaged-only.)
         """
-        return VisAsset(self, source, material_id, tier)
+        s, mid, t = self._resolve_asset_triple(ref, material_id, tier, source, id)
+        return VisAsset(self, s, mid, t)
+
+    def _resolve_asset_triple(
+        self,
+        ref,
+        positional_mid: str | None,
+        positional_tier: str | None,
+        kw_source: str | None,
+        kw_id: str | None,
+    ) -> tuple[str, str, str]:
+        """Resolve polymorphic ``asset()`` input into ``(source, id, tier)``.
+
+        Standalone variant: no Match path (the standalone has no Match
+        class). String-ref / legacy-positional / kwargs only.
+        """
+        if isinstance(ref, str) and positional_mid is None and kw_source is None and kw_id is None:
+            if "/" not in ref:
+                raise ValueError(f"asset() string ref must be 'source/id', got {ref!r}")
+            s, mid = ref.split("/", 1)
+            return s, mid, positional_tier or "1k"
+        if isinstance(ref, str) and positional_mid is not None:
+            return ref, positional_mid, positional_tier or "1k"
+        if kw_source is not None and kw_id is not None:
+            return kw_source, kw_id, positional_tier or "1k"
+        raise TypeError(
+            "asset() requires a 'source/id' string, (source, id, tier) "
+            "positionals, or source=, id=, tier= kwargs"
+        )
 
     def _scalars_for(self, source: str, material_id: str) -> dict:
         """Look up PBR scalars for a material from the source index.
@@ -2121,28 +2200,39 @@ def get_client() -> MatVisClient:
 def search(
     *,
     category: str | None = None,
+    query: str | None = None,
+    name: str | None = None,
+    tag: str | None = None,
+    is_conductor: bool | None = None,
+    has_map: str | None = None,
+    transmission_range: tuple[float, float] | None = None,
+    dispersion_range: tuple[float, float] | None = None,
     roughness: float | None = None,
     metalness: float | None = None,
     source: str | None = None,
     tier: str = "1k",
-    tag: str | None = None,
+    release: str | None = None,
     limit: int = 20,
 ) -> list[dict]:
-    """Search the mat-vis index by category and scalar similarity.
+    """Standalone module-level search forwarder. See :meth:`MatVisClient.search`.
 
-    Thin forwarder to :meth:`MatVisClient.search` with ``score=True`` —
-    the scoring/sorting + default ``limit=20`` are the only module-level
-    convenience on top of the method. Every other argument is just passed
-    through.
+    Default: ``distance=True`` (scalar-similarity sort) + ``limit=20``.
     """
     return get_client().search(
         category,
+        query=query,
+        name=name,
+        tag=tag,
+        is_conductor=is_conductor,
+        has_map=has_map,
+        transmission_range=transmission_range,
+        dispersion_range=dispersion_range,
         roughness=roughness,
         metalness=metalness,
         source=source,
         tier=tier,
-        tag=tag,
-        score=True,
+        release=release,
+        distance=True,
         limit=limit,
     )
 
