@@ -33,6 +33,7 @@ class Channel(StrEnum):
     AO = "ao"
     DISPLACEMENT = "displacement"
     EMISSION = "emission"
+    OPACITY = "opacity"
 
 
 class Tier(StrEnum):
@@ -124,6 +125,21 @@ CHANNELS: tuple[ChannelSpec, ...] = (
         usd_preview_prop="emissiveColor",
         usd_preview_type="color3",
         filename_aliases=("emission", "emissive"),
+    ),
+    # Three.js consumes opacity as a standalone alphaMap; glTF requires
+    # alpha to live in baseColorTexture's alpha channel + alphaMode/
+    # alphaCutoff (no standalone slot — adapter packs at output time).
+    # gltf_prop=None signals "handled separately by the adapter."
+    # mtlx_prop="opacity" matches <standard_surface>.opacity (color3 input).
+    # Filename aliases match gpuopen authoring (e.g. Perforated_Metal_opacity.png).
+    ChannelSpec(
+        channel=Channel.OPACITY,
+        threejs_prop="alphaMap",
+        gltf_prop=None,
+        mtlx_prop="opacity",
+        usd_preview_prop="opacity",
+        usd_preview_type="float",
+        filename_aliases=("opacity", "alpha"),
     ),
 )
 
