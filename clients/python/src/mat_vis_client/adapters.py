@@ -184,6 +184,46 @@ def _color_hex_to_rgba(hex_str: str) -> list[float]:
     return list(_color_hex_to_srgb_rgba(hex_str))
 
 
+def _resolve_specular_color(
+    scalars: dict,
+) -> tuple[float, float, float] | None:
+    """Resolve specular color as **linear RGB** (3-tuple).
+
+    Priority order (first non-None wins):
+        1. ``specular_color_linear`` (canonical, 3-tuple linear, no transform)
+        2. ``specular_color_rgba`` (3-tuple sRGB; de-gammas at boundary)
+
+    Multiple non-equal non-None values raise ``ValueError``.
+
+    Mirrors :func:`_resolve_base_color` to avoid the colorspace-asymmetry
+    Finding-2 trap on ``specularColorFactor`` (linear in glTF spec) vs.
+    ``MeshPhysicalMaterial.specularColor`` (sRGB-input under Three.js
+    ColorManagement r152+). #340.
+    """
+    scl = scalars.get("specular_color_linear")
+    rgb_in = scalars.get("specular_color_rgba")
+
+    scl_t: tuple[float, float, float] | None = (
+        tuple(scl)[:3] if scl is not None else None  # type: ignore[assignment]
+    )
+    rgb_linear: tuple[float, float, float] | None = None
+    if rgb_in is not None:
+        r, g, b = tuple(rgb_in)[:3]
+        rgb_linear = (_srgb_to_linear(r), _srgb_to_linear(g), _srgb_to_linear(b))
+
+    candidates = [c for c in (scl_t, rgb_linear) if c is not None]
+    if not candidates:
+        return None
+    first = candidates[0]
+    for cand in candidates[1:]:
+        if not all(math.isclose(x, y, rel_tol=1e-6, abs_tol=1e-9) for x, y in zip(first, cand)):
+            raise ValueError(
+                "scalars contains multiple specular-color keys with non-equal "
+                "values; pick specular_color_linear or specular_color_rgba"
+            )
+    return first
+
+
 def _resolve_metalness(scalars: dict) -> float | None:
     """Resolve the metalness scalar accepting ``metallic`` as a glTF-spec alias.
 
@@ -307,6 +347,25 @@ def to_threejs(
         result["emissive"] = list(scalars["emissive"])
     if scalars.get("clearcoat") is not None:
         result["clearcoat"] = scalars["clearcoat"]
+    if scalars.get("clearcoat_roughness") is not None:
+        result["clearcoatRoughness"] = scalars["clearcoat_roughness"]
+    if scalars.get("specular_intensity") is not None:
+        result["specularIntensity"] = scalars["specular_intensity"]
+    # Three.js MeshPhysicalMaterial.specularColor is sRGB-input under
+    # ColorManagement r152+; re-encode linear → sRGB regardless of which
+    # input alias the caller used. Same shape as base_color handling.
+    specular_color_linear = _resolve_specular_color(scalars)
+    if specular_color_linear is not None:
+        srgb = tuple(_linear_to_srgb(c) for c in specular_color_linear)
+        result["specularColor"] = "#{:02x}{:02x}{:02x}".format(
+            int(round(max(0.0, min(1.0, srgb[0])) * 255)),
+            int(round(max(0.0, min(1.0, srgb[1])) * 255)),
+            int(round(max(0.0, min(1.0, srgb[2])) * 255)),
+        )
+    if scalars.get("thickness") is not None:
+        result["thickness"] = scalars["thickness"]
+    if scalars.get("dispersion") is not None:
+        result["dispersion"] = scalars["dispersion"]
 
     # Textures as data URIs
     for channel, prop in _THREEJS_TEX_MAP.items():
@@ -388,11 +447,53 @@ def to_gltf(
         material["emissiveFactor"] = list(emissive)
 
     # Clearcoat extension — omit when zero/None (spec default), mirrors
-    # the KHR_materials_ior / _transmission suppression pattern.
+    # the KHR_materials_ior / _transmission suppression pattern. The
+    # clearcoatRoughnessFactor sub-field only ships when clearcoat is
+    # active AND roughness is non-default (default is 0.0 = mirror).
     clearcoat = scalars.get("clearcoat")
+    clearcoat_roughness = scalars.get("clearcoat_roughness")
     if not _clearcoat_at_default(clearcoat):
-        material.setdefault("extensions", {})["KHR_materials_clearcoat"] = {
-            "clearcoatFactor": clearcoat
+        cc_ext: dict = {"clearcoatFactor": clearcoat}
+        if clearcoat_roughness is not None and not math.isclose(
+            clearcoat_roughness, 0.0, abs_tol=1e-9
+        ):
+            cc_ext["clearcoatRoughnessFactor"] = clearcoat_roughness
+        material.setdefault("extensions", {})["KHR_materials_clearcoat"] = cc_ext
+
+    # KHR_materials_specular — bundles specularFactor + specularColorFactor.
+    # Both default to 1.0 / [1,1,1]; emit only when at least one is
+    # authored away from default. specularColorFactor ships in linear
+    # per the extension spec (matches our linear-RGB resolution).
+    specular_intensity = scalars.get("specular_intensity")
+    specular_color = _resolve_specular_color(scalars)
+    spec_ext: dict = {}
+    if specular_intensity is not None and not math.isclose(specular_intensity, 1.0, abs_tol=1e-9):
+        spec_ext["specularFactor"] = specular_intensity
+    if specular_color is not None and not all(
+        math.isclose(c, 1.0, abs_tol=1e-9) for c in specular_color
+    ):
+        spec_ext["specularColorFactor"] = list(specular_color)
+    if spec_ext:
+        material.setdefault("extensions", {})["KHR_materials_specular"] = spec_ext
+
+    # KHR_materials_volume.thicknessFactor — only meaningful when
+    # transmission > 0 AND thickness > 0. The baker emits None for
+    # opaque materials per #340 contract; defensively guard anyway.
+    thickness = scalars.get("thickness")
+    if (
+        thickness is not None
+        and thickness > 0.0
+        and not _transmission_at_default(scalars.get("transmission"))
+    ):
+        material.setdefault("extensions", {})["KHR_materials_volume"] = {
+            "thicknessFactor": thickness
+        }
+
+    # KHR_materials_dispersion — extension default 0.0 (no dispersion).
+    dispersion = scalars.get("dispersion")
+    if dispersion is not None and dispersion > 0.0:
+        material.setdefault("extensions", {})["KHR_materials_dispersion"] = {
+            "dispersion": dispersion
         }
 
     # Textures
