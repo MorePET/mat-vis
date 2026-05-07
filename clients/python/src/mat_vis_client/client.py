@@ -2099,12 +2099,12 @@ class VisAsset:
                 return not tiers
         return False
 
-    def to_threejs(self, *, color_format: Literal["hex", "int"] | None = None) -> dict:
+    def to_threejs(self, *, color_format: Literal["hex", "int"] = "hex") -> dict:
         """Return a Three.js ``MeshPhysicalMaterial`` parameter dict.
 
         Wraps :func:`mat_vis_client.adapters.to_threejs` with this asset's
-        identity-bound scalars and textures. ``color_format`` is forwarded —
-        see ADR-0013 / #298 for the 0.6.x → 0.7.0 migration story.
+        identity-bound scalars and textures. ``color_format`` is forwarded;
+        default is ``"hex"`` (Pythonic ``"#RRGGBB"`` string) since 0.7.0.
         """
         from mat_vis_client.adapters import to_threejs
 
