@@ -16,9 +16,11 @@ from __future__ import annotations
 import base64
 import math
 import re
+import warnings
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from pathlib import Path
+from typing import Literal
 
 from mat_vis_client.schema import (
     GLTF_MAP as _GLTF_TEX_MAP,
@@ -134,6 +136,8 @@ def _sanitize_material_name(name: str) -> str:
 def to_threejs(
     scalars: dict,
     textures: dict[str, bytes] | None = None,
+    *,
+    color_format: Literal["hex", "int"] | None = None,
 ) -> dict:
     """Convert to a Three.js MeshPhysicalMaterial parameter dict.
 
@@ -149,6 +153,15 @@ def to_threejs(
         textures: Channel name -> PNG bytes. Keys are mat-vis channel
             names: color, normal, roughness, metalness, ao,
             displacement, emission.
+        color_format: Output shape for ``result["color"]`` when
+            ``color_hex`` is present. ``"int"`` emits a hex int (e.g.
+            ``12566468``); ``"hex"`` emits the ``"#RRGGBB"`` string
+            verbatim. Both forms round-trip lossless through Three.js
+            ``MeshPhysicalMaterial`` (its ``Color.set`` dispatches on
+            type — ``setHex`` for int, ``setStyle`` for string).
+            Default is unset for 0.6.x and emits a DeprecationWarning;
+            in 0.7.0 it flips to ``"hex"`` (Pythonic, JSON-friendly,
+            REPL-readable). py-mat #99 / ADR-0013.
 
     Returns:
         Dict suitable for `new THREE.MeshPhysicalMaterial(result)`.
@@ -173,7 +186,24 @@ def to_threejs(
     if "roughness" in scalars and scalars["roughness"] is not None:
         result["roughness"] = scalars["roughness"]
     if "color_hex" in scalars and scalars["color_hex"] is not None:
-        result["color"] = _color_hex_to_int(scalars["color_hex"])
+        if color_format is None:
+            warnings.warn(
+                "to_threejs(color_format=) default will flip from 'int' to "
+                "'hex' in mat-vis-client 0.7.0. Pass color_format='int' to "
+                "keep the current hex-int output, or color_format='hex' to "
+                "opt into the new '#RRGGBB' string default. See ADR-0013.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            effective = "int"
+        elif color_format in ("hex", "int"):
+            effective = color_format
+        else:
+            raise ValueError(f"color_format must be 'hex' or 'int', got {color_format!r}")
+        if effective == "int":
+            result["color"] = _color_hex_to_int(scalars["color_hex"])
+        else:  # "hex"
+            result["color"] = scalars["color_hex"]
     if "ior" in scalars and scalars["ior"] is not None:
         result["ior"] = scalars["ior"]
     if "transmission" in scalars and scalars["transmission"] is not None:
