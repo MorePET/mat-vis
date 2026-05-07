@@ -523,3 +523,40 @@ def test_ambiguous_material_error_lists_names():
         client.fetch_all_textures("gpuopen", "Brick Wall", tier="1k")
     # Candidates should be names, not UUIDs.
     assert any("Brick" in c for c in exc.value.candidates)
+
+
+# ── mat-vis#332: MaterialNotStagedError should list available tiers ──
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="mat-vis#332: error message does not include 'Available tiers'",
+)
+def test_material_not_staged_error_lists_available_tiers() -> None:
+    """``MaterialNotStagedError`` should include an ``Available tiers: [...]``
+    line so the user knows which tiers ARE staged.
+
+    bernhard mat-vis#311 sub-bullet "Unclear error messages":
+
+        Expectation: ... is not staged for tier '3k'. Available tiers: ['1k', '2k', ...]
+
+    Today the message says ``Needs a re-bake`` (actionable only for
+    maintainers) without listing the staged tiers.
+
+    See https://github.com/MorePET/mat-vis/issues/332 for the
+    forward-verify acceptance.
+    """
+    from mat_vis_client import MaterialNotStagedError
+
+    err = MaterialNotStagedError(
+        source="gpuopen",
+        material_id="c12edfda-a5bd-4469-8147-4a6540a0a213",
+        tier="3k",
+        original_name="Aluminum Brushed",
+    )
+    msg = str(err)
+    assert "Available tiers:" in msg, (
+        f"MaterialNotStagedError message {msg!r} should list available tiers "
+        "(mat-vis#332). bernhard's #311 expectation: '... not staged for "
+        'tier 3k. Available tiers: ["1k", "2k", ...]\'.'
+    )
