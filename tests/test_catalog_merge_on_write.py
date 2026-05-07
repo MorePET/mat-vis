@@ -178,3 +178,67 @@ def test_does_not_mutate_inputs():
 
     assert existing == existing_snapshot
     assert fresh == fresh_snapshot
+
+
+# ── prune_missing flag (mat-vis#329 follow-up after E2E on tst) ─────
+
+
+def test_prune_missing_true_drops_existing_only_at_fresh_tier():
+    """Default (unbounded bake): material existed only at fresh_tier
+    and fresh doesn't see it → drop. Same as previous default."""
+    existing = [_entry("x", ["1k"]), _entry("a", ["1k"])]
+    fresh = [_entry("a", ["1k"])]
+    out = _merge_catalog_with_existing(
+        fresh=fresh, existing=existing, fresh_tier="1k", prune_missing=True
+    )
+    ids = [e["id"] for e in out]
+    assert "x" not in ids
+    assert ids == ["a"]
+
+
+def test_prune_missing_false_preserves_everything_not_in_fresh():
+    """Bounded bake (limit/offset): fresh is a SUBSET, not truth.
+    Materials only in existing are preserved verbatim.
+
+    Without this fix, a `--limit=10` spot-test on a 454-material catalog
+    clobbered 444 entries from the catalog — the bug E2E surfaced on tst
+    after #329 merged.
+    """
+    existing = [
+        _entry("a", ["1k"]),
+        _entry("b", ["1k"]),
+        _entry("c", ["1k"]),
+    ]
+    # Fresh only contains 'a' (limit=1 simulating a partial bake)
+    fresh = [_entry("a", ["1k"])]
+    out = _merge_catalog_with_existing(
+        fresh=fresh, existing=existing, fresh_tier="1k", prune_missing=False
+    )
+    ids = [e["id"] for e in out]
+    assert ids == ["a", "b", "c"], (
+        f"prune_missing=False should preserve all existing entries, got {ids}"
+    )
+    # b and c keep their original available_tiers verbatim
+    b_entry = next(e for e in out if e["id"] == "b")
+    assert b_entry["available_tiers"] == ["1k"]
+
+
+def test_prune_missing_false_still_merges_overlapping_materials():
+    """When prune_missing=False, materials in BOTH fresh and existing
+    still get the available_tiers union — that part is invariant."""
+    existing = [_entry("a", ["1k"])]
+    fresh = [_entry("a", ["2k"])]
+    out = _merge_catalog_with_existing(
+        fresh=fresh, existing=existing, fresh_tier="2k", prune_missing=False
+    )
+    assert len(out) == 1
+    assert out[0]["available_tiers"] == ["1k", "2k"]
+
+
+def test_prune_missing_default_is_true():
+    """Default behavior is unchanged (prune like the original #329)."""
+    existing = [_entry("a", ["1k"])]
+    fresh = [_entry("b", ["1k"])]
+    # Default — no kwarg
+    out = _merge_catalog_with_existing(fresh=fresh, existing=existing, fresh_tier="1k")
+    assert [e["id"] for e in out] == ["b"], "default prune_missing should drop 'a'"

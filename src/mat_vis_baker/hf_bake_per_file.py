@@ -260,6 +260,8 @@ def _merge_catalog_with_existing(
     fresh: list[dict],
     existing: list[dict],
     fresh_tier: str,
+    *,
+    prune_missing: bool = True,
 ) -> list[dict]:
     """Merge a freshly-baked per-source catalog onto the existing one.
 
@@ -269,14 +271,29 @@ def _merge_catalog_with_existing(
     - For each material in BOTH existing and fresh: take the FRESH
       entry (newest data wins) but set
       ``available_tiers = sorted(union(existing.available_tiers, [fresh_tier]))``.
-    - For each material ONLY in existing (had this material at some
-      tier before, but the fresh bake of `fresh_tier` doesn't see it):
-      compute ``new_tiers = existing.available_tiers - {fresh_tier}``.
-      If non-empty: PRESERVE the existing entry with
-      ``available_tiers = sorted(new_tiers)``. If empty: DROP (the
-      material existed only at this tier, upstream pruned it).
+    - For each material ONLY in existing: behavior depends on
+      ``prune_missing`` — see below.
     - For each material ONLY in fresh: KEEP as-is (new addition;
       ``available_tiers = [fresh_tier]`` already from index_builder).
+
+    The ``prune_missing`` flag (mat-vis#329 follow-up after E2E on tst):
+
+    - ``True`` (default; **unbounded bakes only**): the fresh set is
+      treated as the AUTHORITATIVE upstream snapshot for ``fresh_tier``.
+      Materials only in existing have their fresh_tier removed from
+      available_tiers; if that empties the list (the material existed
+      only at this tier and fresh didn't see it), the entry is DROPPED
+      — upstream pruned it.
+    - ``False`` (**bounded bakes** — ``limit > 0`` or ``offset > 0``):
+      the fresh set is a SUBSET, not the upstream truth. Materials only
+      in existing are preserved verbatim with their existing
+      ``available_tiers`` untouched — we don't know whether they were
+      pruned upstream or just outside our slice.
+
+    Caller (``bake_one_per_file``) passes ``prune_missing = (limit == 0
+    and offset == 0)``. Production cuts always run unbounded so they
+    prune; dev spot-tests with ``--limit=10`` preserve the rest of the
+    catalog instead of clobbering 99% of it.
 
     Order preserved: fresh entries first (in their input order — already
     sorted by name in :func:`build_index`), then any preserved-existing
@@ -304,17 +321,23 @@ def _merge_catalog_with_existing(
             entry = {**entry, "available_tiers": merged_tiers}
         out.append(entry)
 
-    # Pass 2: append existing entries that are NOT in fresh, with the
-    # fresh_tier removed from their available_tiers. Drop if empty.
+    # Pass 2: append existing entries that are NOT in fresh.
     for prev in existing:
         mid = prev.get("id")
         if mid is None or mid in fresh_by_id:
             continue
+        if not prune_missing:
+            # Bounded bake (limit/offset): fresh is a subset, not truth.
+            # Preserve verbatim — we don't know whether this material
+            # was pruned upstream or just outside our slice.
+            out.append(prev)
+            continue
+        # Unbounded bake: fresh is authoritative for fresh_tier. Drop
+        # fresh_tier from this material's available_tiers; if that
+        # empties the list, the entry is gone (upstream pruned).
         prev_tiers = set(prev.get("available_tiers") or [])
         new_tiers = sorted(prev_tiers - {fresh_tier})
         if not new_tiers:
-            # Existed only at the tier we just baked, and fresh bake
-            # doesn't see it → upstream pruned, drop.
             continue
         out.append({**prev, "available_tiers": new_tiers})
 
@@ -751,10 +774,20 @@ def bake_one_per_file(
             # together in one operation, so a single 412 on the manifest
             # already covers catalog conflicts.
             existing_catalog, _ = _fetch_catalog_with_parent(api, repo_id, release_tag, source)
+            # mat-vis#329 follow-up after E2E on tst: only prune
+            # "missing from fresh" materials when the bake is UNBOUNDED.
+            # A limit-bound or offset-bound bake produces a SUBSET of
+            # the upstream catalog, not the truth — clobbering everything
+            # outside the subset (the original wholesale-replace bug)
+            # would still happen if we always pruned. Production cuts
+            # use limit=0/offset=0 so they prune normally; dev spot-tests
+            # with --limit=10 keep the rest of the catalog intact.
+            unbounded = (limit is None or limit == 0) and (offset is None or offset == 0)
             merged_catalog = _merge_catalog_with_existing(
                 fresh=index,
                 existing=existing_catalog,
                 fresh_tier=storage_tier,
+                prune_missing=unbounded,
             )
             catalog_path.write_text(json.dumps(merged_catalog, indent=2, ensure_ascii=False) + "\n")
             # #292: ship the packed upstream-MTLX JSON in the same atomic
