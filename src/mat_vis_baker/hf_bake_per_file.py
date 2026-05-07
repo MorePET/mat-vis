@@ -220,6 +220,107 @@ def _merge_manifest_for_source(
     return manifest
 
 
+def _fetch_catalog_with_parent(
+    api: HfApi, repo_id: str, revision: str, source: str
+) -> tuple[list[dict], str | None]:
+    """Return ``(existing_catalog, parent_sha)`` for the per-source catalog.
+
+    Mirrors :func:`_fetch_manifest_with_parent` for the per-source
+    ``<source>.json``. ``parent_sha`` is unused for the catalog write
+    (the manifest write is the CAS anchor — both files commit together
+    in one operation), but returned for symmetry / future use.
+
+    Returns ``([], None)`` when the catalog doesn't exist yet
+    (first cut on a release tag).
+    """
+    parent_sha: str | None = None
+    try:
+        info = api.repo_info(repo_id=repo_id, repo_type="dataset", revision=revision)
+        parent_sha = getattr(info, "sha", None)
+    except Exception:  # noqa: BLE001 — branch may not exist yet
+        pass
+
+    existing: list[dict] = []
+    try:
+        path = api.hf_hub_download(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=revision,
+            filename=f"{source}.json",
+        )
+        loaded = json.loads(Path(path).read_text())
+        if isinstance(loaded, list):
+            existing = loaded
+    except Exception:  # noqa: BLE001 — 404 / not yet uploaded → []
+        existing = []
+    return existing, parent_sha
+
+
+def _merge_catalog_with_existing(
+    fresh: list[dict],
+    existing: list[dict],
+    fresh_tier: str,
+) -> list[dict]:
+    """Merge a freshly-baked per-source catalog onto the existing one.
+
+    Implements the cross-tier ``available_tiers`` preservation that
+    mat-vis#301 needs:
+
+    - For each material in BOTH existing and fresh: take the FRESH
+      entry (newest data wins) but set
+      ``available_tiers = sorted(union(existing.available_tiers, [fresh_tier]))``.
+    - For each material ONLY in existing (had this material at some
+      tier before, but the fresh bake of `fresh_tier` doesn't see it):
+      compute ``new_tiers = existing.available_tiers - {fresh_tier}``.
+      If non-empty: PRESERVE the existing entry with
+      ``available_tiers = sorted(new_tiers)``. If empty: DROP (the
+      material existed only at this tier, upstream pruned it).
+    - For each material ONLY in fresh: KEEP as-is (new addition;
+      ``available_tiers = [fresh_tier]`` already from index_builder).
+
+    Order preserved: fresh entries first (in their input order — already
+    sorted by name in :func:`build_index`), then any preserved-existing
+    entries in their original order.
+
+    First-cut case (no existing): returns ``fresh`` unchanged.
+    """
+    if not existing:
+        return fresh
+
+    fresh_by_id: dict[str, dict] = {e["id"]: e for e in fresh if "id" in e}
+    out: list[dict] = []
+
+    # Pass 1: walk fresh in order, merging available_tiers from existing.
+    existing_by_id: dict[str, dict] = {e["id"]: e for e in existing if "id" in e}
+    for entry in fresh:
+        mid = entry.get("id")
+        if mid is None:
+            continue
+        prev = existing_by_id.get(mid)
+        if prev is not None:
+            prev_tiers = set(prev.get("available_tiers") or [])
+            cur_tiers = set(entry.get("available_tiers") or [])
+            merged_tiers = sorted(prev_tiers | cur_tiers)
+            entry = {**entry, "available_tiers": merged_tiers}
+        out.append(entry)
+
+    # Pass 2: append existing entries that are NOT in fresh, with the
+    # fresh_tier removed from their available_tiers. Drop if empty.
+    for prev in existing:
+        mid = prev.get("id")
+        if mid is None or mid in fresh_by_id:
+            continue
+        prev_tiers = set(prev.get("available_tiers") or [])
+        new_tiers = sorted(prev_tiers - {fresh_tier})
+        if not new_tiers:
+            # Existed only at the tier we just baked, and fresh bake
+            # doesn't see it → upstream pruned, drop.
+            continue
+        out.append({**prev, "available_tiers": new_tiers})
+
+    return out
+
+
 def _channel_ext(data: bytes) -> str:
     """Inspect magic bytes; mirror TarWriter's detection so URLs stay
     predictable for clients."""
@@ -634,6 +735,28 @@ def bake_one_per_file(
                 mtlx_filename=mtlx_filename,
             )
             manifest_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
+
+            # mat-vis#301: per-source catalog merge-on-write.
+            # Fetch existing `<source>.json` from HF and merge with the
+            # freshly-baked records (preserving cross-tier
+            # `available_tiers` for materials baked at OTHER tiers in
+            # earlier dispatches). Without this, baking 1k then 2k
+            # without a derive in between would clobber the 1k tier
+            # off every material's `available_tiers` even though the 1k
+            # files are still committed under `<source>/1k/`.
+            #
+            # Fetched inside the CAS loop so a concurrent writer's
+            # update is observed on retry — same shape as the manifest
+            # merge above. The `<source>.json` and manifest commit
+            # together in one operation, so a single 412 on the manifest
+            # already covers catalog conflicts.
+            existing_catalog, _ = _fetch_catalog_with_parent(api, repo_id, release_tag, source)
+            merged_catalog = _merge_catalog_with_existing(
+                fresh=index,
+                existing=existing_catalog,
+                fresh_tier=storage_tier,
+            )
+            catalog_path.write_text(json.dumps(merged_catalog, indent=2, ensure_ascii=False) + "\n")
             # #292: ship the packed upstream-MTLX JSON in the same atomic
             # commit as catalog + manifest. The manifest entry that points
             # at it lands in the same commit, so a client that sees the
