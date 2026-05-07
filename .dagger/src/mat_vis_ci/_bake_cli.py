@@ -19,6 +19,7 @@ def bake_argv(
     limit: int,
     dry_run: bool,
     allow_prod: bool,
+    filter_ids: str = "",
     batch_max_bytes: int = 700 * 1024 * 1024,
     metrics_path: str | None = None,
 ) -> list[str]:
@@ -62,6 +63,8 @@ def bake_argv(
     ]
     if limit > 0:
         argv += ["--limit", str(limit)]
+    if filter_ids:
+        argv += ["--filter-ids", filter_ids]
     if dry_run:
         argv.append("--dry-run")
     if allow_prod:

@@ -303,6 +303,9 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
         # passed here is a user error.
         tier = "scalar"
 
+    raw_filter_ids = getattr(args, "filter_ids", "") or ""
+    parsed_filter_ids = [s.strip() for s in raw_filter_ids.split(",") if s.strip()] or None
+
     result = bake_one(
         source=args.source,
         tier=tier,
@@ -311,6 +314,7 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
         repo_id=args.repo_id,
         limit=args.limit,
         offset=args.offset,
+        filter_ids=parsed_filter_ids,
         batch_size=args.batch_size,
         batch_max_bytes=args.batch_max_bytes,
         dry_run=args.dry_run,
@@ -465,6 +469,17 @@ def main() -> int:
     )
     p_hf.add_argument("--limit", type=int, default=None)
     p_hf.add_argument("--offset", type=int, default=0)
+    p_hf.add_argument(
+        "--filter-ids",
+        default="",
+        help=(
+            "Comma-separated upstream material ids to bake (#342). "
+            "Empty = no filter. Applied before --offset/--limit; "
+            "non-empty list with no matches raises a structured error. "
+            "Per-source id shape: gpuopen=UUIDs, ambientcg=assetIds, "
+            "polyhaven=slugs, physicallybased=names."
+        ),
+    )
     p_hf.add_argument(
         "--batch-size",
         type=int,

@@ -48,6 +48,18 @@ on:  # yamllint disable-line rule:truthy
         required: false
         default: ''
         type: string
+      filter-ids:
+        description: >-
+          Comma-separated upstream material ids to bake (#342). Empty =
+          no filter. Applied before offset/limit at the per-source
+          fetcher boundary; non-empty list with no matches fails loud.
+          Per-source id shape: gpuopen=UUIDs (e.g. "1610803b-…"),
+          ambientcg=assetIds (e.g. "Metal001"), polyhaven=slugs
+          (e.g. "rusty_metal_02"). Spot-test selector that does NOT
+          depend on result-order — use this instead of offset hacking.
+        required: false
+        default: ''
+        type: string
       limit:
         description: 'Per-cell max materials (0 = all)'
         required: false
@@ -199,6 +211,7 @@ jobs:
             --hf-token=env:HF_TOKEN
             --limit=${{ inputs.limit }}
             --offset=${{ inputs.offset }}
+            --filter-ids=${{ inputs.filter-ids }}
             --batch-size=${{ inputs.batch-size }}
             --batch-max-bytes=${{ inputs.batch-max-bytes }}
             ${{ inputs.dry-run == true && '--dry-run=true' || '' }}

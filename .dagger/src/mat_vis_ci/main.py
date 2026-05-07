@@ -633,6 +633,14 @@ class MatVisCi:
         ] = False,
         limit: Annotated[int, Doc("Max materials (0 = no limit)")] = 0,
         offset: Annotated[int, Doc("Skip first N materials")] = 0,
+        filter_ids: Annotated[
+            str,
+            Doc(
+                "Comma-separated upstream ids to bake (#342). Empty = no "
+                "filter. Applied before offset/limit. Per-source id shape: "
+                "gpuopen=UUIDs, ambientcg=assetIds, polyhaven=slugs."
+            ),
+        ] = "",
         batch_size: Annotated[int, Doc("Materials per atomic commit (count ceiling, #228)")] = 300,
         batch_max_bytes: Annotated[
             int,
@@ -676,6 +684,7 @@ class MatVisCi:
             batch_size=batch_size,
             batch_max_bytes=batch_max_bytes,
             limit=limit,
+            filter_ids=filter_ids,
             dry_run=dry_run,
             allow_prod=allow_prod,
         )
@@ -744,6 +753,15 @@ class MatVisCi:
         ] = False,
         limit: Annotated[int, Doc("Per-cell max materials (0 = no limit)")] = 0,
         offset: Annotated[int, Doc("Per-cell skip first N materials")] = 0,
+        filter_ids: Annotated[
+            str,
+            Doc(
+                "Comma-separated upstream ids per cell (#342). Empty = no "
+                "filter. Applied before offset/limit. The same id list is "
+                "passed to every cell's fetcher; ids that don't match any "
+                "material in a cell raise (see baker side)."
+            ),
+        ] = "",
         batch_size: Annotated[int, Doc("Materials per atomic commit (count ceiling, #228)")] = 300,
         batch_max_bytes: Annotated[
             int,
@@ -796,6 +814,7 @@ class MatVisCi:
                 allow_prod=allow_prod,
                 limit=limit,
                 offset=offset,
+                filter_ids=filter_ids,
                 batch_size=batch_size,
                 batch_max_bytes=batch_max_bytes,
                 dry_run=dry_run,
