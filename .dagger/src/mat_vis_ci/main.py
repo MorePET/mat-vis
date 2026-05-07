@@ -23,6 +23,7 @@ Usage:
     dagger call test-client-rust     # cargo test for Rust reference client
     dagger call test-clients         # all 4 client tests in parallel
     dagger call test-e-2-e           # nightly E2E against mat-vis-tst (#193; #240)
+    dagger call validate-prod-preflight  # tst-prior + tier-parity + deprecation gate (#345)
     dagger call validate-release     # validate_release.py --from-hf (#273)
     dagger call preflight            # verify GHCR auth before push
     dagger call push                 # preflight + build + push to GHCR
@@ -882,6 +883,98 @@ class MatVisCi:
         ]
         if previous_tag:
             argv.extend(["--previous-tag", previous_tag])
+        return await ctr.with_exec(argv).stdout()
+
+    # ── prod-cut pre-flight (mat-vis#345) ─────────────────────────
+    #
+    # Three composable gates, each agent-resistant in its own way:
+    #
+    #   1. tst-prior: tst dataset must already carry the release_tag
+    #      we're about to push to prod. The "ALWAYS E2E on tst" rule
+    #      made mechanical at the workflow boundary.
+    #
+    #   2. tier-coverage: tst's (source, tier) cells at release_tag
+    #      must be a SUPERSET of previous prod's cells, modulo
+    #      explicitly-deprecated cells.
+    #
+    #   3. deprecation approval: each declared deprecate-cell must
+    #      have a GH issue bearing the `tier-deprecation-approved`
+    #      label. The label permission is restricted to the repo's
+    #      `triage` role at GitHub's level — agents/bots without
+    #      that role cannot apply it. Verified by the workflow step
+    #      `scripts/verify_deprecation_issues.py` BEFORE this Dagger
+    #      function runs; this function trusts the verified input.
+
+    @function
+    async def validate_prod_preflight(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        release_tag: Annotated[str, Doc("CalVer release tag about to be cut to prod")],
+        prod_repo_id: Annotated[
+            str, Doc("Production HF dataset repo (the destination)")
+        ] = "gerchowl/mat-vis",
+        tst_repo_id: Annotated[
+            str, Doc("Scratch HF dataset repo where tst bake should already exist")
+        ] = "gerchowl/mat-vis-tst",
+        previous_prod_tag: Annotated[
+            str,
+            Doc(
+                "Previous CalVer prod tag for tier-coverage comparison. Empty = "
+                "first-ever prod release (preflight free-passes the parity check)."
+            ),
+        ] = "",
+        deprecate_cells: Annotated[
+            str,
+            Doc(
+                "JSON list of [source, tier] pairs the operator wants to mark "
+                "as deprecated (so they're allowed to be missing from tst). MUST "
+                "have already been verified by `scripts/verify_deprecation_issues.py` "
+                "in a workflow step BEFORE this function runs."
+            ),
+        ] = "[]",
+    ) -> str:
+        """Run the mat-vis#345 prod-cut preflight in the baker container.
+
+        Returns a short JSON report on success; raises on any
+        violation (Dagger surfaces the exception via the workflow's
+        existing notify-on-failure path).
+
+        The deprecation-approval gate is NOT inside this function on
+        purpose — it requires the workflow's `gh` CLI auth, which
+        Dagger doesn't carry. The workflow runs
+        `scripts/verify_deprecation_issues.py` first, then passes the
+        already-verified list here as JSON.
+        """
+        ctr = self._baker_container(context)
+        # Dispatch as a small Python one-liner that imports the
+        # preflight helpers and JSON-dumps the result. Keeping the
+        # logic in `_preflight.py` (pure stdlib) means the `--from-hf`
+        # urllib calls happen inside the baker container which has
+        # network access by default.
+        argv = [
+            "python",
+            "-c",
+            (
+                "import json, sys;"
+                "from mat_vis_ci._preflight import compose_violations, parse_deprecate_cells;"
+                f"deprecated = parse_deprecate_cells({deprecate_cells!r});"
+                "v = compose_violations("
+                f"  tst_repo_id={tst_repo_id!r},"
+                f"  prod_repo_id={prod_repo_id!r},"
+                f"  release_tag={release_tag!r},"
+                f"  previous_prod_tag={previous_prod_tag!r},"
+                "  deprecated_cells=deprecated,"
+                ");"
+                "print(json.dumps(v, indent=2));"
+                "sys.exit(0 if not v else 1);"
+            ),
+        ]
+        # Make the helper module importable inside the baker
+        # container by mounting the dagger module's src tree under
+        # PYTHONPATH. The container already has the host project at
+        # /app, but the dagger module lives at /app/.dagger/src so
+        # we extend PYTHONPATH explicitly.
+        ctr = ctr.with_env_variable("PYTHONPATH", "/app/.dagger/src")
         return await ctr.with_exec(argv).stdout()
 
     @function

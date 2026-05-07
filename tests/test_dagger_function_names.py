@@ -118,6 +118,28 @@ class TestDaggerFunctionNames:
         assert "test_e2e" in function_python_names
         assert _snake_to_kebab("test_e2e") == "test-e-2-e"
 
+    def test_validate_prod_preflight_is_exposed_as_kebab(
+        self, function_python_names: list[str]
+    ) -> None:
+        """mat-vis#345: bake.yml's preflight job invokes
+        `dagger call validate-prod-preflight`. Pin the kebab name so a
+        future rename trips a unit test instead of breaking the prod
+        gate at dispatch time.
+        """
+        assert "validate_prod_preflight" in function_python_names, (
+            "validate_prod_preflight @function disappeared from "
+            ".dagger/src/mat_vis_ci/main.py — if it was renamed, update "
+            "bake.yml's `preflight` job step (mat-vis#345)"
+        )
+        assert _snake_to_kebab("validate_prod_preflight") == "validate-prod-preflight"
+
+    def test_workflow_bake_yml_uses_correct_kebab_name_for_preflight(self) -> None:
+        bake_yml = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "bake.yml"
+        text = bake_yml.read_text()
+        assert "validate-prod-preflight" in text, (
+            "bake.yml's preflight job must invoke `validate-prod-preflight` (mat-vis#345)"
+        )
+
     def test_validate_release_is_exposed_as_kebab(self, function_python_names: list[str]) -> None:
         """mat-vis#273: workflows invoke `dagger call validate-release`.
 
