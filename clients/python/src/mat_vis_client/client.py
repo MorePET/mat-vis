@@ -650,12 +650,25 @@ class MatVisClient:
         """One-shot scan for orphan cache layouts at init.
 
         mat-vis#355: clients that upgrade across the version-namespace
-        cutover (#312/#355 PR) leave a stale ``latest/`` or older
-        ``v0.X/`` directory under ``cache_dir``. Detect cheaply and
-        emit a single ``cache_stale_detected`` event so wired
-        reporters can surface the cleanup recommendation.
+        cutover leave a stale ``latest/`` or older ``v0.X/`` directory
+        under ``cache_dir``. Detect cheaply and surface the finding
+        through TWO channels:
+
+        - ``cache_stale_detected`` event via ``on_event`` for wired
+          reporters (tty / mcp / log / custom).
+        - **``log.warning`` line** for silent-default consumers — the
+          root logger sits at WARNING by default so this reaches
+          anyone who doesn't actively suppress warnings, including
+          consumers reaching mat-vis through pymat's singleton
+          (where ``on_event`` is wired but the log surface is
+          additive coverage).
+
+        Why both: post-#358 reviewer caught that an ``on_event``-only
+        path leaves silent-default consumers with no signal. Stale
+        cache silently bloats their disk; one WARN line per process
+        at startup is the right cost / clarity ratio.
         """
-        if not self._cache or self._on_event is None:
+        if not self._cache:
             return
         try:
             if not self._cache_dir.is_dir():
@@ -682,6 +695,15 @@ class MatVisClient:
                             total += path.stat().st_size
                         except OSError:
                             pass
+            # Always log at WARNING so silent consumers see one line.
+            log.warning(
+                "mat-vis cache: %d legacy layout(s) at %s (~%s); "
+                "run `python -m mat_vis_client cache clear --stale-only` to reclaim.",
+                len(orphans),
+                self._cache_dir,
+                _fmt_size(total),
+            )
+            # Also emit through the event channel for wired reporters.
             self._emit(
                 "cache_stale_detected",
                 detail={"layouts": sorted(orphans), "bytes": total},

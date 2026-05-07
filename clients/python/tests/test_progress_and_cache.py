@@ -253,3 +253,86 @@ class TestCacheClearStaleOnly:
             freed = client.cache_clear()  # stale_only=False by default
             assert freed > 0
             assert not Path(tmp).exists() or not any(Path(tmp).iterdir())
+
+
+# ── reviewer-driven follow-up: defaults reach silent consumers ────
+
+
+class TestGetClientDefaults:
+    """Independent reviewer of #358 caught: bernhard reaches mat-vis
+    via pymat's singleton, never wiring on_event= himself, so the
+    silent-by-default behavior left him exactly as broken as before
+    #287's silent log.info. Pin the post-fix behavior here so a
+    future refactor can't quietly remove it."""
+
+    def test_get_client_singleton_wires_tty_reporter_by_default(self, monkeypatch):
+        """get_client() must produce a client with on_event set —
+        otherwise bernhard's #312 repro stays broken even after #358."""
+        # Reset singleton so the test runs with a fresh init.
+        import mat_vis_client
+
+        monkeypatch.setattr(mat_vis_client, "_client", None)
+        monkeypatch.delenv("MAT_VIS_NO_PROGRESS", raising=False)
+
+        c = mat_vis_client.get_client()
+        assert c._on_event is not None, (
+            "get_client() must wire on_event= by default — silent default leaves "
+            "bernhard's #312 repro broken (his pymat singleton path can't see events)"
+        )
+
+    def test_mat_vis_no_progress_env_var_opts_out(self, monkeypatch):
+        """MAT_VIS_NO_PROGRESS=1 forces silent_reporter — the explicit
+        opt-out for CI/scripted contexts that don't want any output."""
+        import mat_vis_client
+
+        monkeypatch.setattr(mat_vis_client, "_client", None)
+        monkeypatch.setenv("MAT_VIS_NO_PROGRESS", "1")
+
+        c = mat_vis_client.get_client()
+        assert c._on_event is not None
+        # silent_reporter is a lambda — calling it must be a no-op.
+        # (Can't check identity directly because each call returns a
+        # fresh lambda; assert behavior instead.)
+        c._on_event(ClientEvent(kind="download_start"))  # no exception, no output
+
+
+class TestLegacyLayoutAlsoLogsWarning:
+    """Reviewer caught: silent consumers (no on_event=) get NO signal
+    that orphan layouts exist. WARN-level log line ensures the warning
+    reaches default-configured consumers — root logger sits at WARNING
+    by default."""
+
+    def test_orphan_layout_emits_log_warning_even_without_on_event(self, caplog, tmp_path):
+        # Plant orphan layout.
+        orphan = tmp_path / "v2026.04.0"
+        orphan.mkdir()
+        (orphan / "marker").write_text("x" * 1024)
+
+        with caplog.at_level(logging.WARNING, logger="mat-vis-client"):
+            # No on_event= — the silent-default path bernhard hits
+            # via pymat's singleton.
+            MatVisClient(cache_dir=tmp_path, tag="v2026.04.2")
+
+        # The WARN line includes the layout count + cache_dir in the
+        # message + args. Asserting the warning fired at all (with
+        # "legacy layout" content) is sufficient — the path printed is
+        # tmp_path which contains the orphan dir name implicitly.
+        assert any("legacy layout" in r.getMessage() for r in caplog.records), (
+            "WARN line should fire even when on_event=None"
+        )
+
+    def test_orphan_layout_emits_both_log_and_event_when_on_event_wired(self, caplog, tmp_path):
+        """When a reporter IS wired, both surfaces fire — log line for
+        passive observers, event for active consumers (tqdm UI, etc.)."""
+        orphan = tmp_path / "v2026.04.0"
+        orphan.mkdir()
+        (orphan / "marker").write_text("x" * 1024)
+
+        events = []
+        with caplog.at_level(logging.WARNING, logger="mat-vis-client"):
+            MatVisClient(cache_dir=tmp_path, tag="v2026.04.2", on_event=events.append)
+
+        # Event fired
+        assert any(e.kind == "cache_stale_detected" for e in events)
+        # Log line fired
+        assert any("legacy layout" in r.message for r in caplog.records)
