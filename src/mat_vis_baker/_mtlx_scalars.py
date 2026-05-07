@@ -181,6 +181,159 @@ def _input_value_or_graph_constant(
     return None
 
 
+def _find_named_node(graph: ET.Element, name: str) -> ET.Element | None:
+    for child in graph:
+        if child.attrib.get("name") == name:
+            return child
+    return None
+
+
+def _node_constant_value(node: ET.Element) -> float | None:
+    """If ``node`` is a ``<constant>`` whose ``<input name="value">``
+    parses as a float, return it. Otherwise None.
+    """
+    if _strip_ns(node.tag) != "constant":
+        return None
+    for sub in node:
+        if _strip_ns(sub.tag) != "input":
+            continue
+        if sub.attrib.get("name") != "value":
+            continue
+        return _parse_float(sub.attrib.get("value", ""))
+    return None
+
+
+def _resolve_input_constant(graph: ET.Element, inp: ET.Element) -> float | None:
+    """Resolve a ``<mix>``-input element to a float constant.
+
+    Handles two shapes:
+      - ``nodename=`` pointing at a ``<constant>`` sibling.
+      - inline ``value=`` attribute (e.g. ``<input name="mix"
+        nodename="img_mask" value="0.7"/>`` — the texture-bound case
+        where the author left a default for non-rendering consumers).
+    """
+    nm = inp.attrib.get("nodename")
+    if nm is not None:
+        target = _find_named_node(graph, nm)
+        if target is not None:
+            v = _node_constant_value(target)
+            if v is not None:
+                return v
+    raw = inp.attrib.get("value")
+    if raw is not None:
+        return _parse_float(raw)
+    return None
+
+
+def _walk_mix_metalness(
+    root: ET.Element,
+    nodegraph_name: str,
+    output_name: str,
+) -> tuple[float | None, bool | None, float | None, str | None]:
+    """Inspect a ``<mix>`` graph terminal for a metalness binding.
+
+    Returns ``(metalness, is_conductor, metalness_mean, source)`` where:
+
+      - If the mix is **fully constant-foldable** (``fg``, ``bg``,
+        ``mix`` all resolve to scalar constants): ``metalness`` is the
+        folded value and ``source="graph_constant"``. ``is_conductor``
+        and ``metalness_mean`` stay ``None`` (the scalar already
+        captures the truth — no metadata duplication).
+
+      - If only the ``fg`` branch resolves to ``1.0`` (the "pure metal"
+        side of a metal/dielectric mix), emit ``is_conductor=True`` +
+        ``metalness_mean = bg + (fg - bg) * t`` (using the mix
+        constant when resolvable, else falling back to ``0.5`` for a
+        texture-bound mask). ``metalness`` stays ``None`` —
+        the per-pixel value can't be honestly collapsed.
+        ``source="graph_estimate"``.
+
+      - Otherwise: all four return values are ``None`` (parser leaves
+        metalness texture-bound for downstream convention helper).
+
+    The walker only considers ``<mix>`` terminals; other procedural
+    shapes (``<multiply>``, ``<add>``, ``<convert>``, …) fall through.
+    Adding more is straightforward but conservative is preferred —
+    each new shape needs its own correctness argument. #316.
+    """
+    # Locate the named nodegraph + the terminal node referenced by the output.
+    target_ng: ET.Element | None = None
+    for elem in root.iter():
+        if _strip_ns(elem.tag) == "nodegraph" and elem.attrib.get("name") == nodegraph_name:
+            target_ng = elem
+            break
+    if target_ng is None:
+        return None, None, None, None
+
+    terminal_node_name: str | None = None
+    for child in target_ng:
+        if _strip_ns(child.tag) != "output":
+            continue
+        if child.attrib.get("name") != output_name:
+            continue
+        terminal_node_name = child.attrib.get("nodename")
+        break
+    if not terminal_node_name:
+        return None, None, None, None
+
+    terminal = _find_named_node(target_ng, terminal_node_name)
+    if terminal is None or _strip_ns(terminal.tag) != "mix":
+        return None, None, None, None
+
+    # Read fg / bg / mix child inputs.
+    fg_inp: ET.Element | None = None
+    bg_inp: ET.Element | None = None
+    mix_inp: ET.Element | None = None
+    for sub in terminal:
+        if _strip_ns(sub.tag) != "input":
+            continue
+        nm = sub.attrib.get("name")
+        if nm == "fg":
+            fg_inp = sub
+        elif nm == "bg":
+            bg_inp = sub
+        elif nm == "mix":
+            mix_inp = sub
+    if fg_inp is None or bg_inp is None or mix_inp is None:
+        return None, None, None, None
+
+    fg = _resolve_input_constant(target_ng, fg_inp)
+    bg = _resolve_input_constant(target_ng, bg_inp)
+    t = _resolve_input_constant(target_ng, mix_inp)
+
+    # Case 1: fully foldable (function evaluation, not heuristic).
+    if fg is not None and bg is not None and t is not None:
+        # Only when mix is itself a constant — if mix came from the
+        # ``value=`` default on a texture-bound input, the actual
+        # render value is per-pixel and folding to a single scalar
+        # would lie. Detect texture-bound by presence of ``nodename``
+        # whose target is NOT a <constant>.
+        nm = mix_inp.attrib.get("nodename")
+        mix_is_textural = False
+        if nm is not None:
+            target = _find_named_node(target_ng, nm)
+            if target is not None and _node_constant_value(target) is None:
+                mix_is_textural = True
+        if not mix_is_textural:
+            metal = bg + (fg - bg) * t
+            return metal, None, None, "graph_constant"
+        # Fall through to the estimate branch — fg/bg are constants
+        # but t comes from a texture mask; this is the Bronze case
+        # with an explicit ``value=`` default on the mix input.
+
+    # Case 2: fg=1.0 (pure metal) blended with something. Estimate.
+    if fg is not None and abs(fg - 1.0) < 1e-9:
+        bg_eff = bg if bg is not None else 0.0
+        # When ``mix`` is unresolvable (texture-bound, no ``value=``
+        # default), fall back to a mid-mask 0.5 — the most defensible
+        # mean for a binary-ish mask without sampling the texture.
+        t_eff = t if t is not None else 0.5
+        mean = bg_eff + (fg - bg_eff) * t_eff
+        return None, True, mean, "graph_estimate"
+
+    return None, None, None, None
+
+
 def parse_standard_surface_scalars(
     mtlx_xml: str,
     *,
@@ -253,11 +406,35 @@ def parse_standard_surface_scalars(
         if inp is None:
             continue
         raw = _input_value_or_graph_constant(root, inp)
-        if raw is None:
+        if raw is not None:
+            val = _parse_float(raw)
+            if val is not None:
+                setattr(block, pbr_attr, val)
+                # Provenance for metalness only — the field that the
+                # Phase 1 issue (#316) cares about for library-browser
+                # facets. ``source="scalar"`` for direct value=,
+                # "graph_constant" for the 1-hop nodegraph→constant.
+                if pbr_attr == "metalness":
+                    direct = _is_authored_value(inp)
+                    block.metalness_source = "scalar" if direct else "graph_constant"
             continue
-        val = _parse_float(raw)
-        if val is not None:
-            setattr(block, pbr_attr, val)
+        # Texture/graph-bound. For metalness specifically, attempt the
+        # <mix> walker — fg=1.0 mixes give us is_conductor + estimate,
+        # fully-foldable mixes give us a real scalar. Other shapes
+        # leave the field None for the convention helper to fill.
+        if pbr_attr == "metalness":
+            ng = inp.attrib.get("nodegraph")
+            out = inp.attrib.get("output")
+            if ng and out:
+                metal, is_cond, mean, source = _walk_mix_metalness(root, ng, out)
+                if metal is not None:
+                    block.metalness = metal
+                if is_cond is not None:
+                    block.is_conductor = is_cond
+                if mean is not None:
+                    block.metalness_mean = mean
+                if source is not None:
+                    block.metalness_source = source
 
     # base_color (color3) — multiplied by `base` scalar if both authored.
     # Both base_color and base accept the same 1-hop graph→constant

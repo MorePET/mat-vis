@@ -66,7 +66,8 @@ def test_mat_vis_block_has_stable_key_set() -> None:
     }
     # Nested PhysicalBlock
     assert set(mv["physical"].keys()) == {"dimensions_m", "max_resolution_px"}
-    # Nested PBRBlock
+    # Nested PBRBlock — additive Phase 1 fields (#316) for procedural-PBR
+    # library-browser facets are part of the stable shape now.
     assert set(mv["pbr"].keys()) == {
         "color_rgb",
         "roughness",
@@ -75,6 +76,9 @@ def test_mat_vis_block_has_stable_key_set() -> None:
         "specular_f0",
         "transmission",
         "complex_ior",
+        "is_conductor",
+        "metalness_mean",
+        "metalness_source",
     }
     # Nested AttributionBlock
     assert set(mv["attribution"].keys()) == {"authors", "license_spdx", "source_url"}

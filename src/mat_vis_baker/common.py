@@ -425,6 +425,21 @@ class PBRBlock:
     transmission: float | None = None
     complex_ior: list[float] | None = None  # 6-float wavelength-resolved
 
+    # Procedural-PBR Phase 1 (#316). Library-browser facets need a
+    # queryable "this is metal" signal even when the per-pixel scalar
+    # can't be honestly collapsed (e.g. Bronze Oxydized authors metalness
+    # as a <mix> of pure-metal and dielectric blended via a texture
+    # mask). ``metalness`` itself stays the trustworthy-scalar contract;
+    # these fields carry the metadata around procedural cases.
+    is_conductor: bool | None = None  # True/False/None (unknown)
+    metalness_mean: float | None = None  # whole-material mean estimate
+    # Provenance for ``metalness``. None when the field is unset.
+    #   "scalar"          — direct ``value=`` on the shader input
+    #   "graph_constant"  — 1-hop nodegraph→<constant> OR fully-foldable <mix>
+    #   "graph_estimate"  — fg=1.0 graph-walker estimate; metalness still None
+    #   "texture"         — populated by ``apply_pbr_neutral_multiplier_conventions``
+    metalness_source: str | None = None
+
 
 def apply_pbr_neutral_multiplier_conventions(
     pbr: PBRBlock,
@@ -463,6 +478,11 @@ def apply_pbr_neutral_multiplier_conventions(
         pbr.color_rgb = [1.0, 1.0, 1.0]
     if pbr.metalness is None and "metalness" in textures:
         pbr.metalness = 1.0
+        # Provenance — only stamp when WE filled the gap. Authored
+        # scalars (already set by the parser) keep their pre-existing
+        # source string. #316.
+        if pbr.metalness_source is None:
+            pbr.metalness_source = "texture"
     if pbr.roughness is None and "roughness" in textures:
         pbr.roughness = 1.0
     return pbr
