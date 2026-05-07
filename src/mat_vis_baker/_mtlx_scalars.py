@@ -279,6 +279,12 @@ def _walk_mix_metalness(
     terminal = _find_named_node(target_ng, terminal_node_name)
     if terminal is None or _strip_ns(terminal.tag) != "mix":
         return None, None, None, None
+    # Defense against future schema drift: a <mix type="color3"> would
+    # nominally pass the tag check above, then ``_node_constant_value``
+    # would harmlessly fall through (a 3-float ``value=`` string fails
+    # ``_parse_float``), but be explicit. We only handle scalar mixes.
+    if terminal.attrib.get("type") not in (None, "float"):
+        return None, None, None, None
 
     # Read fg / bg / mix child inputs.
     fg_inp: ET.Element | None = None
@@ -321,8 +327,14 @@ def _walk_mix_metalness(
         # but t comes from a texture mask; this is the Bronze case
         # with an explicit ``value=`` default on the mix input.
 
-    # Case 2: fg=1.0 (pure metal) blended with something. Estimate.
-    if fg is not None and abs(fg - 1.0) < 1e-9:
+    # Case 2: fg≈1.0 (pure metal) blended with a dielectric (bg≈0.0).
+    # Tightening: also require bg≈0 so partial-conductor blends
+    # (fg=1.0, bg=0.3) don't get falsely tagged is_conductor=True.
+    # bg defaults to 0.0 when unresolvable so the texture-bound-bg
+    # case still fires for the canonical Bronze pattern.
+    fg_is_metal = fg is not None and abs(fg - 1.0) < 1e-6
+    bg_is_dielectric = bg is None or abs(bg) < 1e-6
+    if fg_is_metal and bg_is_dielectric:
         bg_eff = bg if bg is not None else 0.0
         # When ``mix`` is unresolvable (texture-bound, no ``value=``
         # default), fall back to a mid-mask 0.5 — the most defensible

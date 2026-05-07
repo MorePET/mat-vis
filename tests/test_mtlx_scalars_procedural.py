@@ -159,6 +159,64 @@ FIXTURE_DIELECTRIC_MIX = """<?xml version="1.0"?>
 """
 
 
+# Partial-conductor blend (fg=1.0, bg=0.3): a non-zero dielectric
+# branch means the material isn't a clean metal/dielectric mix. The
+# walker must NOT flip is_conductor=True (post-review tightening).
+FIXTURE_PARTIAL_CONDUCTOR_BLEND = """<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="ng_metal">
+    <constant name="c_fg" type="float">
+      <input name="value" type="float" value="1.0"/>
+    </constant>
+    <constant name="c_bg" type="float">
+      <input name="value" type="float" value="0.3"/>
+    </constant>
+    <image name="img_mask" type="float">
+      <input name="file" type="filename" value="metalness_mask.png"/>
+    </image>
+    <mix name="m_metal" type="float">
+      <input name="fg" nodename="c_fg"/>
+      <input name="bg" nodename="c_bg"/>
+      <input name="mix" nodename="img_mask"/>
+    </mix>
+    <output name="out_metal" type="float" nodename="m_metal"/>
+  </nodegraph>
+  <standard_surface name="m_shader" type="surfaceshader">
+    <input name="metalness" type="float" nodegraph="ng_metal" output="out_metal"/>
+  </standard_surface>
+</materialx>
+"""
+
+
+# A <mix type="color3"> on the metalness input — schema-drift defense.
+# The walker must early-return on non-float mix terminals so a future
+# corpus shape doesn't accidentally trip is_conductor=True.
+FIXTURE_COLOR3_MIX_ON_METALNESS = """<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="ng_metal">
+    <constant name="c_fg" type="color3">
+      <input name="value" type="color3" value="1.0, 1.0, 1.0"/>
+    </constant>
+    <constant name="c_bg" type="color3">
+      <input name="value" type="color3" value="0.0, 0.0, 0.0"/>
+    </constant>
+    <constant name="c_mix" type="float">
+      <input name="value" type="float" value="0.7"/>
+    </constant>
+    <mix name="m_metal" type="color3">
+      <input name="fg" nodename="c_fg"/>
+      <input name="bg" nodename="c_bg"/>
+      <input name="mix" nodename="c_mix"/>
+    </mix>
+    <output name="out_metal" type="color3" nodename="m_metal"/>
+  </nodegraph>
+  <standard_surface name="m_shader" type="surfaceshader">
+    <input name="metalness" type="float" nodegraph="ng_metal" output="out_metal"/>
+  </standard_surface>
+</materialx>
+"""
+
+
 # Genuine texture-bound metalness (no graph) — current behavior:
 # parser leaves metalness=None and source=None. Convention helper
 # (separate test below) is what flips it to "texture".
@@ -229,6 +287,30 @@ class TestMetalnessGraphEstimate:
         assert pbr.is_conductor is None
         assert pbr.metalness is None
         assert pbr.metalness_source is None
+
+    def test_partial_conductor_blend_does_not_flip_is_conductor(self):
+        # fg=1.0, bg=0.3 → not a clean metal/dielectric mix. Per the
+        # post-review tightening, is_conductor stays None when the
+        # dielectric branch is non-zero.
+        pbr = parse_standard_surface_scalars(
+            FIXTURE_PARTIAL_CONDUCTOR_BLEND, material_id="m-partial"
+        )
+        assert pbr.is_conductor is None
+        assert pbr.metalness is None
+        assert pbr.metalness_source is None
+        assert pbr.metalness_mean is None
+
+    def test_color3_mix_on_metalness_falls_through(self):
+        # A <mix type="color3"> on the metalness input is schema drift
+        # (metalness is a float). The walker must early-return — no
+        # is_conductor flip, no estimate.
+        pbr = parse_standard_surface_scalars(
+            FIXTURE_COLOR3_MIX_ON_METALNESS, material_id="m-color3"
+        )
+        assert pbr.is_conductor is None
+        assert pbr.metalness is None
+        assert pbr.metalness_source is None
+        assert pbr.metalness_mean is None
 
 
 class TestPlainTextureBoundParserSide:

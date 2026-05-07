@@ -438,6 +438,14 @@ class PBRBlock:
     #   "graph_constant"  — 1-hop nodegraph→<constant> OR fully-foldable <mix>
     #   "graph_estimate"  — fg=1.0 graph-walker estimate; metalness still None
     #   "texture"         — populated by ``apply_pbr_neutral_multiplier_conventions``
+    #
+    # Combined state: a material with a procedural metalness <mix> graph
+    # AND a metalness texture in the bake will land as ``metalness=1.0``
+    # (set by the convention helper) + ``metalness_source="graph_estimate"``
+    # (preserved from the parser walker). The source string still
+    # provenances the graph signal — consumers reading metalness as a
+    # scalar see the convention default; consumers reading is_conductor
+    # / metalness_mean see the graph estimate.
     metalness_source: str | None = None
 
 

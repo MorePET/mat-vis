@@ -100,6 +100,10 @@ def test_mat_vis_block_defaults_are_null_or_empty() -> None:
     assert mv["pbr"]["specular_f0"] is None
     assert mv["pbr"]["transmission"] is None
     assert mv["pbr"]["complex_ior"] is None
+    # Phase 1 procedural-PBR fields (#316) — additive, default-None.
+    assert mv["pbr"]["is_conductor"] is None
+    assert mv["pbr"]["metalness_mean"] is None
+    assert mv["pbr"]["metalness_source"] is None
     assert mv["attribution"]["authors"] == []
     assert mv["dates"]["published"] is None
     assert mv["dates"]["updated"] is None
