@@ -194,7 +194,13 @@ def fetch(*, session: requests.Session | None = None) -> list[MaterialRecord]:
                 fetched_at=fetched_at,
                 raw=_filter_upstream(mat, UPSTREAM_ALLOWLIST),
             ),
-            available_tiers=[],
+            # mat-vis#331: scalar-only sources advertise the "scalar"
+            # sentinel tier (the manifest already declares
+            # tiers.scalar.complete=True for physicallybased). Was [];
+            # client.materials("physicallybased", "scalar") returned
+            # empty for every dispatcher because `tier in []` matches
+            # nothing — see Bernhard's #313 cascade.
+            available_tiers=["scalar"],
             maps=[],
         )
         records.append(rec)
