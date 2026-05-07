@@ -85,6 +85,24 @@ def _color_hex_to_rgba(hex_str: str) -> list[float]:
     return [r / 255.0, g / 255.0, b / 255.0, 1.0]
 
 
+def _resolve_metalness(scalars: dict) -> float | None:
+    """Resolve the metalness scalar accepting ``metallic`` as a glTF-spec alias.
+
+    Three.js MeshPhysicalMaterial uses ``metalness``; glTF 2.0 spec calls
+    the JSON field ``metallicFactor`` and the property *metallic*; py-mat
+    stores it as ``metallic`` on its public ``Vis`` surface. Adapters
+    accept either input key. ADR-0013 §Decision-3 / #303.
+    """
+    metalness = scalars.get("metalness")
+    metallic = scalars.get("metallic")
+    if metalness is not None and metallic is not None and metalness != metallic:
+        raise ValueError(
+            "scalars contains both 'metalness' and 'metallic' with non-equal "
+            f"values ({metalness!r} vs {metallic!r}); pick one"
+        )
+    return metalness if metalness is not None else metallic
+
+
 # ── Three.js adapter ───────────────────────────────────────────
 
 
@@ -96,7 +114,9 @@ def to_threejs(
 
     Args:
         scalars: Material scalars. Expected keys (all optional):
-            - metalness (float 0-1)
+            - metalness (float 0-1) — also accepted as ``metallic``
+              (glTF-spec alias). Setting both with non-equal values
+              raises ValueError.
             - roughness (float 0-1)
             - color_hex (str '#RRGGBB')
             - ior (float)
@@ -122,8 +142,9 @@ def to_threejs(
     result: dict = {"type": "MeshPhysicalMaterial"}
 
     # Scalars
-    if "metalness" in scalars and scalars["metalness"] is not None:
-        result["metalness"] = scalars["metalness"]
+    metalness = _resolve_metalness(scalars)
+    if metalness is not None:
+        result["metalness"] = metalness
     if "roughness" in scalars and scalars["roughness"] is not None:
         result["roughness"] = scalars["roughness"]
     if "color_hex" in scalars and scalars["color_hex"] is not None:
@@ -179,8 +200,9 @@ def to_gltf(
     material: dict = {"pbrMetallicRoughness": pbr}
 
     # Scalar factors
-    if "metalness" in scalars and scalars["metalness"] is not None:
-        pbr["metallicFactor"] = scalars["metalness"]
+    metalness = _resolve_metalness(scalars)
+    if metalness is not None:
+        pbr["metallicFactor"] = metalness
     if "roughness" in scalars and scalars["roughness"] is not None:
         pbr["roughnessFactor"] = scalars["roughness"]
     if "color_hex" in scalars and scalars["color_hex"] is not None:
@@ -334,11 +356,9 @@ def _build_mtlx_tree(
             ET.SubElement(
                 shader, "input", name="roughness", type="float", value=str(scalars["roughness"])
             )
-    if "metalness" in scalars and scalars["metalness"] is not None:
-        if "metalness" not in tex_filenames:
-            ET.SubElement(
-                shader, "input", name="metallic", type="float", value=str(scalars["metalness"])
-            )
+    metalness = _resolve_metalness(scalars)
+    if metalness is not None and "metalness" not in tex_filenames:
+        ET.SubElement(shader, "input", name="metallic", type="float", value=str(metalness))
     if "ior" in scalars and scalars["ior"] is not None:
         ET.SubElement(shader, "input", name="ior", type="float", value=str(scalars["ior"]))
 
