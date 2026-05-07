@@ -23,6 +23,7 @@ Usage:
     dagger call test-client-rust     # cargo test for Rust reference client
     dagger call test-clients         # all 4 client tests in parallel
     dagger call test-e-2-e           # nightly E2E against mat-vis-tst (#193; #240)
+    dagger call validate-release     # validate_release.py --from-hf (#273)
     dagger call preflight            # verify GHCR auth before push
     dagger call push                 # preflight + build + push to GHCR
 """
@@ -801,6 +802,68 @@ class MatVisCi:
             )
             sections.append(f"=== {cell['source']}×{cell['tier']} ===\n{out}")
         return "\n\n".join(sections)
+
+    # ── release validation (mat-vis#273) ─────────────────────────
+    #
+    # `scripts/validate_release.py --from-hf` was the last "real
+    # operation" still shelled out from raw GH Actions YAML
+    # (`uv run --extra baker python scripts/...`). Wrapping it in a
+    # Dagger function gives bake.yml's post-bake validate + the
+    # release-validate.yml cron a single primitive — same pattern as
+    # bake/derive/test_e2e.
+
+    @function
+    async def validate_release(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        release_tag: Annotated[str, Doc("CalVer release tag to validate (e.g. v2026.04.3)")],
+        hf_token: Annotated[
+            dagger.Secret,
+            Doc("HF read token (validate_release.py --from-hf reads release-manifest.json)"),
+        ],
+        repo_id: Annotated[
+            str, Doc("HF dataset repo (e.g. gerchowl/mat-vis or gerchowl/mat-vis-tst)")
+        ] = "gerchowl/mat-vis",
+        previous_tag: Annotated[
+            str,
+            Doc(
+                "Previous CalVer tag for regression diff. Empty = no previous-release "
+                "comparison (clean by definition for first cuts)."
+            ),
+        ] = "",
+    ) -> str:
+        """Run scripts/validate_release.py --from-hf in the baker container.
+
+        Reuses ``_baker_container`` so the same image build serves
+        both bake and validate; no redundant container per workflow run.
+
+        Returns CLI stdout. Non-zero exit (regression > 5%, parity
+        skew > 20%, etc.) raises ``dagger.ExecError`` per Dagger's
+        normal contract — the workflow catches and routes to the
+        existing notify-on-failure composite.
+
+        Note: ``previous_tag`` is resolved by the workflow YAML via
+        ``git tag``; passing it as a string keeps git-context concerns
+        out of the Dagger function (per mat-vis#273 P2 "probably not
+        worth it").
+        """
+        ctr = self._baker_container(context, hf_token=hf_token)
+        argv = [
+            "uv",
+            "run",
+            "--extra",
+            "baker",
+            "python",
+            "scripts/validate_release.py",
+            "--from-hf",
+            "--repo-id",
+            repo_id,
+            "--release-tag",
+            release_tag,
+        ]
+        if previous_tag:
+            argv.extend(["--previous-tag", previous_tag])
+        return await ctr.with_exec(argv).stdout()
 
     @function
     async def test_e2e(

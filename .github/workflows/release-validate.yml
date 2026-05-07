@@ -72,8 +72,6 @@ jobs:
         with:
           fetch-depth: 0  # need git tag history for cron tag resolution + previous-tag lookup
 
-      - uses: astral-sh/setup-uv@v6
-
       - name: Resolve release tag + repo-id
         id: tag
         env:
@@ -113,22 +111,18 @@ jobs:
           echo "previous_tag=${prev}" >>"${GITHUB_OUTPUT}"
           echo "previous tag: ${prev:-<none>}"
 
+      # mat-vis#273: validate_release moved into a Dagger function.
+      # Same primitive used by bake.yml's post-bake validate job.
       - name: Validate per-file substrate against HF
-        env:
-          CURRENT_TAG: ${{ steps.tag.outputs.tag }}
-          PREVIOUS_TAG: ${{ steps.prev.outputs.previous_tag }}
-          REPO_ID: ${{ steps.tag.outputs.repo_id }}
-        run: |
-          set -euo pipefail
-          extra_args=()
-          if [ -n "${PREVIOUS_TAG:-}" ]; then
-            extra_args+=(--previous-tag "${PREVIOUS_TAG}")
-          fi
-          uv run --extra baker python scripts/validate_release.py \
-            --from-hf \
-            --repo-id "${REPO_ID}" \
-            --release-tag "${CURRENT_TAG}" \
-            "${extra_args[@]}"
+        uses: ./.github/actions/dagger-call
+        with:
+          args: >-
+            validate-release
+            --context=.
+            --release-tag=${{ steps.tag.outputs.tag }}
+            --repo-id=${{ steps.tag.outputs.repo_id }}
+            --hf-token=env:HF_TOKEN
+            --previous-tag=${{ steps.prev.outputs.previous_tag }}
 
       - name: Notify on failure
         if: failure()
