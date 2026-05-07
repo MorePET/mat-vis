@@ -152,30 +152,82 @@ def cmd_pack_mtlx(args: argparse.Namespace) -> int:
 
 
 def cmd_matrix_list(args: argparse.Namespace) -> int:
-    """Print the canonical (source × tier) cells for a release line as JSON.
+    """Print the canonical cells for a release line as JSON.
 
-    Reads from ``mat_vis_baker.release_matrix`` (mat-vis#306). Output is
-    a single JSON object with ``line`` and ``cells`` keys; consumers
-    (Dagger, scripts) parse with ``json.loads``.
+    mat-vis#306: the bake matrix is the canonical (source × tier)
+    declaration of what a release line ships.
+
+    mat-vis#349: extends to derive + ktx2 phases. ``--phase`` selects:
+    ``bake`` (default; back-compat for #306 callers), ``derive``,
+    ``ktx2``, or ``all`` (the full DAG view).
+
+    Output JSON shape:
+
+        {"line": "v2026.04",
+         "phase": "bake",
+         "cells": [{"source": "ambientcg", "tier": "1k", "inputs": []}, ...]}
+
+    Bake cells have an empty ``inputs`` list; derive/ktx2 cells list
+    their source artifacts (see mat_vis_baker._artifact.ArtifactID).
+    Existing #306 consumers ignore the new ``inputs`` field — same
+    JSON object, additive new field.
     """
     import json
 
-    from mat_vis_baker.release_matrix import filter_cells, get_release
+    phase = getattr(args, "phase", "bake")
+
+    if phase == "bake":
+        from mat_vis_baker.release_matrix import filter_cells, get_release
+
+        try:
+            release = get_release(args.line)
+        except KeyError as exc:
+            log.error("matrix list: %s", exc)
+            return 2
+        cells = filter_cells(
+            release.cells,
+            source=args.filter_source or "",
+            tier=args.filter_tier or "",
+        )
+        payload = {
+            "line": release.line,
+            "phase": phase,
+            "cells": [{"source": c.source, "tier": c.tier, "inputs": []} for c in cells],
+        }
+        print(json.dumps(payload))
+        return 0
+
+    # Phase != bake → use the unified DAG view; filter by phase + source/tier.
+    from mat_vis_baker.release_registry import release_dag
 
     try:
-        release = get_release(args.line)
+        dag = release_dag(args.line)
     except KeyError as exc:
         log.error("matrix list: %s", exc)
         return 2
 
-    cells = filter_cells(
-        release.cells,
-        source=args.filter_source or "",
-        tier=args.filter_tier or "",
-    )
+    if phase == "all":
+        derivations = dag.derivations
+    else:
+        derivations = dag.cells_for_phase(phase)
+
+    if args.filter_source:
+        derivations = tuple(d for d in derivations if d.produces.source == args.filter_source)
+    if args.filter_tier:
+        derivations = tuple(d for d in derivations if d.produces.tier == args.filter_tier)
+
     payload = {
-        "line": release.line,
-        "cells": [{"source": c.source, "tier": c.tier} for c in cells],
+        "line": dag.line,
+        "phase": phase,
+        "cells": [
+            {
+                "source": d.produces.source,
+                "tier": d.produces.tier,
+                "phase": d.phase,
+                "inputs": [{"source": i.source, "tier": i.tier} for i in d.inputs],
+            }
+            for d in derivations
+        ],
     }
     print(json.dumps(payload))
     return 0
@@ -421,6 +473,17 @@ def main() -> int:
         "--filter-tier",
         default="",
         help="Restrict output to one tier (empty = all tiers)",
+    )
+    p_matrix_list.add_argument(
+        "--phase",
+        default="bake",
+        choices=["bake", "derive", "ktx2", "all"],
+        help=(
+            "Which phase to list (mat-vis#349). 'bake' is the default and "
+            "the back-compat behavior for #306 callers; 'derive' returns "
+            "PNG-resize cells; 'ktx2' returns transcode cells; 'all' returns "
+            "the unified DAG view across all phases."
+        ),
     )
 
     p_fetch = sub.add_parser("fetch", help="Fetch textures from upstream")

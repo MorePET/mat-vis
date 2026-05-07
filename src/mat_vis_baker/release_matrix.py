@@ -41,6 +41,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mat_vis_baker._artifact import ArtifactID
 from mat_vis_baker.common import VALID_TIERS
 from mat_vis_baker.sources import KNOWN_SOURCES, SCALAR_SOURCES, TEXTURED_SOURCES
 
@@ -55,15 +56,32 @@ _VALID_CELL_TIERS: frozenset[str] = frozenset(VALID_TIERS) | {SCALAR_TIER}
 
 @dataclass(frozen=True, slots=True)
 class Cell:
-    """One (source × tier) bake target.
+    """One bake-phase cell — produces an artifact by fetching from upstream.
 
     Equality + hashing are structural — two cells with the same
     ``(source, tier)`` are the same cell. That makes deduping trivial
     and lets cells live in sets / be dict keys.
+
+    mat-vis#349: bake cells have **no** ``inputs`` (they fetch from
+    upstream APIs, not from other cells in this release). The
+    ``produces`` property exposes the artifact identity for the DAG
+    composer (``release_registry.release_dag()``) — same shape derive
+    and ktx2 cells use, so the v2 DAG migration is mechanical.
     """
 
     source: str
     tier: str
+
+    @property
+    def produces(self) -> ArtifactID:
+        """The artifact this cell produces. mat-vis#349 DAG-shape."""
+        return ArtifactID(source=self.source, tier=self.tier)
+
+    @property
+    def inputs(self) -> tuple[ArtifactID, ...]:
+        """Bake cells take no in-release inputs — empty tuple. Same
+        shape derive/ktx2 cells use so DAG composition is uniform."""
+        return ()
 
 
 @dataclass(frozen=True, slots=True)
