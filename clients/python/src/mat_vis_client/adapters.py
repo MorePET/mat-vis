@@ -16,7 +16,6 @@ from __future__ import annotations
 import base64
 import math
 import re
-import warnings
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from pathlib import Path
@@ -87,11 +86,102 @@ def _color_hex_to_int(hex_str: str) -> int:
     return int(hex_str.lstrip("#"), 16)
 
 
-def _color_hex_to_rgba(hex_str: str) -> list[float]:
-    """Convert '#RRGGBB' to glTF [R, G, B, A] floats in [0, 1]."""
+def _color_hex_to_srgb_rgba(hex_str: str) -> tuple[float, float, float, float]:
+    """Convert '#RRGGBB' to sRGB-encoded float-4 in [0, 1]. Alpha=1.0.
+
+    NOT linear — see :func:`_srgb_to_linear` for the boundary conversion
+    that ``_resolve_base_color`` applies before linear-space outputs.
+    """
     h = hex_str.lstrip("#")
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    return [r / 255.0, g / 255.0, b / 255.0, 1.0]
+    return (r / 255.0, g / 255.0, b / 255.0, 1.0)
+
+
+def _srgb_to_linear(c: float) -> float:
+    """sRGB → linear per IEC 61966-2-1 (piecewise transfer function).
+
+    Below 0.04045 the curve is the linear segment ``c / 12.92``;
+    above, the gamma segment ``((c + 0.055) / 1.055) ** 2.4``.
+    Used at every adapter color boundary so sRGB inputs land in
+    linear-aware fields (glTF ``baseColorFactor``, MTLX
+    ``diffuseColor``) without the silent over-bright bug that
+    shipped through 0.6.x. ADR-0013 §Decision-1 / #304.
+    """
+    if c <= 0.04045:
+        return c / 12.92
+    return ((c + 0.055) / 1.055) ** 2.4
+
+
+def _linear_to_srgb(c: float) -> float:
+    """linear → sRGB, inverse of :func:`_srgb_to_linear`."""
+    if c <= 0.0031308:
+        return c * 12.92
+    return 1.055 * (c ** (1.0 / 2.4)) - 0.055
+
+
+def _resolve_base_color(
+    scalars: dict,
+) -> tuple[float, float, float, float] | None:
+    """Resolve the canonical base color as **linear RGBA** in [0, 1].
+
+    Priority order (first non-None wins):
+        1. ``base_color_linear`` (NEW canonical, 4-tuple linear, no transform)
+        2. ``color_rgba`` (4-tuple sRGB-RGB + linear alpha, RGB de-gammas)
+        3. ``color_hex`` (string sRGB ``#RRGGBB``, de-gammas, alpha=1.0)
+
+    Multiple non-equal non-None values raise ``ValueError``. Equal
+    canonical-form values pass.
+
+    Returns ``None`` when no color key is present or all are None.
+
+    ADR-0013 §Decision-1 / #304.
+    """
+    bcl = scalars.get("base_color_linear")
+    rgba_in = scalars.get("color_rgba")
+    hexv = scalars.get("color_hex")
+
+    bcl_t: tuple[float, float, float, float] | None = (
+        tuple(bcl) if bcl is not None else None  # type: ignore[assignment]
+    )
+    rgba_linear: tuple[float, float, float, float] | None = None
+    if rgba_in is not None:
+        r, g, b, a = rgba_in
+        rgba_linear = (
+            _srgb_to_linear(r),
+            _srgb_to_linear(g),
+            _srgb_to_linear(b),
+            a,
+        )
+    hex_linear: tuple[float, float, float, float] | None = None
+    if hexv is not None:
+        sr, sg, sb, sa = _color_hex_to_srgb_rgba(hexv)
+        hex_linear = (
+            _srgb_to_linear(sr),
+            _srgb_to_linear(sg),
+            _srgb_to_linear(sb),
+            sa,
+        )
+
+    candidates = [c for c in (bcl_t, rgba_linear, hex_linear) if c is not None]
+    if not candidates:
+        return None
+    first = candidates[0]
+    for cand in candidates[1:]:
+        if not all(math.isclose(x, y, rel_tol=1e-6, abs_tol=1e-9) for x, y in zip(first, cand)):
+            raise ValueError(
+                "scalars contains multiple base-color keys with non-equal "
+                "values; pick one of base_color_linear / color_rgba / color_hex"
+            )
+    return first
+
+
+def _color_hex_to_rgba(hex_str: str) -> list[float]:
+    """Deprecated 0.6.x helper retained for backward import compat. Kept
+    as a thin wrapper around :func:`_color_hex_to_srgb_rgba` returning a
+    list (the legacy signature). New code paths must use
+    :func:`_resolve_base_color` to get the *linear* form.
+    """
+    return list(_color_hex_to_srgb_rgba(hex_str))
 
 
 def _resolve_metalness(scalars: dict) -> float | None:
@@ -137,7 +227,7 @@ def to_threejs(
     scalars: dict,
     textures: dict[str, bytes] | None = None,
     *,
-    color_format: Literal["hex", "int"] | None = None,
+    color_format: Literal["hex", "int"] = "hex",
 ) -> dict:
     """Convert to a Three.js MeshPhysicalMaterial parameter dict.
 
@@ -147,21 +237,24 @@ def to_threejs(
               (glTF-spec alias). Setting both with non-equal values
               raises ValueError.
             - roughness (float 0-1)
-            - color_hex (str '#RRGGBB')
+            - base_color_linear (tuple[float,float,float,float] —
+              canonical linear RGBA), or
+            - color_rgba (tuple[float,float,float,float] — sRGB RGB
+              + linear alpha; legacy alias), or
+            - color_hex (str ``#RRGGBB`` — sRGB; legacy alias).
+              ``ValueError`` on non-equal multiple base-color keys.
             - ior (float)
             - transmission (float 0-1)
+            - emissive (tuple[float,float,float] linear RGB)
+            - clearcoat (float 0-1)
         textures: Channel name -> PNG bytes. Keys are mat-vis channel
             names: color, normal, roughness, metalness, ao,
             displacement, emission.
-        color_format: Output shape for ``result["color"]`` when
-            ``color_hex`` is present. ``"int"`` emits a hex int (e.g.
-            ``12566468``); ``"hex"`` emits the ``"#RRGGBB"`` string
-            verbatim. Both forms round-trip lossless through Three.js
-            ``MeshPhysicalMaterial`` (its ``Color.set`` dispatches on
-            type — ``setHex`` for int, ``setStyle`` for string).
-            Default is unset for 0.6.x and emits a DeprecationWarning;
-            in 0.7.0 it flips to ``"hex"`` (Pythonic, JSON-friendly,
-            REPL-readable). py-mat #99 / ADR-0013.
+        color_format: Output shape for ``result["color"]``. ``"hex"``
+            (default since 0.7.0) emits ``"#RRGGBB"`` sRGB string;
+            ``"int"`` emits a hex int (legacy form). Both round-trip
+            lossless through ``THREE.MeshPhysicalMaterial`` (its
+            ``Color.set`` dispatches by type). py-mat #99 / ADR-0013.
 
     Returns:
         Dict suitable for `new THREE.MeshPhysicalMaterial(result)`.
@@ -185,25 +278,27 @@ def to_threejs(
         result["metalness"] = metalness
     if "roughness" in scalars and scalars["roughness"] is not None:
         result["roughness"] = scalars["roughness"]
-    if "color_hex" in scalars and scalars["color_hex"] is not None:
-        if color_format is None:
-            warnings.warn(
-                "to_threejs(color_format=) default will flip from 'int' to "
-                "'hex' in mat-vis-client 0.7.0. Pass color_format='int' to "
-                "keep the current hex-int output, or color_format='hex' to "
-                "opt into the new '#RRGGBB' string default. See ADR-0013.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            effective = "int"
-        elif color_format in ("hex", "int"):
-            effective = color_format
-        else:
-            raise ValueError(f"color_format must be 'hex' or 'int', got {color_format!r}")
-        if effective == "int":
-            result["color"] = _color_hex_to_int(scalars["color_hex"])
-        else:  # "hex"
-            result["color"] = scalars["color_hex"]
+    if color_format not in ("hex", "int"):
+        raise ValueError(f"color_format must be 'hex' or 'int', got {color_format!r}")
+    base_color = _resolve_base_color(scalars)
+    if base_color is not None:
+        # Three.js MeshPhysicalMaterial.color is sRGB by default
+        # (ColorManagement r152+). Re-encode linear → sRGB regardless
+        # of which input form the caller used.
+        srgb = tuple(_linear_to_srgb(c) for c in base_color[:3])
+        hex_str = "#{:02x}{:02x}{:02x}".format(
+            int(round(max(0.0, min(1.0, srgb[0])) * 255)),
+            int(round(max(0.0, min(1.0, srgb[1])) * 255)),
+            int(round(max(0.0, min(1.0, srgb[2])) * 255)),
+        )
+        if color_format == "hex":
+            # Preserve the input hex literal verbatim when the caller
+            # passed color_hex — avoids surprise float-round byte
+            # changes. Synthesized form covers tuple inputs.
+            literal = scalars.get("color_hex")
+            result["color"] = literal if literal is not None else hex_str
+        else:  # "int"
+            result["color"] = int(hex_str.lstrip("#"), 16)
     if "ior" in scalars and scalars["ior"] is not None:
         result["ior"] = scalars["ior"]
     if "transmission" in scalars and scalars["transmission"] is not None:
@@ -264,8 +359,12 @@ def to_gltf(
         pbr["metallicFactor"] = metalness
     if "roughness" in scalars and scalars["roughness"] is not None:
         pbr["roughnessFactor"] = scalars["roughness"]
-    if "color_hex" in scalars and scalars["color_hex"] is not None:
-        pbr["baseColorFactor"] = _color_hex_to_rgba(scalars["color_hex"])
+    base_color = _resolve_base_color(scalars)
+    if base_color is not None:
+        # glTF 2.0 §3.9.2 requires baseColorFactor in linear space.
+        # _resolve_base_color de-gammas at the boundary regardless of
+        # which input form the caller used. ADR-0013 §Decision-2.
+        pbr["baseColorFactor"] = list(base_color)
 
     # IOR extension — omit when the value matches the spec default 1.5
     # (a no-op extension entry only bloats glTF output). mat-vis#290.
@@ -440,13 +539,14 @@ def _build_mtlx_tree(
     # the nodegraph path above provides diffuseColor via the <image>
     # node (with srgb_texture colorspace). The scalar fallback is for
     # PBR-scalar-only materials (most metals/plastics) so MTLX renderers
-    # don't fall back to white. ADR-0013 §Decision-2 / #317.
-    # NOTE: 0.6.5 emits sRGB-byte/255 (matches naive _color_hex_to_rgba);
-    # 0.7.0 will switch to linear via _srgb_to_linear under #304.
-    if scalars.get("color_hex") is not None and "color" not in tex_filenames:
-        rgba = _color_hex_to_rgba(scalars["color_hex"])
-        rgb = ",".join(f"{c:g}" for c in rgba[:3])
-        ET.SubElement(shader, "input", name="diffuseColor", type="color3", value=rgb)
+    # don't fall back to white. UsdPreviewSurface diffuseColor is linear
+    # by convention — _resolve_base_color de-gammas at the boundary
+    # regardless of input form. ADR-0013 §Decision-2 / #317 / #304.
+    if "color" not in tex_filenames:
+        base_color = _resolve_base_color(scalars)
+        if base_color is not None:
+            rgb = ",".join(f"{c:g}" for c in base_color[:3])
+            ET.SubElement(shader, "input", name="diffuseColor", type="color3", value=rgb)
 
     # Emissive RGB on the shader scalar path. Texture-bound emission is
     # already routed through the nodegraph above (channel "emission").
