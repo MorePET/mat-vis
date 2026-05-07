@@ -426,6 +426,48 @@ class PBRBlock:
     complex_ior: list[float] | None = None  # 6-float wavelength-resolved
 
 
+def apply_pbr_neutral_multiplier_conventions(
+    pbr: PBRBlock,
+    textures: dict,
+) -> PBRBlock:
+    """glTF-MR neutral-multiplier conventions (mat-vis#290 follow-up).
+
+    When a PBR scalar input is texture-bound (the ``pbr`` field is ``None``)
+    AND the corresponding texture is present in the baked texture set,
+    write the glTF-MR neutral multiplier into the substrate so
+    ``renderer × texture = authored intent``. Three.js and the glTF-MR
+    spec multiply the scalar factor by the sampled texel; without the
+    convention the default scalar (mid-grey for ``baseColorFactor``,
+    ``0`` for ``metallicFactor``) double-tints / nulls the texture.
+    Mirrors MaterialX.TextureBaker post-eval semantics.
+    Materializing this fact at bake time keeps every consumer (py / js
+    / rust / shell adapters AND search-side ``pbr.metalness`` filters)
+    inheriting the convention from the substrate — no per-language
+    reimplementation, no per-adapter drift.
+
+    Texture channel naming follows :func:`normalize_channel` output:
+    ``color``, ``normal``, ``roughness``, ``metalness``, ``ao``,
+    ``displacement``, ``emission``. Authored scalars (non-``None``) are
+    NEVER overridden — the convention only fills genuine None gaps.
+
+    Roughness defaults to ``1.0`` in glTF-MR which happens to match
+    Three.js's renderer default, so the override is mostly a no-op for
+    rendering — but the substrate index needs it for query correctness
+    (``client.search(roughness>=...)`` should match materials with a
+    bound roughnessMap), and emitting it explicitly is spec-aligned and
+    informative.
+
+    Modifies ``pbr`` in place AND returns it so callers can chain.
+    """
+    if pbr.color_rgb is None and "color" in textures:
+        pbr.color_rgb = [1.0, 1.0, 1.0]
+    if pbr.metalness is None and "metalness" in textures:
+        pbr.metalness = 1.0
+    if pbr.roughness is None and "roughness" in textures:
+        pbr.roughness = 1.0
+    return pbr
+
+
 @dataclass
 class AttributionBlock:
     """Upstream attribution / licensing (SPDX where known)."""

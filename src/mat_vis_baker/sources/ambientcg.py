@@ -21,9 +21,11 @@ from mat_vis_baker.common import (
     DatesBlock,
     MaterialRecord,
     MatVisBlock,
+    PBRBlock,
     PhysicalBlock,
     UpstreamBlock,
     _filter_upstream,
+    apply_pbr_neutral_multiplier_conventions,
     check_zip_safety,
     normalize_category,
     normalize_channel,
@@ -334,6 +336,14 @@ def _fetch_one(entry: dict, tier: str, output_dir: Path, mtlx_dir: Path | None) 
         release_date = (entry.get("releaseDate") or "")[:10] or None
         description = entry.get("description") or None
 
+        # glTF-MR neutral-multiplier convention (mat-vis#290 follow-up):
+        # ambientcg doesn't expose scalar PBR properties upstream, so the
+        # helper is the only path that populates ``pbr.*`` fields — fills
+        # color/metalness/roughness with their glTF-MR neutral
+        # multipliers when the matching texture is in the baked set.
+        pbr = PBRBlock()
+        apply_pbr_neutral_multiplier_conventions(pbr, textures)
+
         return MaterialRecord(
             id=mid,
             source="ambientcg",
@@ -347,6 +357,7 @@ def _fetch_one(entry: dict, tier: str, output_dir: Path, mtlx_dir: Path | None) 
                     dimensions_m=_dimensions_m(entry),
                     max_resolution_px=_max_resolution_px(tier),
                 ),
+                pbr=pbr,
                 attribution=AttributionBlock(
                     license_spdx="CC0-1.0",
                     source_url=f"https://ambientcg.com/a/{mid}",

@@ -218,3 +218,80 @@ def test_upstream_allowlist_locks_conservative_keyset() -> None:
     assert "authors" in UPSTREAM_ALLOWLIST
     assert "files_hash" not in UPSTREAM_ALLOWLIST
     assert "thumbnail_url" not in UPSTREAM_ALLOWLIST
+
+
+# ── glTF-MR neutral-multiplier convention (mat-vis#290 follow-up) ──
+#
+# Polyhaven doesn't expose scalar PBR properties upstream — the only
+# path that can populate ``pbr.*`` is the baker-side convention. These
+# tests pin that wire-up so the substrate carries spec-aligned scalars
+# whenever the matching texture is in the baked set, and stays
+# all-None otherwise.
+
+
+def _multi_channel_file_info(tier_key: str = "1k") -> dict:
+    """polyhaven ``/files/<slug>`` shape with color + metalness + roughness."""
+    return {
+        "Diffuse": {tier_key: {"png": {"url": "https://example.com/diff.png"}}},
+        "metal": {tier_key: {"png": {"url": "https://example.com/metal.png"}}},
+        "rough": {tier_key: {"png": {"url": "https://example.com/rough.png"}}},
+    }
+
+
+def test_polyhaven_pbr_convention_applied(tmp_path: Path) -> None:
+    """color + metalness + roughness textures → all three scalars filled."""
+    meta = _meta()
+    png_resp = MagicMock(content=b"\x89PNG\r\n\x1a\nfake")
+    with (
+        patch(
+            "mat_vis_baker.sources.polyhaven._fetch_files",
+            return_value=_multi_channel_file_info(),
+        ),
+        patch("mat_vis_baker.sources.polyhaven.retry_request", return_value=png_resp),
+    ):
+        rec = _fetch_one("wood_floor", meta, "1k", tmp_path)
+
+    assert rec.status == "ok"
+    assert set(rec.maps) >= {"color", "metalness", "roughness"}
+    assert rec.mat_vis.pbr.color_rgb == [1.0, 1.0, 1.0]
+    assert rec.mat_vis.pbr.metalness == 1.0
+    assert rec.mat_vis.pbr.roughness == 1.0
+
+
+def test_polyhaven_pbr_no_convention_when_no_texture(tmp_path: Path) -> None:
+    """No matching texture in the baked set → pbr scalar stays None.
+
+    Driven via the existing single-channel ``_file_info()`` helper —
+    only ``Diffuse`` ships, so color_rgb fills but metalness / roughness
+    must NOT.
+    """
+    meta = _meta()
+    png_resp = MagicMock(content=b"\x89PNG\r\n\x1a\nfake")
+    with (
+        patch("mat_vis_baker.sources.polyhaven._fetch_files", return_value=_file_info()),
+        patch("mat_vis_baker.sources.polyhaven.retry_request", return_value=png_resp),
+    ):
+        rec = _fetch_one("wood_floor", meta, "1k", tmp_path)
+
+    assert rec.status == "ok"
+    assert "color" in rec.maps
+    assert "metalness" not in rec.maps
+    assert "roughness" not in rec.maps
+    assert rec.mat_vis.pbr.color_rgb == [1.0, 1.0, 1.0]
+    assert rec.mat_vis.pbr.metalness is None
+    assert rec.mat_vis.pbr.roughness is None
+
+
+def test_polyhaven_pbr_all_none_on_failed_fetch(tmp_path: Path) -> None:
+    """Failed-fetch path (textures empty) → pbr stays the default
+    empty PBRBlock with everything None."""
+    meta = _meta()
+    with (
+        patch("mat_vis_baker.sources.polyhaven._fetch_files", return_value={}),
+    ):
+        rec = _fetch_one("wood_floor", meta, "1k", tmp_path)
+
+    assert rec.status == "failed"
+    assert rec.mat_vis.pbr.color_rgb is None
+    assert rec.mat_vis.pbr.metalness is None
+    assert rec.mat_vis.pbr.roughness is None
