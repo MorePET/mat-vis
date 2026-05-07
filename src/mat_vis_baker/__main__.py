@@ -151,6 +151,36 @@ def cmd_pack_mtlx(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_matrix_list(args: argparse.Namespace) -> int:
+    """Print the canonical (source × tier) cells for a release line as JSON.
+
+    Reads from ``mat_vis_baker.release_matrix`` (mat-vis#306). Output is
+    a single JSON object with ``line`` and ``cells`` keys; consumers
+    (Dagger, scripts) parse with ``json.loads``.
+    """
+    import json
+
+    from mat_vis_baker.release_matrix import filter_cells, get_release
+
+    try:
+        release = get_release(args.line)
+    except KeyError as exc:
+        log.error("matrix list: %s", exc)
+        return 2
+
+    cells = filter_cells(
+        release.cells,
+        source=args.filter_source or "",
+        tier=args.filter_tier or "",
+    )
+    payload = {
+        "line": release.line,
+        "cells": [{"source": c.source, "tier": c.tier} for c in cells],
+    }
+    print(json.dumps(payload))
+    return 0
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     """Fetch only — download textures from upstream."""
     fetch = _get_fetcher(args.source)
@@ -364,6 +394,30 @@ def main() -> int:
     )
     p_dfr.add_argument("--release-tag", required=True)
     p_dfr.add_argument("--limit", type=int, default=None, help="Process only first N materials")
+
+    p_matrix = sub.add_parser(
+        "matrix",
+        help="Inspect the canonical (source × tier) release matrix (mat-vis#306)",
+    )
+    matrix_sub = p_matrix.add_subparsers(dest="matrix_command", required=True)
+    p_matrix_list = matrix_sub.add_parser(
+        "list",
+        help="Print canonical cells for a release line as JSON",
+    )
+    p_matrix_list.add_argument(
+        "line",
+        help="Release line, e.g. 'v2026.04' (the CalVer prefix; covers all .X patches)",
+    )
+    p_matrix_list.add_argument(
+        "--filter-source",
+        default="",
+        help="Restrict output to one source (empty = all sources)",
+    )
+    p_matrix_list.add_argument(
+        "--filter-tier",
+        default="",
+        help="Restrict output to one tier (empty = all tiers)",
+    )
 
     p_fetch = sub.add_parser("fetch", help="Fetch textures from upstream")
     p_fetch.add_argument("source", choices=SOURCES)
@@ -646,6 +700,9 @@ def main() -> int:
         return cmd_derive_from_release(args)
     if args.command == "fetch":
         return cmd_fetch(args)
+    if args.command == "matrix":
+        if args.matrix_command == "list":
+            return cmd_matrix_list(args)
     if args.command == "catalog":
         return cmd_catalog(args)
     if args.command == "derive-ktx2":
