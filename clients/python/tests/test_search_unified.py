@@ -265,11 +265,17 @@ def test_search_issue_167_repro_physicallybased_metals():
 
 def _load_standalone():
     """Side-load the standalone module by file path (not on sys.path)."""
+    import sys as _sys
+
     repo_root = _Path(__file__).resolve().parents[3]
     path = repo_root / "clients" / "python" / "mat_vis_client_standalone.py"
-    spec = _importlib_util.spec_from_file_location("_mat_vis_standalone_for_search_tests", path)
+    name = "_mat_vis_standalone_for_search_tests"
+    spec = _importlib_util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     mod = _importlib_util.module_from_spec(spec)
+    # Register before exec so @dataclass-decorated classes can resolve
+    # ``cls.__module__`` during type-annotation introspection.
+    _sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
 

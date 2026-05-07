@@ -33,10 +33,11 @@ import os
 import sys
 import time
 import urllib.request
+from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 from mat_vis_client.progress import ClientEvent
 
@@ -355,6 +356,79 @@ class RateLimitError(MatVisError):
         self.url = url
         self.retry_after = retry_after
         super().__init__(message or f"Rate limited on {url}. Retry after {retry_after}s.")
+
+
+class NoPreviewError(MatVisError):
+    """Material has no preview because the source is scalar-only.
+
+    Raised by :attr:`VisAsset.thumb` / :meth:`VisAsset.thumb_for` for
+    sources like ``physicallybased`` whose entries advertise no staged
+    tiers. A "preview" requires PNG bytes from somewhere; scalar-only
+    entries don't have any until mat-vis#361 ships a baked sphere
+    render. Distinct from :class:`PreviewUnavailableError`, which fires
+    when textures *exist* but none small enough are staged.
+    """
+
+    def __init__(self, source: str, material_id: str):
+        self.source = source
+        self.material_id = material_id
+        super().__init__(
+            f"no preview available for {source}/{material_id}: "
+            f"source has no PNG textures (scalar-only entry). "
+            f"Tracked by mat-vis#361 (baked sphere previews)."
+        )
+
+
+class PreviewUnavailableError(MatVisError):
+    """No tier staged that's small enough to qualify as a preview.
+
+    Raised by :attr:`VisAsset.thumb` / :meth:`VisAsset.thumb_for` when
+    the material has textures but every staged tier is larger than the
+    preview ladder (``128``/``256``/``512``/``1k``) and no dedicated
+    ``thumb`` tier (mat-vis#361) is staged. Carries ``available`` —
+    the tiers that ARE staged — so callers can pick one explicitly via
+    :meth:`VisAsset.thumb_for(tier=...)`.
+    """
+
+    def __init__(
+        self,
+        source: str,
+        material_id: str,
+        *,
+        available: list[str] | None = None,
+    ):
+        self.source = source
+        self.material_id = material_id
+        self.available = list(available) if available else []
+        msg = (
+            f"no preview tier staged for {source}/{material_id}. "
+            f"Need one of [thumb, 128, 256, 512, 1k]; "
+            f"available: {self.available or 'none'}."
+        )
+        if self.available:
+            msg += (
+                f" Use .thumb_for(tier={self.available[0]!r}) to fetch "
+                f"a non-preview-sized texture explicitly."
+            )
+        super().__init__(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class ThumbResult:
+    """Non-raising preview result for iteration / MCP / CLI grids.
+
+    Returned by :meth:`VisAsset.safe_thumb`. ``png`` is non-None on
+    success; ``error`` + ``reason`` are populated on failure. ``channel``
+    and ``tier`` record what the resolver ended up picking (useful for
+    debugging fallback chains and for MCP consumers that want to surface
+    "we returned the normal map because color was missing").
+    """
+
+    png: bytes | None
+    error: str | None
+    reason: str | None
+    channel: str | None
+    tier: str | None
 
 
 def _parse_retry_after(headers, default: int) -> int:
@@ -1894,6 +1968,69 @@ class MatVisClient:
             raise last_exc
         raise MatVisError(f"channel {channel!r} not available for {source}/{resolved} @ {tier}")
 
+    def prefetch_thumbs(
+        self,
+        source: str,
+        *,
+        max_workers: int = 8,
+        tag: str | None = None,
+    ) -> dict[str, int]:
+        """Warm the on-disk cache with every material's preview thumbnail.
+
+        Walks ``index(source)`` and concurrently fetches each material's
+        ``.thumb`` (named-tier alias — dedicated baked thumb if staged
+        per mat-vis#361, else smallest preview-ladder tier). Designed
+        for grid views and CLI discovery surfaces where the first
+        cold-cache iteration would otherwise serialise hundreds of HTTP
+        round-trips.
+
+        Returns a summary dict::
+
+            {"ok": int, "no_preview": int, "unavailable": int, "errors": int}
+
+        Concurrency uses :class:`concurrent.futures.ThreadPoolExecutor`
+        — fetch_texture is I/O-bound (urllib + disk write); GIL
+        contention is negligible. Default ``max_workers=8`` keeps HF
+        request volume bounded.
+
+        Per-fetch failures (NoPreviewError, PreviewUnavailableError,
+        HTTPFetchError, network errors) are counted but never raise —
+        a single bad material doesn't poison a 5000-material warm-up.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        if tag is not None and tag != self._tag:
+            return self.at(tag).prefetch_thumbs(source, max_workers=max_workers)
+
+        entries = self.index(source)
+        targets: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            mid = entry.get("id")
+            if isinstance(mid, str):
+                targets.append(mid)
+
+        counters = {"ok": 0, "no_preview": 0, "unavailable": 0, "errors": 0}
+
+        def _one(material_id: str) -> str:
+            asset = VisAsset(self, source, material_id, "1k")
+            result = asset.safe_thumb()
+            if result.png is not None:
+                return "ok"
+            if result.error == "NoPreviewError":
+                return "no_preview"
+            if result.error == "PreviewUnavailableError":
+                return "unavailable"
+            return "errors"
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_one, mid) for mid in targets]
+            for fut in as_completed(futures):
+                counters[fut.result()] += 1
+
+        return counters
+
     # ── Cache management ────────────────────────────────────────
 
     def cache_size(self) -> int:
@@ -2517,6 +2654,282 @@ class VisAsset:
         MaterialX façade. This is the recommended entry point.
         """
         return MtlxSource(self._client, self._source, self._material_id, self._tier)
+
+    # ── Discovery surface (mat-vis#asset-thumb) ───────────────────
+    #
+    # Three surfaces, three contracts:
+    #   .thumb            — property, raises typed errors  (REPL one-liner)
+    #   .thumb_for(...)   — method, raises typed errors    (explicit override)
+    #   .safe_thumb()     — method, never raises           (iteration / MCP)
+    #
+    # Tier name ``"thumb"`` is a **first-class alias** (mat-vis#361):
+    # resolves to a dedicated baked tier when present, else falls back
+    # to the smallest staged texture tier in the preview ladder. When
+    # bake-side #361 ships, .thumb starts returning ~10KB sphere
+    # renders without any client-side change — same call site, better
+    # bytes.
+    #
+    # Channel default for ``.thumb`` walks a small fallback ladder
+    # (color → basecolor → albedo → normal → roughness) so a
+    # metallic-only material still produces *some* preview. When
+    # caller passes channel= explicitly, only that channel is tried.
+
+    _PREVIEW_TIER_LADDER: ClassVar[tuple[str, ...]] = ("128", "256", "512", "1k")
+    _THUMB_CHANNEL_LADDER: ClassVar[tuple[str, ...]] = (
+        "color",
+        "basecolor",
+        "albedo",
+        "normal",
+        "roughness",
+    )
+
+    @property
+    def thumb(self) -> bytes:
+        """Small preview PNG for material discovery (REPL / Jupyter / MCP).
+
+        Resolves ``tier="thumb"``: a dedicated baked sphere render
+        (mat-vis#361) when present, else the smallest staged texture
+        tier in the preview ladder (``128``/``256``/``512``/``1k``).
+        Channel defaults walk ``color`` → ``basecolor`` → ``albedo``
+        → ``normal`` → ``roughness`` so metallic-only materials still
+        return some preview.
+
+        Raises:
+            NoPreviewError: source is scalar-only (no PNG textures
+                exist; only fixable by mat-vis#361 sphere bakes).
+            PreviewUnavailableError: textures exist but no preview-
+                sized tier is staged. Carries ``available`` so the
+                caller can call :meth:`thumb_for(tier=...)` explicitly.
+            HTTPFetchError: 5xx or persistent network failure
+                (transient errors are retried by the underlying fetch).
+            NetworkError: DNS / connection failure after retries.
+
+        For non-raising semantics (iteration, MCP tool results), use
+        :meth:`safe_thumb` which returns a :class:`ThumbResult`.
+        """
+        return self.thumb_for()
+
+    def thumb_for(
+        self,
+        *,
+        channel: str | None = None,
+        tier: str = "thumb",
+    ) -> bytes:
+        """Fetch a preview-sized texture with explicit overrides.
+
+        ``tier`` defaults to ``"thumb"`` — a named alias resolved to
+        the dedicated baked thumb tier (mat-vis#361) if staged, else
+        the smallest preview-ladder tier. Pass an explicit tier name
+        (e.g. ``"512"``) to bypass the alias and fetch one specific
+        size.
+
+        ``channel`` defaults to ``None`` — walks the channel fallback
+        ladder. Pass an explicit channel (``"color"``, ``"normal"``,
+        etc.) to fetch only that channel; raises if it's missing.
+
+        Raises the same typed errors as :attr:`thumb`. See that
+        property's docstring for the full error contract.
+        """
+        if self._is_scalar_only_entry():
+            raise NoPreviewError(self._source, self._material_id)
+
+        target_tiers = self._resolve_tier_candidates(tier)
+        if not target_tiers:
+            raise PreviewUnavailableError(
+                self._source,
+                self._material_id,
+                available=self._available_tiers(),
+            )
+
+        target_channels: tuple[str, ...]
+        if channel is None:
+            target_channels = self._THUMB_CHANNEL_LADDER
+        else:
+            target_channels = (channel,)
+
+        last_exc: Exception | None = None
+        for t in target_tiers:
+            for ch in target_channels:
+                try:
+                    return self._client.fetch_texture(self._source, self._material_id, ch, tier=t)
+                except NetworkError:
+                    # Network failure — not a "doesn't exist" signal.
+                    # Don't keep walking; the next combo would just
+                    # re-fail the same way and waste retries.
+                    raise
+                except HTTPFetchError as e:
+                    # 5xx is not a "this tier/channel doesn't exist"
+                    # signal — it's a real substrate problem. Surface
+                    # immediately so retries don't mask outages.
+                    if 500 <= e.code < 600:
+                        raise
+                    last_exc = e
+                    continue
+                except (ChannelNotFoundError, MatVisError) as e:
+                    # ChannelNotFoundError + the loose MatVisError
+                    # raised by fetch_texture's pre-flight channel
+                    # check (L1822) both mean "this channel isn't
+                    # staged at this tier" — try the next combo.
+                    last_exc = e
+                    continue
+
+        # Exhausted every (tier, channel) combination. If user passed
+        # explicit args, surface the underlying error verbatim so they
+        # can debug what they asked for; otherwise wrap in
+        # PreviewUnavailableError with the staged-tiers hint.
+        if channel is not None or tier != "thumb":
+            if last_exc is not None:
+                raise last_exc
+        raise PreviewUnavailableError(
+            self._source,
+            self._material_id,
+            available=self._available_tiers(),
+        ) from last_exc
+
+    def safe_thumb(
+        self,
+        *,
+        channel: str | None = None,
+        tier: str = "thumb",
+    ) -> ThumbResult:
+        """Non-raising thumbnail fetch — returns :class:`ThumbResult`.
+
+        Designed for the two surfaces where exceptions break flow:
+
+        - **Iteration / grids**: ``[m.safe_thumb() for m in materials]``
+          composes; one bad material doesn't poison the comprehension.
+        - **MCP / structured tools**: pymat-mcp serialises the result
+          as JSON so the LLM sees ``{png, error, reason, channel, tier}``
+          rather than catching exceptions.
+
+        Internally calls :meth:`thumb_for` with the same kwargs and
+        traps everything. ``error`` is the exception class name (stable
+        tag for routing), ``reason`` is the message. ``channel`` /
+        ``tier`` reflect what the resolver picked on success; both
+        ``None`` on failure (resolver never committed to a target).
+        """
+        try:
+            png = self.thumb_for(channel=channel, tier=tier)
+        except (NoPreviewError, PreviewUnavailableError) as e:
+            return ThumbResult(
+                png=None,
+                error=type(e).__name__,
+                reason=str(e),
+                channel=None,
+                tier=None,
+            )
+        except (HTTPFetchError, NetworkError) as e:
+            return ThumbResult(
+                png=None,
+                error=type(e).__name__,
+                reason=str(e),
+                channel=None,
+                tier=None,
+            )
+        except MatVisError as e:
+            return ThumbResult(
+                png=None,
+                error=type(e).__name__,
+                reason=str(e),
+                channel=None,
+                tier=None,
+            )
+        # Success — record what the resolver picked. We can't know
+        # the exact (tier, channel) pair after the fact without
+        # re-running the resolver, but we can report the inputs the
+        # caller chose; explicit args reflect their intent, defaults
+        # reflect "the resolver decided".
+        return ThumbResult(png=png, error=None, reason=None, channel=channel, tier=tier)
+
+    def _available_tiers(self) -> list[str]:
+        """Return the ``available_tiers`` list from this asset's index entry.
+
+        Empty list when entry not found, no index, or scalar-only.
+        Best-effort: any failure returns ``[]`` so callers (typed-error
+        constructors) get a useful-or-empty hint rather than cascading
+        exceptions out of an error path.
+        """
+        try:
+            entries = self._client.index(self._source)
+        except Exception:  # noqa: BLE001
+            return []
+        if not isinstance(entries, list):
+            return []
+        norm = self._client._normalize_name(self._material_id)
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if (
+                entry.get("id") == self._material_id
+                or self._client._normalize_name((entry.get("mat_vis") or {}).get("name") or "")
+                == norm
+            ):
+                staged = entry.get("available_tiers") or []
+                return list(staged) if isinstance(staged, list) else []
+        return []
+
+    def _resolve_tier_candidates(self, tier: str) -> tuple[str, ...]:
+        """Resolve a tier name to the ordered candidate list to try.
+
+        - ``"thumb"`` → dedicated baked tier first if staged
+          (mat-vis#361), then the preview ladder (``128`` →
+          ``256`` → ``512`` → ``1k``) filtered to staged tiers
+        - any other value → single-element tuple, caller named it
+
+        Empty tuple iff ``"thumb"`` requested but the entry has no
+        staged tier ≤ ``1k`` and no dedicated thumb tier — caller
+        raises :class:`PreviewUnavailableError`.
+        """
+        if tier != "thumb":
+            return (tier,)
+        staged = self._available_tiers()
+        if not staged:
+            # Could be index miss; fall back to the asset's pinned
+            # tier rather than refusing — preserves the pre-thumb
+            # behavior when an entry exists but available_tiers is
+            # absent (older catalogs).
+            return (self._tier,)
+        candidates: list[str] = []
+        if "thumb" in staged:
+            candidates.append("thumb")
+        for t in self._PREVIEW_TIER_LADDER:
+            if t in staged and t not in candidates:
+                candidates.append(t)
+        return tuple(candidates)
+
+    def _repr_png_(self) -> bytes | None:
+        """IPython rich-repr hook: inline image in Jupyter cells.
+
+        Returns the same bytes as :attr:`thumb` on success. On any
+        failure returns ``None`` so IPython falls through to
+        :meth:`_repr_html_` (which renders the diagnostic) and finally
+        :meth:`__repr__`. Never breaks the cell.
+        """
+        try:
+            return self.thumb
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _repr_html_(self) -> str | None:
+        """IPython rich-repr fallback: diagnostic HTML when no PNG.
+
+        Returns ``None`` on success so :meth:`_repr_png_` wins (IPython
+        prefers the higher-priority repr that returns non-None). On
+        failure returns a small ``<div>`` explaining *why* there's no
+        preview — bernhard's #312 pain point was a silent ``None``
+        repr; this surface makes the failure visible without raising.
+        """
+        result = self.safe_thumb()
+        if result.png is not None:
+            return None
+        return (
+            f'<div style="font-family:monospace;color:#888;'
+            f'border:1px solid #ddd;padding:6px 10px;border-radius:4px">'
+            f"<b>{type(self).__name__}</b>"
+            f"({self._source!r}, {self._material_id!r}, tier={self._tier!r})"
+            f"<br/>preview unavailable: <b>{result.error}</b>: {result.reason}"
+            f"</div>"
+        )
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, VisAsset) and (
