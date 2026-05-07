@@ -47,13 +47,24 @@ _FLOAT_INPUTS: dict[str, str] = {
     "specular_roughness": "roughness",
     "specular_IOR": "ior",  # uppercase IOR — case-aware lookup
     "transmission": "transmission",
+    # Full MeshPhysicalMaterial coverage (#340).
+    "specular": "specular_intensity",  # KHR_materials_specular.specularFactor
+    "transmission_dispersion": "dispersion",  # KHR_materials_dispersion.dispersion
+    "coat_roughness": "clearcoat_roughness",  # KHR_materials_clearcoat.clearcoatRoughnessFactor
+}
+
+# Color3 inputs. Same direct value=/1-hop graph→constant promotion as
+# float scalars; emit as a 3-list of linear floats (gpuopen authors with
+# linear values per MaterialX 1.38 spec).
+_COLOR3_INPUTS: dict[str, str] = {
+    # mtlx input name -> PBRBlock attribute
+    "specular_color": "specular_color",  # KHR_materials_specular.specularColorFactor
 }
 
 # Inputs that have no PBRBlock home today. Non-zero values are dropped
 # with a structured warning so a future schema add knows where to look.
 _LOSSY_INPUTS: tuple[str, ...] = (
     "coat",
-    "coat_roughness",
     "coat_IOR",
     "coat_color",
     "sheen",
@@ -632,6 +643,35 @@ def parse_standard_surface_scalars(
                 if base_mul is not None:
                     rgb = [c * base_mul for c in rgb]
                 block.color_rgb = rgb
+
+    # Additional color3 scalars (#340). Same extraction pattern as
+    # base_color, no `base` multiplier coupling. MaterialX 1.38 spec
+    # treats `specular_color` as linear RGB by default.
+    for mtlx_name, pbr_attr in _COLOR3_INPUTS.items():
+        c_inp = inputs.get(mtlx_name)
+        if c_inp is None:
+            continue
+        raw_c = _input_value_or_graph_constant(root, c_inp)
+        if raw_c is not None:
+            parts = _parse_color3(raw_c)
+            if parts is not None:
+                setattr(block, pbr_attr, parts)
+
+    # thickness ← transmission_depth, but ONLY when transmission > 0.
+    # MaterialX `transmission_depth` is the absorption-distance scalar
+    # for transmissive materials (KHR_materials_volume.thicknessFactor
+    # equivalent). For opaque materials (transmission=0), the depth
+    # value is dead-code authoring scaffold and has no rendering
+    # meaning; emit None so the adapter doesn't ship a no-op extension.
+    # Survey: only 8/454 gpuopen materials have transmission>0.
+    if block.transmission is not None and block.transmission > 0.0:
+        depth_inp = inputs.get("transmission_depth")
+        if depth_inp is not None:
+            raw_d = _input_value_or_graph_constant(root, depth_inp)
+            if raw_d is not None:
+                d = _parse_float(raw_d)
+                if d is not None and d > 0.0:
+                    block.thickness = d
 
     # Lossy inputs — log structured warning per non-zero authored value.
     for name in _LOSSY_INPUTS:

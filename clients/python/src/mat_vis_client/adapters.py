@@ -184,6 +184,46 @@ def _color_hex_to_rgba(hex_str: str) -> list[float]:
     return list(_color_hex_to_srgb_rgba(hex_str))
 
 
+def _resolve_specular_color(
+    scalars: dict,
+) -> tuple[float, float, float] | None:
+    """Resolve specular color as **linear RGB** (3-tuple).
+
+    Priority order (first non-None wins):
+        1. ``specular_color_linear`` (canonical, 3-tuple linear, no transform)
+        2. ``specular_color_rgba`` (3-tuple sRGB; de-gammas at boundary)
+
+    Multiple non-equal non-None values raise ``ValueError``.
+
+    Mirrors :func:`_resolve_base_color` to avoid the colorspace-asymmetry
+    Finding-2 trap on ``specularColorFactor`` (linear in glTF spec) vs.
+    ``MeshPhysicalMaterial.specularColor`` (sRGB-input under Three.js
+    ColorManagement r152+). #340.
+    """
+    scl = scalars.get("specular_color_linear")
+    rgb_in = scalars.get("specular_color_rgba")
+
+    scl_t: tuple[float, float, float] | None = (
+        tuple(scl)[:3] if scl is not None else None  # type: ignore[assignment]
+    )
+    rgb_linear: tuple[float, float, float] | None = None
+    if rgb_in is not None:
+        r, g, b = tuple(rgb_in)[:3]
+        rgb_linear = (_srgb_to_linear(r), _srgb_to_linear(g), _srgb_to_linear(b))
+
+    candidates = [c for c in (scl_t, rgb_linear) if c is not None]
+    if not candidates:
+        return None
+    first = candidates[0]
+    for cand in candidates[1:]:
+        if not all(math.isclose(x, y, rel_tol=1e-6, abs_tol=1e-9) for x, y in zip(first, cand)):
+            raise ValueError(
+                "scalars contains multiple specular-color keys with non-equal "
+                "values; pick specular_color_linear or specular_color_rgba"
+            )
+    return first
+
+
 def _resolve_metalness(scalars: dict) -> float | None:
     """Resolve the metalness scalar accepting ``metallic`` as a glTF-spec alias.
 
@@ -307,11 +347,37 @@ def to_threejs(
         result["emissive"] = list(scalars["emissive"])
     if scalars.get("clearcoat") is not None:
         result["clearcoat"] = scalars["clearcoat"]
+    if scalars.get("clearcoat_roughness") is not None:
+        result["clearcoatRoughness"] = scalars["clearcoat_roughness"]
+    if scalars.get("specular_intensity") is not None:
+        result["specularIntensity"] = scalars["specular_intensity"]
+    # Three.js MeshPhysicalMaterial.specularColor is sRGB-input under
+    # ColorManagement r152+; re-encode linear → sRGB regardless of which
+    # input alias the caller used. Same shape as base_color handling.
+    specular_color_linear = _resolve_specular_color(scalars)
+    if specular_color_linear is not None:
+        srgb = tuple(_linear_to_srgb(c) for c in specular_color_linear)
+        result["specularColor"] = "#{:02x}{:02x}{:02x}".format(
+            int(round(max(0.0, min(1.0, srgb[0])) * 255)),
+            int(round(max(0.0, min(1.0, srgb[1])) * 255)),
+            int(round(max(0.0, min(1.0, srgb[2])) * 255)),
+        )
+    if scalars.get("thickness") is not None:
+        result["thickness"] = scalars["thickness"]
+    if scalars.get("dispersion") is not None:
+        result["dispersion"] = scalars["dispersion"]
 
     # Textures as data URIs
     for channel, prop in _THREEJS_TEX_MAP.items():
         if channel in textures:
             result[prop] = _to_data_uri(textures[channel])
+
+    # When an opacity texture is present, the material needs
+    # transparent=true so Three.js samples alphaMap instead of
+    # rendering as fully opaque. Without this flag MeshPhysicalMaterial
+    # ignores alphaMap entirely. #340.
+    if "opacity" in textures:
+        result["transparent"] = True
 
     return result
 
@@ -388,12 +454,76 @@ def to_gltf(
         material["emissiveFactor"] = list(emissive)
 
     # Clearcoat extension — omit when zero/None (spec default), mirrors
-    # the KHR_materials_ior / _transmission suppression pattern.
+    # the KHR_materials_ior / _transmission suppression pattern. The
+    # clearcoatRoughnessFactor sub-field only ships when clearcoat is
+    # active AND roughness is non-default (default is 0.0 = mirror).
     clearcoat = scalars.get("clearcoat")
+    clearcoat_roughness = scalars.get("clearcoat_roughness")
     if not _clearcoat_at_default(clearcoat):
-        material.setdefault("extensions", {})["KHR_materials_clearcoat"] = {
-            "clearcoatFactor": clearcoat
+        cc_ext: dict = {"clearcoatFactor": clearcoat}
+        if clearcoat_roughness is not None and not math.isclose(
+            clearcoat_roughness, 0.0, abs_tol=1e-9
+        ):
+            cc_ext["clearcoatRoughnessFactor"] = clearcoat_roughness
+        material.setdefault("extensions", {})["KHR_materials_clearcoat"] = cc_ext
+
+    # KHR_materials_specular — bundles specularFactor + specularColorFactor.
+    # Both default to 1.0 / [1,1,1]; emit only when at least one is
+    # authored away from default. specularColorFactor ships in linear
+    # per the extension spec (matches our linear-RGB resolution).
+    specular_intensity = scalars.get("specular_intensity")
+    specular_color = _resolve_specular_color(scalars)
+    spec_ext: dict = {}
+    if specular_intensity is not None and not math.isclose(specular_intensity, 1.0, abs_tol=1e-9):
+        spec_ext["specularFactor"] = specular_intensity
+    if specular_color is not None and not all(
+        math.isclose(c, 1.0, abs_tol=1e-9) for c in specular_color
+    ):
+        spec_ext["specularColorFactor"] = list(specular_color)
+    if spec_ext:
+        material.setdefault("extensions", {})["KHR_materials_specular"] = spec_ext
+
+    # KHR_materials_volume.thicknessFactor — only meaningful when
+    # transmission > 0 AND thickness > 0. The baker emits None for
+    # opaque materials per #340 contract; defensively guard anyway.
+    thickness = scalars.get("thickness")
+    if (
+        thickness is not None
+        and thickness > 0.0
+        and not _transmission_at_default(scalars.get("transmission"))
+    ):
+        material.setdefault("extensions", {})["KHR_materials_volume"] = {
+            "thicknessFactor": thickness
         }
+
+    # KHR_materials_dispersion — extension default 0.0 (no dispersion).
+    dispersion = scalars.get("dispersion")
+    if dispersion is not None and dispersion > 0.0:
+        material.setdefault("extensions", {})["KHR_materials_dispersion"] = {
+            "dispersion": dispersion
+        }
+
+    # Opacity texture — glTF 2.0 has no standalone alphaMap slot. Alpha
+    # must live in baseColorTexture's alpha channel + alphaMode/alphaCutoff
+    # at the material level. Pack with Pillow when available; otherwise
+    # emit alphaMode flagging + drop the texture (consumers can fetch
+    # the standalone PNG from the substrate). Mirrors the
+    # metallicRoughnessTexture packing pattern. #340.
+    if "opacity" in textures:
+        material["alphaMode"] = "MASK"
+        material["alphaCutoff"] = 0.5
+        if "color" in textures and Image is not None:
+            packed_uri = _pack_base_color_with_alpha(
+                color_png=textures["color"],
+                opacity_png=textures["opacity"],
+            )
+            pbr["baseColorTexture"] = {"source": {"uri": packed_uri}}
+        elif "color" not in textures or Image is None:
+            material["_note_opacity_unpacked"] = (
+                "opacity texture provided but baseColorTexture alpha not packed "
+                "(install `mat-vis-client[gltf]` to enable Pillow packing). The "
+                "standalone opacity PNG is available in the substrate texture set."
+            )
 
     # Textures
     def _tex_ref(png_bytes: bytes) -> dict:
@@ -425,6 +555,34 @@ def to_gltf(
             pbr["metallicRoughnessTexture"] = {"source": {"uri": packed_uri}}
 
     return material
+
+
+def _pack_base_color_with_alpha(
+    *,
+    color_png: bytes,
+    opacity_png: bytes,
+) -> str:
+    """Pack baseColor (RGB) + opacity (alpha) into a single RGBA PNG.
+
+    glTF 2.0 has no standalone alphaMap slot — alpha must live in the
+    baseColorTexture's alpha channel. We use Three.js's convention of
+    sourcing alpha from the opacity image's green channel (works for
+    both single-channel grayscale PNGs and color3 opacity images, since
+    PNG decoders broadcast L→RGB on grayscale inputs).
+
+    Color image dimensions are the reference; opacity is resized to
+    match if they differ.
+    """
+    assert Image is not None  # caller checks
+    color = Image.open(BytesIO(color_png)).convert("RGB")
+    opacity = Image.open(BytesIO(opacity_png)).convert("L")
+    if opacity.size != color.size:
+        opacity = opacity.resize(color.size)
+    r, g, b = color.split()
+    packed = Image.merge("RGBA", (r, g, b, opacity))
+    buf = BytesIO()
+    packed.save(buf, format="PNG")
+    return _to_data_uri(buf.getvalue())
 
 
 def _pack_metallic_roughness(
