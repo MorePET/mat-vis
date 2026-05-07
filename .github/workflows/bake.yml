@@ -241,7 +241,15 @@ jobs:
           # --all-extras`); only this plan job invokes the CLI directly.
           payload=$(uv run --with '.[baker]' mat-vis-baker matrix list "$LINE" "${extra[@]}")
           echo "matrix payload: $payload"
-          cells=$(printf '%s' "$payload" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["cells"]))')
+          # mat-vis#353: post-#351 the matrix CLI emits DAG-shaped cells
+          # with `produces` / `inputs` keys alongside `source` / `tier`.
+          # GitHub Actions silently produces zero matrix iterations when
+          # any cell entry carries a key named `inputs` (collides with the
+          # workflow_dispatch `inputs` context). Project the cells down to
+          # the matrix-relevant subset (source, tier) before writing to
+          # GITHUB_OUTPUT — schema additions upstream don't leak into the
+          # matrix shape consumed by the bake job.
+          cells=$(printf '%s' "$payload" | python3 -c 'import json,sys; cells=json.load(sys.stdin)["cells"]; print(json.dumps([{"source":c["source"],"tier":c["tier"]} for c in cells]))')
           if [ "$cells" = "[]" ]; then
             echo "::error::no cells matched line=$LINE filter-source=${FILTER_SOURCE:-} filter-tier=${FILTER_TIER:-}"
             exit 1
