@@ -11,10 +11,8 @@ to_gltf on the scalar path. Texture-bound color still routes through
 the existing nodegraph (with the established ``srgb_texture``
 colorspace tag); only the scalar fallback is new.
 
-The 0.6.5 cut emits sRGB-byte/255 (matches the existing naive
-``_color_hex_to_rgba`` helper). The 0.7.0 cut will switch to linear
-via ``_srgb_to_linear`` since UsdPreviewSurface ``diffuseColor`` is
-linear by convention.
+UsdPreviewSurface ``diffuseColor`` is **linear** by convention. Since
+0.7.0 (#304) the scalar emit de-gammas via ``_resolve_base_color``.
 
 #317.
 """
@@ -50,9 +48,9 @@ class TestMtlxScalarColor:
         xml = out.read_text()
         assert 'name="diffuseColor"' in xml
         assert 'type="color3"' in xml
-        # 0xbf/255 = 0.7490196..., 0xc4/255 = 0.7686274...
-        # Default ``{:g}`` (6 sig figs) → "0.74902" / "0.768627".
-        assert 'value="0.74902,0.74902,0.768627"' in xml
+        # sRGB de-gammaed: 0xbf → ~0.520996, 0xc4 → ~0.552011 linear.
+        # Default ``{:g}`` (6 sig figs) → "0.520996" / "0.552011".
+        assert 'value="0.520996,0.520996,0.552011"' in xml
 
     def test_pure_red_renders_cleanly(self, tmp_path: Path):
         out = export_mtlx({"color_hex": "#FF0000"}, output_dir=tmp_path)
@@ -78,7 +76,7 @@ class TestMtlxScalarColor:
         # texture-path diffuseColor input is `<... nodegraph="..."
         # output="..."/>` (no value attr). Confirm the scalar form is
         # absent — only the nodegraph form should bind diffuseColor.
-        assert "0.74902" not in xml
+        assert "0.520996" not in xml
         assert 'colorspace="srgb_texture"' in xml
 
     def test_no_color_input_when_neither_scalar_nor_texture(self, tmp_path: Path):

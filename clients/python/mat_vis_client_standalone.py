@@ -1774,11 +1774,11 @@ class VisAsset:
                 return not tiers
         return False
 
-    def to_threejs(self, *, color_format: Literal["hex", "int"] | None = None) -> dict:
+    def to_threejs(self, *, color_format: Literal["hex", "int"] = "hex") -> dict:
         """Return a Three.js ``MeshPhysicalMaterial`` parameter dict.
 
-        ``color_format`` forwards to the underlying adapter — see
-        ADR-0013 / #298 for the 0.6.x → 0.7.0 migration story.
+        ``color_format`` forwards to the underlying adapter; default is
+        ``"hex"`` (``"#RRGGBB"`` string) since 0.7.0.
         """
         from mat_vis_client.adapters import to_threejs
 

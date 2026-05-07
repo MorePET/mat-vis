@@ -1,21 +1,13 @@
 """Tests for to_threejs ``color_format`` kwarg (ADR-0013 §Decision-2 / #298).
 
 py-mat #99 (Bernhard, build123d): emitting ``result["color"]`` as a
-hex int (``12566468``) is opaque in the REPL, doesn't round-trip
-through JSON for non-Three.js consumers, and is un-Pythonic. The
-substrate gains a ``color_format: Literal["hex", "int"]`` kwarg; the
-default flips from ``"int"`` (current) to ``"hex"`` in 0.7.0.
+hex int is opaque in the REPL, doesn't round-trip through JSON for
+non-Three.js consumers, and is un-Pythonic. ``color_format: Literal[
+"hex", "int"]`` exposes the choice; default is ``"hex"`` since 0.7.0.
 
-0.6.5 phasing:
-    color_format=None (unset) → DeprecationWarning + "int" (preserves
-                                current behavior; gives downstream
-                                callers a minor cycle to migrate).
-    color_format="int"        → silent; result["color"] is hex int.
-    color_format="hex"        → silent; result["color"] is "#RRGGBB"
-                                string (Three.js MeshPhysicalMaterial
-                                accepts both lossless).
-
-0.7.0 will drop the sentinel: default flips to ``"hex"``, no warning.
+  color_format="hex" (default) → result["color"] is "#RRGGBB" string.
+  color_format="int"           → result["color"] is hex int (legacy).
+  color_format=anything else   → ValueError (eager validation).
 
 #298.
 """
@@ -30,27 +22,21 @@ from mat_vis_client.adapters import to_threejs
 
 
 class TestColorFormatDefault:
-    """Default (unset) behavior — emits DeprecationWarning, returns int."""
+    """Default behavior (0.7.0): emits ``"#RRGGBB"`` string, no warning."""
 
-    def test_default_emits_deprecation_warning(self):
-        with pytest.warns(DeprecationWarning, match="color_format"):
-            to_threejs({"color_hex": "#bfbfc4"})
-
-    def test_default_preserves_int_behavior(self):
-        with pytest.warns(DeprecationWarning):
+    def test_default_emits_hex_string(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
             result = to_threejs({"color_hex": "#bfbfc4"})
-        assert result["color"] == 0xBFBFC4
-        assert isinstance(result["color"], int)
+        assert result["color"] == "#bfbfc4"
+        assert isinstance(result["color"], str)
 
-    def test_no_warning_when_color_hex_absent(self):
-        # color_format only governs the color emit; no color_hex → no warning.
+    def test_no_warning_for_any_call(self):
+        # The 0.6.x DeprecationWarning is gone in 0.7.0.
         with warnings.catch_warnings():
             warnings.simplefilter("error", DeprecationWarning)
+            to_threejs({"color_hex": "#FF0000"})
             to_threejs({"metalness": 1.0, "roughness": 0.3})
-
-    def test_no_warning_when_color_hex_is_none(self):
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", DeprecationWarning)
             to_threejs({"color_hex": None})
 
 
@@ -92,10 +78,11 @@ class TestColorFormatInvalid:
         with pytest.raises(ValueError, match="color_format"):
             to_threejs({"color_hex": "#bfbfc4"}, color_format="rgb")  # type: ignore[arg-type]
 
-    def test_invalid_format_only_raises_when_color_hex_present(self):
-        # Without color_hex, color_format is unused — no validation needed.
-        result = to_threejs({}, color_format="rgb")  # type: ignore[arg-type]
-        assert "color" not in result
+    def test_invalid_format_raises_eagerly_even_without_color(self):
+        # 0.7.0: validation fires up front regardless of whether scalars
+        # actually contain a color key. Fail fast for typos.
+        with pytest.raises(ValueError, match="color_format"):
+            to_threejs({}, color_format="rgb")  # type: ignore[arg-type]
 
 
 class TestColorFormatKwargOnly:
