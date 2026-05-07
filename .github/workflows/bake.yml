@@ -8,7 +8,7 @@
 # one matrix sibling per cell.
 #
 # Reproduce locally:
-#   uv run --with . mat-vis-baker matrix list v2026.04
+#   uv run --with '.[baker]' mat-vis-baker matrix list v2026.04
 #   dagger call bake --source=ambientcg --tier=1k --release-tag=v2026.04.3 ...
 # Or in one shot:
 #   dagger call bake-matrix --line=v2026.04 --release-tag=v2026.04.3 ...
@@ -132,7 +132,14 @@ jobs:
           extra=()
           if [ -n "${FILTER_SOURCE:-}" ]; then extra+=(--filter-source "$FILTER_SOURCE"); fi
           if [ -n "${FILTER_TIER:-}" ]; then extra+=(--filter-tier "$FILTER_TIER"); fi
-          payload=$(uv run --with . mat-vis-baker matrix list "$LINE" "${extra[@]}")
+          # The `matrix` subcommand only touches release_matrix + sources
+          # + common, but common.py imports `requests` at module top for
+          # retry_request — so the CLI entrypoint can't import without the
+          # baker extras installed. Use '.[baker]' to pull requests +
+          # pyarrow into the lightweight `setup-uv` env. The bake step
+          # itself runs inside `_baker_container` (which does `uv sync
+          # --all-extras`); only this plan job invokes the CLI directly.
+          payload=$(uv run --with '.[baker]' mat-vis-baker matrix list "$LINE" "${extra[@]}")
           echo "matrix payload: $payload"
           cells=$(printf '%s' "$payload" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["cells"]))')
           if [ "$cells" = "[]" ]; then
