@@ -720,23 +720,35 @@ class MatVisClient:
         CATEGORIES = frozenset(result)
         return result
 
-    def materials(self, source: str, tier: str) -> list[str]:
-        """List material IDs available for a (source, tier).
+    def materials(self, source: str, tier: str | None = None) -> list[str]:
+        """List material IDs for a source, optionally filtered by tier.
 
         v0.6.0+ (#186 / ADR-0012): derived from the v3 catalog —
         entries whose ``available_tiers`` list contains ``tier``.
+
+        ``tier=None`` (mat-vis#339): returns all materials with ≥1 tier;
+        hides the ``"scalar"`` sentinel from scalar-only sources.
         """
         sources = self.manifest.get("sources", {})
         src_entry = _lookup(sources, source, kind="source")
+
+        idx = self._load_index_raw(source)
+        out: list[str] = []
+
+        if tier is None:
+            for entry in idx:
+                if not isinstance(entry, dict):
+                    continue
+                if (entry.get("available_tiers") or []) and entry.get("id"):
+                    out.append(entry["id"])
+            return sorted(out)
+
         _lookup(
             src_entry.get("tiers") or {},
             tier,
             kind="tier",
             context=f"source {source!r}",
         )
-
-        idx = self._load_index_raw(source)
-        out: list[str] = []
         for entry in idx:
             if not isinstance(entry, dict):
                 continue
