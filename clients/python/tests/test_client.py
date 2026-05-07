@@ -419,6 +419,58 @@ class TestClientCatalogQueries:
         assert "Metal032" in mats
         assert "Rock064" in mats
 
+    # mat-vis#339: tier becomes optional. tier=None returns all materials
+    # with at least one available tier (deduped across tiers).
+
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
+    def test_materials_no_tier_returns_all_with_any_tier(self, mock_get, mock_client):
+        """tier=None: every material with at least one advertised tier
+        is returned, regardless of which tier."""
+        mats = mock_client.materials("ambientcg")
+        # Rock064 (["1k","2k"]), Metal032 (["1k"]), Wood045 (["1k","2k","4k"])
+        # → all three present.
+        assert sorted(mats) == ["Metal032", "Rock064", "Wood045"]
+
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
+    def test_materials_no_tier_dedupes_across_tiers(self, mock_get, mock_client):
+        """A material baked at multiple tiers appears once in the
+        tier=None response."""
+        mats = mock_client.materials("ambientcg")
+        # No duplicates even though Rock064 is available_tiers=["1k","2k"]
+        assert len(mats) == len(set(mats))
+
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
+    def test_materials_explicit_tier_still_filters(self, mock_get, mock_client):
+        """Explicit tier still wins (backwards-compat). All 3 mock
+        materials advertise 1k; explicit 1k returns all three same as
+        no-arg path."""
+        mats_1k = mock_client.materials("ambientcg", "1k")
+        assert sorted(mats_1k) == ["Metal032", "Rock064", "Wood045"]
+        # Same shape as tier=None for this single-tier mock manifest.
+        assert mats_1k == mock_client.materials("ambientcg")
+
+    @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
+    def test_materials_no_tier_excludes_inert_entries(self, mock_get, mock_client):
+        """Materials with available_tiers=[] (inert pre-#331 physicallybased
+        records) must not surface in the tier=None response — they're not
+        actually fetchable anywhere."""
+        # Synthesize an inert entry (mat_vis is set so _mv_entry shape;
+        # but available_tiers=[] makes it a pre-#331 physicallybased
+        # ghost record).
+        inert = {
+            "id": "ghost",
+            "source": "ambientcg",
+            "mat_vis": {"name": "Ghost"},
+            "available_tiers": [],
+            "maps": [],
+        }
+        with patch(
+            "mat_vis_client.client._get_json",
+            return_value=MOCK_INDEX_AMBIENTCG + [inert],
+        ):
+            mats = mock_client.materials("ambientcg")
+        assert "ghost" not in mats
+
     @patch("mat_vis_client.client._get_json", return_value=MOCK_INDEX_AMBIENTCG)
     def test_channels(self, mock_get, mock_client):
         channels = mock_client.channels("ambientcg", "Rock064", "1k")

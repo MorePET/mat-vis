@@ -915,25 +915,48 @@ class MatVisClient:
         CATEGORIES = frozenset(result)
         return result
 
-    def materials(self, source: str, tier: str) -> list[str]:
-        """List material IDs available for a (source, tier).
+    def materials(self, source: str, tier: str | None = None) -> list[str]:
+        """List material IDs for a source, optionally filtered by tier.
 
         v0.6.0+ (#186 / ADR-0012): derived from the v3 catalog —
         entries whose ``available_tiers`` list includes ``tier``.
+
+        ``tier`` omitted (``None``, mat-vis#339): returns ALL materials
+        in the source that advertise at least one tier — deduped across
+        tiers. Hides the ``"scalar"`` sentinel from consumers of
+        scalar-only sources like physicallybased; ``materials("physicallybased")``
+        just works without the user having to type
+        ``materials("physicallybased", "scalar")``. Bernhard's #281
+        instinct (``tier=None``) is the friendlier path for both
+        scalar-only and "I just want the catalog" multi-tier cases.
+
+        Explicit ``tier`` still wins for callers that want a hard filter.
         """
-        # Validate (source, tier) is known to the manifest before trusting
-        # the catalog scan — keeps the friendly error messages.
         sources = self.manifest.get("sources", {})
         src_entry = _lookup(sources, source, kind="source")
+
+        idx = self._load_index_raw(source)
+        out: list[str] = []
+
+        if tier is None:
+            # No tier filter — return every material with ≥1 tier.
+            # Excludes pre-#331 physicallybased rows that had
+            # ``available_tiers=[]`` (those are inert anyway). Future
+            # multi-tier sources get the deduped union here.
+            for entry in idx:
+                if not isinstance(entry, dict):
+                    continue
+                if (entry.get("available_tiers") or []) and entry.get("id"):
+                    out.append(entry["id"])
+            return sorted(out)
+
+        # Explicit tier — validate against manifest before catalog scan.
         _lookup(
             src_entry.get("tiers") or {},
             tier,
             kind="tier",
             context=f"source {source!r}",
         )
-
-        idx = self._load_index_raw(source)
-        out: list[str] = []
         for entry in idx:
             if not isinstance(entry, dict):
                 continue
