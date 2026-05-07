@@ -13,6 +13,7 @@ from pathlib import Path
 
 import requests
 
+from mat_vis_baker.sources import _apply_filter_ids
 from mat_vis_baker.common import (
     AttributionBlock,
     DatesBlock,
@@ -396,16 +397,23 @@ def fetch(
     *,
     limit: int | None = None,
     offset: int = 0,
+    filter_ids: list[str] | None = None,
     session: requests.Session | None = None,
     mtlx_dir: Path | None = None,
 ) -> list[MaterialRecord]:
-    """Fetch polyhaven materials for a given tier. Downloads in parallel."""
+    """Fetch polyhaven materials for a given tier. Downloads in parallel.
+
+    ``filter_ids`` (#342): polyhaven slugs (e.g. ``rusty_metal_02``).
+    Applied before ``offset`` / ``limit``; non-empty list with no
+    matches raises ``ValueError``.
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     s = session or requests.Session()
     assets = _cached_assets(s)
 
     slugs = list(assets.keys())
+    slugs = _apply_filter_ids(slugs, filter_ids, key=None, source="polyhaven")
     if offset:
         slugs = slugs[offset:]
     if limit:
