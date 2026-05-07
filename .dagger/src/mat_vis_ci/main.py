@@ -432,14 +432,31 @@ class MatVisCi:
         sh_task = asyncio.ensure_future(self.test_client_shell(context, tag, live))
         rs_task = asyncio.ensure_future(self.test_client_rust(context, tag, live))
 
-        py_out, js_out, sh_out, rs_out = await asyncio.gather(py_task, js_task, sh_task, rs_task)
+        # #307: collect results with `return_exceptions=True` so a single
+        # client failure doesn't orphan the other 3 containers (default
+        # `gather()` raises on the first exception, drops the rest, and
+        # CI never sees whether the siblings had real signal). Assemble
+        # a structured report and re-raise after all 4 resolve.
+        results = await asyncio.gather(py_task, js_task, sh_task, rs_task, return_exceptions=True)
+        labels = ("python", "js", "shell", "rust")
 
-        return (
-            f"=== python ===\n{py_out}\n"
-            f"=== js ===\n{js_out}\n"
-            f"=== shell ===\n{sh_out}\n"
-            f"=== rust ===\n{rs_out}"
-        )
+        sections: list[str] = []
+        failures: list[tuple[str, BaseException]] = []
+        for label, result in zip(labels, results, strict=True):
+            if isinstance(result, BaseException):
+                failures.append((label, result))
+                sections.append(f"=== {label} (FAILED: {result!r}) ===")
+            else:
+                sections.append(f"=== {label} ===\n{result}")
+
+        report = "\n".join(sections)
+        if failures:
+            failed_labels = ", ".join(label for label, _ in failures)
+            raise RuntimeError(
+                f"test_clients: {len(failures)}/{len(labels)} suite(s) failed "
+                f"({failed_labels}). Full report:\n\n{report}"
+            )
+        return report
 
     # ── integration test ──────────────────────────────────────────
 
