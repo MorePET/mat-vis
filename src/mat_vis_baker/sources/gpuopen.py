@@ -40,6 +40,7 @@ from mat_vis_baker.common import (
     PhysicalBlock,
     UpstreamBlock,
     _filter_upstream,
+    apply_pbr_neutral_multiplier_conventions,
     check_zip_safety,
     normalize_category,
     normalize_channel,
@@ -345,11 +346,14 @@ def _fetch_one(
             upstream_id=mid,
             physical=PhysicalBlock(max_resolution_px=_max_resolution_px(tier)),
             # PBR scalars parsed from the .mtlx <standard_surface> shader
-            # at fetch time (mat-vis#290). Texture-bound inputs leave the
-            # corresponding PBRBlock field as None — adapters apply their
-            # own neutral defaults (e.g. baseColorFactor [1,1,1] when a
-            # colorMap is bound). On the failed-fetch path pbr=None and
-            # we fall back to the dataclass default (an empty PBRBlock).
+            # at fetch time (mat-vis#290). Texture-bound inputs whose
+            # matching texture shipped get the glTF-MR neutral multiplier
+            # written back into the PBRBlock at the call site (color=
+            # [1,1,1] when a colorMap is bound, metalness=1.0 when a
+            # metalnessMap is bound) — every consumer inherits the
+            # convention from the substrate, no adapter rework needed.
+            # On the failed-fetch path pbr=None and we fall back to the
+            # dataclass default (an empty PBRBlock).
             pbr=pbr if pbr is not None else PBRBlock(),
             attribution=AttributionBlock(
                 authors=_authors(mat),
@@ -413,6 +417,13 @@ def _fetch_one(
                 # mtlx, or any future parser failure) and continue without
                 # the parsed PBRBlock — texture_paths still flow through.
                 log.exception("%s: could not read mtlx for scalar parse", mid)
+
+        # glTF-MR neutral-multiplier convention (mat-vis#290 baker-side
+        # follow-up). Shared across all three texture sources via
+        # ``apply_pbr_neutral_multiplier_conventions`` — see common.py
+        # for the rationale and channel coverage.
+        if parsed_pbr is not None:
+            apply_pbr_neutral_multiplier_conventions(parsed_pbr, textures)
 
         texture_paths = dict(textures)
         if mtlx_path:

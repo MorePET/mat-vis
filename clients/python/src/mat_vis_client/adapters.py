@@ -69,34 +69,6 @@ def _transmission_at_default(t: float | None) -> bool:
     return t is None or math.isclose(t, _KHR_TRANSMISSION_DEFAULT, abs_tol=1e-9)
 
 
-def _apply_metallic_colormap_convention(scalars: dict, textures: dict | None) -> dict:
-    """If metallic AND has colorMap AND no authored color, neutralize.
-
-    For three.js / glTF-MR: BaseColorFactor x BaseColorTexture is the
-    spec contract. When ``metalness >= 0.9`` and a color texture is
-    bound but no scalar color was authored, set color=[1,1,1] so the
-    texture is the sole color contributor (else the renderer's default
-    grey double-tints the texture). mat-vis#290 review consensus: the
-    convention belongs in the adapter, not the baker, so ``to_mtlx()``
-    can preserve authored truth.
-
-    Returns a shallow-copied dict — never mutates the caller's input.
-
-    Note: only ``color_hex`` is set on the returned dict; ``color_rgb``
-    is intentionally NOT written because neither :func:`to_threejs` nor
-    :func:`to_gltf` reads it (both consume ``color_hex`` only). Setting
-    it would be misleading dead state.
-    """
-    metalness = scalars.get("metalness") or 0
-    has_color_map = "color" in (textures or {})
-    color_unauthored = scalars.get("color_rgb") is None and scalars.get("color_hex") is None
-    if metalness >= 0.9 and has_color_map and color_unauthored:
-        out = {**scalars}
-        out["color_hex"] = "#FFFFFF"
-        return out
-    return scalars
-
-
 def _color_hex_to_int(hex_str: str) -> int:
     """Convert '#RRGGBB' hex string to an integer (Three.js color format).
 
@@ -140,10 +112,12 @@ def to_threejs(
     Recommended ergonomic alternative: ``client.asset(src, mid, tier).to_threejs()``.
     """
     textures = textures or {}
-    # Apply the metallic+colorMap neutralization convention BEFORE we
-    # read scalar fields (mat-vis#290). The helper returns the same
-    # dict if no convention applies, or a shallow copy with color set.
-    scalars = _apply_metallic_colormap_convention(scalars, textures)
+    # Adapter is dumb — substrate values flow through verbatim. The
+    # glTF-MR neutral-multiplier convention (color=[1,1,1] when a
+    # colorMap is bound, metalness=1.0 when a metalnessMap is bound)
+    # is materialized in the baker so every consumer (py / js / rust /
+    # shell adapters AND search-side `pbr.metalness` readers) inherits
+    # it from the substrate. mat-vis#290 baker-side follow-up.
 
     result: dict = {"type": "MeshPhysicalMaterial"}
 
@@ -195,10 +169,11 @@ def to_gltf(
     Recommended ergonomic alternative: ``client.asset(src, mid, tier).to_gltf()``.
     """
     textures = textures or {}
-    # Apply the metallic+colorMap neutralization convention BEFORE we
-    # read scalar fields (mat-vis#290). The helper returns the same
-    # dict if no convention applies, or a shallow copy with color set.
-    scalars = _apply_metallic_colormap_convention(scalars, textures)
+    # Adapter is dumb — substrate values flow through verbatim. The
+    # glTF-MR neutral-multiplier convention (color=[1,1,1] when a
+    # colorMap is bound, metalness=1.0 when a metalnessMap is bound)
+    # is materialized in the baker so every consumer inherits it from
+    # the substrate. mat-vis#290 baker-side follow-up.
 
     pbr: dict = {}
     material: dict = {"pbrMetallicRoughness": pbr}

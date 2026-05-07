@@ -1,17 +1,23 @@
-"""Tests for the metallic+colorMap convention and KHR default suppression.
+"""Tests for the adapter-side glTF-format concerns (mat-vis#290 follow-up).
 
-Both behaviors land in ``adapters.py`` per the mat-vis#290 review:
+The metallic+colorMap / metalnessMap neutral-multiplier convention has
+moved to the baker (see ``tests/test_gpuopen_baker.py``) so every
+consumer — Python, JS, Rust, shell, plus the search-side
+``pbr.metalness`` readers — inherits it from the substrate without
+per-language reimplementation. The adapter is now dumb: substrate
+scalars flow through verbatim.
 
-  - When a material is metallic and a colorMap is bound but no scalar
-    color was authored, the adapter neutralizes baseColor to white so
-    the texture is the sole color contributor (else the renderer's
-    default mid-grey double-tints the texture).
+What STAYS adapter-side and is exercised here:
+
   - The KHR_materials_ior / KHR_materials_transmission extensions are
     omitted from glTF output when their values match the spec defaults
     (1.5 / 0.0). Emitting a no-op extension entry just bloats output.
-
-Convention belongs in the adapter layer (NOT the baker) so that the
-.mtlx round-trip preserves authored truth.
+    This is a glTF-format concern (extension emission policy), NOT a
+    substrate fact.
+  - Dumb-adapter contract: with raw scalars + textures the adapter
+    does NOT auto-inject neutralized colors anymore — callers feeding
+    raw scalars without baker treatment are responsible for the
+    multiplier convention themselves.
 """
 
 from __future__ import annotations
@@ -44,65 +50,7 @@ def _png_bytes() -> bytes:
     return buf.getvalue()
 
 
-WHITE_INT = 0xFFFFFF
-
-
-# ── metallic+colorMap → neutralize ─────────────────────────────
-
-
-def test_metallic_colormap_neutralizes_color_in_threejs():
-    result = to_threejs(
-        {"metalness": 1.0},
-        {"color": _png_bytes()},
-    )
-    assert result["color"] == WHITE_INT
-
-
-def test_metallic_colormap_neutralizes_color_in_gltf():
-    result = to_gltf(
-        {"metalness": 1.0},
-        {"color": _png_bytes()},
-    )
-    assert result["pbrMetallicRoughness"]["baseColorFactor"] == [1.0, 1.0, 1.0, 1.0]
-
-
-def test_authored_color_preserved_when_metallic():
-    """Don't override an authored color — only fill when None."""
-    result = to_threejs(
-        {"metalness": 1.0, "color_hex": "#E3E3E3"},
-        {"color": _png_bytes()},
-    )
-    # 0xE3E3E3 = 14935011 — not 0xFFFFFF.
-    assert result["color"] == 0xE3E3E3
-
-    result_gltf = to_gltf(
-        {"metalness": 1.0, "color_hex": "#E3E3E3"},
-        {"color": _png_bytes()},
-    )
-    bcf = result_gltf["pbrMetallicRoughness"]["baseColorFactor"]
-    assert bcf != [1.0, 1.0, 1.0, 1.0]
-
-
-def test_dielectric_never_neutralized():
-    """metalness=0 (or missing) → no convention applied."""
-    # No color at all → adapter doesn't synthesize one (existing behavior).
-    result = to_threejs({"metalness": 0.0}, {"color": _png_bytes()})
-    assert "color" not in result
-
-    result_none = to_threejs({}, {"color": _png_bytes()})
-    assert "color" not in result_none
-
-
-def test_no_colormap_never_neutralized():
-    """No colorMap bound → no convention applied (color stays unset)."""
-    result = to_threejs({"metalness": 1.0}, {})
-    assert "color" not in result
-
-    result_gltf = to_gltf({"metalness": 1.0}, {})
-    assert "baseColorFactor" not in result_gltf["pbrMetallicRoughness"]
-
-
-# ── KHR extension default suppression ──────────────────────────
+# ── KHR extension default suppression (adapter-side, format concern) ──
 
 
 def test_khr_ior_omitted_when_default():
@@ -126,29 +74,52 @@ def test_khr_transmission_emitted_when_authored():
     assert result["extensions"]["KHR_materials_transmission"] == {"transmissionFactor": 1.0}
 
 
-# ── Boundary cases: metallic threshold + authored color preservation ──
+# ── dumb-adapter contract: no auto-injection ──────────────────
 
 
-def test_metallic_threshold_at_exact_0_9_neutralizes():
-    """metalness == 0.9 is the threshold — must neutralize."""
-    result = to_threejs({"metalness": 0.9}, {"color": _png_bytes()})
-    assert result["color"] == WHITE_INT
+def test_to_threejs_does_not_auto_neutralize_color():
+    """Adapter does NOT inject color when only metalness + colorMap are passed.
 
-
-def test_metallic_threshold_just_below_0_9_does_not_neutralize():
-    """metalness == 0.89 — off-by-one: must NOT neutralize."""
-    result = to_threejs({"metalness": 0.89}, {"color": _png_bytes()})
+    The convention now lives in the baker. Callers who hand raw scalars
+    to the adapter (bypassing the substrate) get exactly what they passed
+    — no surprise color injection.
+    """
+    result = to_threejs(
+        {"metalness": 1.0},
+        {"color": _png_bytes()},
+    )
     assert "color" not in result
 
 
-def test_authored_color_rgb_preserved_when_metallic():
-    """color_rgb authored (without color_hex) → convention does NOT fire."""
-    result_gltf = to_gltf(
-        {"metalness": 1.0, "color_rgb": [0.89, 0.89, 0.89]},
+def test_to_gltf_does_not_auto_neutralize_color():
+    result = to_gltf(
+        {"metalness": 1.0},
         {"color": _png_bytes()},
     )
-    # Adapter only writes baseColorFactor when color_hex is set; with
-    # only color_rgb authored and the convention skipped, no factor is
-    # written — but critically the convention's white override does NOT
-    # fire (color_rgb is preserved as authored truth, not overwritten).
-    assert "baseColorFactor" not in result_gltf["pbrMetallicRoughness"]
+    assert "baseColorFactor" not in result["pbrMetallicRoughness"]
+
+
+def test_substrate_neutralized_color_flows_through():
+    """When the BAKER has already neutralized color_hex='#FFFFFF', the
+    adapter passes it through verbatim — no double-tint, no override.
+    """
+    result = to_threejs(
+        {"metalness": 1.0, "color_hex": "#FFFFFF"},
+        {"color": _png_bytes()},
+    )
+    assert result["color"] == 0xFFFFFF
+
+    result_gltf = to_gltf(
+        {"metalness": 1.0, "color_hex": "#FFFFFF"},
+        {"color": _png_bytes()},
+    )
+    assert result_gltf["pbrMetallicRoughness"]["baseColorFactor"] == [1.0, 1.0, 1.0, 1.0]
+
+
+def test_authored_color_preserved():
+    """Authored color flows through unchanged (it always did)."""
+    result = to_threejs(
+        {"metalness": 1.0, "color_hex": "#E3E3E3"},
+        {"color": _png_bytes()},
+    )
+    assert result["color"] == 0xE3E3E3
