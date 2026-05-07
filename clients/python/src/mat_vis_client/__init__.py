@@ -25,6 +25,7 @@ Zero dependencies. Pure Python stdlib (urllib).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from mat_vis_client.adapters import export_mtlx, to_gltf, to_threejs
@@ -92,10 +93,28 @@ def get_client() -> MatVisClient:
     consumers that want to share the manifest/index/texture cache with
     the module-level ``search()`` / ``prefetch()`` helpers should use
     this instead of ``MatVisClient()`` directly.
+
+    mat-vis#312 follow-up: the singleton wires
+    :func:`mat_vis_client.progress.tty_reporter` by default. The
+    reporter auto-detects whether stderr is a TTY:
+
+    - **REPL / Jupyter** (stderr is TTY): pretty one-line progress per
+      cache-miss download — bernhard's #312 repro now produces visible
+      feedback without consumers configuring loggers.
+    - **CI / scripts** (stderr not TTY): degrades to a silent
+      ``log_reporter`` at INFO. Default root-logger level is WARNING,
+      so log lines stay silent — no CI spam regression.
+
+    Set ``MAT_VIS_NO_PROGRESS=1`` to opt out (silent_reporter). Or
+    construct ``MatVisClient(on_event=...)`` directly to override
+    with your own reporter.
     """
     global _client
     if _client is None:
-        _client = MatVisClient()
+        from mat_vis_client.progress import silent_reporter, tty_reporter
+
+        reporter = silent_reporter() if os.environ.get("MAT_VIS_NO_PROGRESS") else tty_reporter()
+        _client = MatVisClient(on_event=reporter)
         seed_indexes(_client)
     return _client
 

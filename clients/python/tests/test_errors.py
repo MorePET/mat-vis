@@ -528,23 +528,19 @@ def test_ambiguous_material_error_lists_names():
 # ── mat-vis#332: MaterialNotStagedError should list available tiers ──
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="mat-vis#332: error message does not include 'Available tiers'",
-)
+# ── mat-vis#332: MaterialNotStagedError lists available tiers ──
+
+
 def test_material_not_staged_error_lists_available_tiers() -> None:
-    """``MaterialNotStagedError`` should include an ``Available tiers: [...]``
+    """``MaterialNotStagedError`` includes an ``Available tiers: [...]``
     line so the user knows which tiers ARE staged.
 
     bernhard mat-vis#311 sub-bullet "Unclear error messages":
+    expectation was ``... is not staged for tier '3k'.
+    Available tiers: ['1k', '2k', ...]``. Pre-#332 the message said
+    "Needs a re-bake" (actionable only for maintainers).
 
-        Expectation: ... is not staged for tier '3k'. Available tiers: ['1k', '2k', ...]
-
-    Today the message says ``Needs a re-bake`` (actionable only for
-    maintainers) without listing the staged tiers.
-
-    See https://github.com/MorePET/mat-vis/issues/332 for the
-    forward-verify acceptance.
+    Closes mat-vis#332.
     """
     from mat_vis_client import MaterialNotStagedError
 
@@ -553,10 +549,42 @@ def test_material_not_staged_error_lists_available_tiers() -> None:
         material_id="c12edfda-a5bd-4469-8147-4a6540a0a213",
         tier="3k",
         original_name="Aluminum Brushed",
+        available=["1k", "2k"],
     )
     msg = str(err)
-    assert "Available tiers:" in msg, (
-        f"MaterialNotStagedError message {msg!r} should list available tiers "
-        "(mat-vis#332). bernhard's #311 expectation: '... not staged for "
-        'tier 3k. Available tiers: ["1k", "2k", ...]\'.'
+    assert "Available tiers:" in msg
+    assert "1k" in msg and "2k" in msg
+    # Original "Needs a re-bake" wording is replaced when alternatives
+    # exist — bernhard's complaint was that line was non-actionable.
+    assert "Needs a re-bake" not in msg
+
+
+def test_material_not_staged_error_falls_back_to_rebake_when_no_alternatives() -> None:
+    """When the material isn't staged at any tier, the message keeps
+    its original 'Needs a re-bake' wording — that's still the only
+    actionable hint for the maintainer path."""
+    from mat_vis_client import MaterialNotStagedError
+
+    err = MaterialNotStagedError(
+        source="gpuopen",
+        material_id="some-uuid",
+        tier="1k",
+        available=[],
     )
+    msg = str(err)
+    assert "Needs a re-bake" in msg
+    assert "Available tiers:" not in msg
+
+
+def test_material_not_staged_error_carries_available_attribute() -> None:
+    """Programmatic consumers (pymat, build123d) can read ``.available``
+    to render alternate-tier suggestions in their UI."""
+    from mat_vis_client import MaterialNotStagedError
+
+    err = MaterialNotStagedError(
+        source="gpuopen",
+        material_id="x",
+        tier="3k",
+        available=["1k", "2k"],
+    )
+    assert err.available == ["1k", "2k"]
