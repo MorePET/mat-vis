@@ -155,8 +155,12 @@ from pathlib import Path
 out_dir = Path(sys.argv[1])
 
 # Catalog at work_dir root (v3 shape: list of entries with mat_vis block).
+# Skip release-manifest.json (object) and *-mtlx.json (object — material_id
+# -> XML map produced by mtlx_tier.pack_original_mtlx_json, mat-vis#292).
 catalog_files = [
-    p for p in out_dir.glob("*.json") if p.name != "release-manifest.json"
+    p
+    for p in out_dir.glob("*.json")
+    if p.name != "release-manifest.json" and not p.name.endswith("-mtlx.json")
 ]
 assert catalog_files, f"no per-source catalog JSON at {out_dir}"
 for cat in catalog_files:
