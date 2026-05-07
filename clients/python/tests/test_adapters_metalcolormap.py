@@ -106,6 +106,7 @@ def test_substrate_neutralized_color_flows_through():
     result = to_threejs(
         {"metalness": 1.0, "color_hex": "#FFFFFF"},
         {"color": _png_bytes()},
+        color_format="int",
     )
     assert result["color"] == 0xFFFFFF
 
@@ -121,5 +122,6 @@ def test_authored_color_preserved():
     result = to_threejs(
         {"metalness": 1.0, "color_hex": "#E3E3E3"},
         {"color": _png_bytes()},
+        color_format="int",
     )
     assert result["color"] == 0xE3E3E3
