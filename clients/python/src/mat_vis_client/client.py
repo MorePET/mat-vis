@@ -226,6 +226,7 @@ class MaterialNotStagedError(MatVisError):
         tier: str,
         *,
         original_name: str | None = None,
+        available: list[str] | None = None,
     ) -> None:
         self.source = source
         self.material_id = material_id
@@ -236,17 +237,29 @@ class MaterialNotStagedError(MatVisError):
         # when they passed a human name we surface both so a batch log
         # tells you *which* item in the run broke without grepping.
         self.original_name = original_name
+        # mat-vis#332: surface the tiers the material IS staged at so
+        # users can pick a working alternative without grep'ing the
+        # catalog. Replaces "Needs a re-bake" (actionable only for
+        # maintainers) with concrete options.
+        self.available = list(available) if available else []
         if original_name is not None and original_name != material_id:
             msg = (
                 f"material {original_name!r} (resolved id {material_id!r}) "
                 f"exists in {source!r} index but is not staged for "
-                f"tier {tier!r}. Needs a re-bake."
+                f"tier {tier!r}."
             )
         else:
             msg = (
                 f"material {material_id!r} exists in {source!r} index "
-                f"but is not staged for tier {tier!r}. Needs a re-bake."
+                f"but is not staged for tier {tier!r}."
             )
+        if self.available:
+            msg += f" Available tiers: {self.available}."
+        else:
+            # No alternatives available — this material isn't staged
+            # at any tier. Surface the original "needs a re-bake"
+            # actionable so the message stays useful for that case.
+            msg += " Needs a re-bake."
         super().__init__(msg)
 
 
@@ -1496,8 +1509,14 @@ class MatVisClient:
             if _is_staged(by_id):
                 return material_id
             # Direct-UUID path: original_name stays None so the legacy
-            # single-id message is preserved (#280).
-            raise MaterialNotStagedError(source=source, material_id=material_id, tier=tier)
+            # single-id message is preserved (#280). mat-vis#332:
+            # surface the tiers this material IS staged at.
+            raise MaterialNotStagedError(
+                source=source,
+                material_id=material_id,
+                tier=tier,
+                available=list(by_id.get("available_tiers") or []),
+            )
 
         if len(by_name) > 1:
             # #286: surface human names (or fall back to id) so the
@@ -1514,11 +1533,13 @@ class MatVisClient:
                 return resolved
             # #280: the user passed a name; carry it through so the
             # error message names *which* material in their batch broke.
+            # mat-vis#332: surface the tiers this material IS staged at.
             raise MaterialNotStagedError(
                 source=source,
                 material_id=resolved,
                 tier=tier,
                 original_name=material_id,
+                available=list(by_name[0].get("available_tiers") or []),
             )
 
         # Build the "available materials at this tier" hint from the

@@ -177,25 +177,29 @@ class MaterialNotStagedError(MatVisError):
         tier: str,
         *,
         original_name: str | None = None,
+        available: list[str] | None = None,
     ) -> None:
         self.source = source
         self.material_id = material_id
         self.tier = tier
-        # ``original_name`` carries what the caller typed *before* name→id
-        # resolution (#280). When present and different from material_id
-        # we surface both so batch logs name which item broke.
         self.original_name = original_name
+        # mat-vis#332: signature parity with packaged client.
+        self.available = list(available) if available else []
         if original_name is not None and original_name != material_id:
             msg = (
                 f"material {original_name!r} (resolved id {material_id!r}) "
                 f"exists in {source!r} index but is not staged for "
-                f"tier {tier!r}. Needs a re-bake."
+                f"tier {tier!r}."
             )
         else:
             msg = (
                 f"material {material_id!r} exists in {source!r} index "
-                f"but is not staged for tier {tier!r}. Needs a re-bake."
+                f"but is not staged for tier {tier!r}."
             )
+        if self.available:
+            msg += f" Available tiers: {self.available}."
+        else:
+            msg += " Needs a re-bake."
         super().__init__(msg)
 
 
