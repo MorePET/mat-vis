@@ -95,10 +95,30 @@ on:  # yamllint disable-line rule:truthy
         required: false
         default: false
         type: boolean
+      previous-prod-tag:
+        description: >-
+          Previous CalVer prod tag for the #345 tier-coverage parity check.
+          Empty = first-ever prod release (preflight free-passes parity).
+          Only consulted when allow-prod=true.
+        required: false
+        default: ''
+        type: string
+      deprecate-cells:
+        description: >-
+          JSON list of [source, tier] pairs to mark as legitimately deprecated
+          (allowed to be missing from tst per the #345 tier-coverage gate).
+          Each cell MUST have an open GH issue with the
+          `tier-deprecation-approved` label — verified by a workflow step BEFORE
+          the bake matrix runs. Only consulted when allow-prod=true.
+        required: false
+        default: '[]'
+        type: string
 
+# issues: write covers both notify-on-failure composite + #345
+# prod-preflight (gh issue list — write subsumes read).
 permissions:
   contents: read
-  issues: write          # needed by notify-on-failure composite action
+  issues: write
 
 # #262 / #278: disable Dagger's dagger.cloud OTel export at every layer.
 # OTEL_SDK_DISABLED reaches the dagger CLI but the Go engine kept ID-generating
@@ -122,8 +142,76 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # mat-vis#345: prod-cut pre-flight. Three composable gates,
+  # short-circuited via `if: inputs.allow-prod == true` so dispatches
+  # against gerchowl/mat-vis-tst skip it entirely (cost-free).
+  #
+  # Step 1 — verify each declared deprecate-cell has a maintainer-
+  # approved GH issue with the `tier-deprecation-approved` label.
+  # Label permission is gated on the repo's triage role; agent /
+  # contributor accounts cannot apply it. Bypassable only by a
+  # human maintainer, by design.
+  #
+  # Step 2 — Dagger function checks tst-prior + tier-coverage parity
+  # vs previous prod release. Trusts the deprecation list AFTER
+  # step 1 has verified it.
+  preflight:
+    name: prod-cut preflight (#345)
+    if: inputs.allow-prod == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify deprecation approvals (gh issue label)
+        env:
+          DEPRECATE_CELLS: ${{ inputs.deprecate-cells }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_deprecation_issues.py "${DEPRECATE_CELLS:-[]}"
+
+      - name: tst-prior + tier-coverage gates
+        uses: ./.github/actions/dagger-call
+        with:
+          args: >-
+            validate-prod-preflight
+            --context=.
+            --release-tag=${{ inputs.release-tag }}
+            --prod-repo-id=${{ inputs.repo-id }}
+            --tst-repo-id=gerchowl/mat-vis-tst
+            --previous-prod-tag=${{ inputs.previous-prod-tag }}
+            --deprecate-cells=${{ inputs.deprecate-cells }}
+
+      - name: Notify on failure
+        if: failure()
+        uses: ./.github/actions/notify-on-failure
+        with:
+          label-prefix: "[prod-preflight-failed]"
+          workflow-name: "bake (prod-preflight)"
+          target: "${{ inputs.release-tag }} → ${{ inputs.repo-id }}"
+          context: >-
+            mat-vis#345 prod-cut preflight tripped before any prod write.
+            Either (a) tst doesn't have ${{ inputs.release-tag }} — run
+            a tst bake first, or (b) tst's tier coverage is missing cells
+            previous prod had — bake the missing tier(s) on tst OR open
+            a GH issue with the 'tier-deprecation-approved' label per
+            missing cell and re-dispatch with `deprecate-cells` listing
+            them.
+
   plan:
     name: plan (read release matrix)
+    # mat-vis#345: when allow-prod=true, preflight runs and must succeed
+    # before plan kicks off the bake matrix. When allow-prod=false,
+    # preflight is skipped and plan runs unconditionally — `needs` with
+    # `always() && (success OR skipped)` is the GH Actions idiom for
+    # "depend on the prior job's terminal state, not its existence."
+    needs: preflight
+    if: |
+      always() &&
+      (needs.preflight.result == 'success' || needs.preflight.result == 'skipped')
     runs-on: ubuntu-latest
     outputs:
       cells: ${{ steps.matrix.outputs.cells }}
