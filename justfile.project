@@ -100,7 +100,7 @@ test-all *args:
 # Run only fast tests (no network). Default for pre-push hook.
 [group('test')]
 test-fast *args:
-    UV_NO_CACHE=1 uv run --reinstall-package mat-vis-client \
+    UV_NO_CACHE=1 uv run --extra baker --extra dev --reinstall-package mat-vis-client \
         --with clients/python pytest tests/ {{ args }}
     UV_NO_CACHE=1 uv run --reinstall-package mat-vis-client \
         --with clients/python --with pytest pytest clients/python {{ args }}
