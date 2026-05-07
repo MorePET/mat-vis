@@ -279,7 +279,10 @@ live_tests() {
 
     local mats first
     mats=$("$CLIENT" materials ambientcg 1k)
-    first=$(echo "$mats" | head -1)
+    # #297: avoid `echo "$mats" | head -1` — under `set -o pipefail`, when
+    # $mats exceeds the kernel pipe buffer (64 KiB on Linux) `head` exits
+    # after one line, the producer SIGPIPEs, and the script aborts 141.
+    IFS= read -r first <<< "$mats" || true
     [ -n "$first" ] || { echo "  FAIL materials list empty"; FAIL=$((FAIL + 1)); return; }
     echo "  PASS materials list non-empty (first=$first)"
     PASS=$((PASS + 1))
@@ -325,7 +328,10 @@ live_tests() {
                 FAIL=$((FAIL + 1)); fails_248=$((fails_248 + 1))
                 continue
             fi
-            first=$(echo "$mats" | head -1)
+            # #297: see comment at the structural-tests call site —
+            # `echo "$mats" | head -1` SIGPIPEs under pipefail when the
+            # producer exceeds the pipe buffer.
+            IFS= read -r first <<< "$mats" || true
             if [ -z "$first" ]; then
                 # Documented expected: some sources publish a tier but
                 # carry no records with that tier in their catalog.
@@ -398,7 +404,8 @@ cmd_e2e() {
         FAIL=$((FAIL + 1))
         return
     fi
-    first=$(echo "$mats" | head -1)
+    # #297: same pipefail+SIGPIPE hazard as the structural call site.
+    IFS= read -r first <<< "$mats" || true
     if [ -z "$first" ]; then
         echo "  FAIL polyhaven materials list empty (did the Python E2E suite bake the tag?)"
         FAIL=$((FAIL + 1))
