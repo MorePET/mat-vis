@@ -118,6 +118,38 @@ class TestDaggerFunctionNames:
         assert "test_e2e" in function_python_names
         assert _snake_to_kebab("test_e2e") == "test-e-2-e"
 
+    def test_validate_release_is_exposed_as_kebab(self, function_python_names: list[str]) -> None:
+        """mat-vis#273: workflows invoke `dagger call validate-release`.
+
+        Regular boundary (no digit), but pin it explicitly so a future
+        rename can't silently break bake.yml + release-validate.yml.
+        """
+        assert "validate_release" in function_python_names, (
+            "validate_release @function disappeared from .dagger/src/mat_vis_ci/main.py — "
+            "if it was renamed, update bake.yml's post-bake validate step + "
+            "release-validate.yml's validate step (mat-vis#273)"
+        )
+        assert _snake_to_kebab("validate_release") == "validate-release"
+
+    def test_workflow_release_validate_yml_uses_correct_kebab_name(self) -> None:
+        rv_yml = (
+            Path(__file__).resolve().parent.parent
+            / ".github"
+            / "workflows"
+            / "release-validate.yml"
+        )
+        text = rv_yml.read_text()
+        assert "validate-release" in text, (
+            "release-validate.yml must invoke `validate-release` Dagger function (mat-vis#273)"
+        )
+
+    def test_workflow_bake_yml_uses_correct_kebab_name_for_validate(self) -> None:
+        bake_yml = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "bake.yml"
+        text = bake_yml.read_text()
+        assert "validate-release" in text, (
+            "bake.yml's post-bake validate step must invoke `validate-release` (mat-vis#273)"
+        )
+
     def test_workflow_derive_yml_uses_correct_kebab_name(self) -> None:
         """The ternary in derive.yml must match the kebab name above."""
         derive_yml = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "derive.yml"
