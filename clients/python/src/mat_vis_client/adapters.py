@@ -53,6 +53,7 @@ def _to_data_uri(png_bytes: bytes) -> str:
 # adapter omits it. mat-vis#290.
 _KHR_IOR_DEFAULT = 1.5
 _KHR_TRANSMISSION_DEFAULT = 0.0
+_KHR_CLEARCOAT_DEFAULT = 0.0
 
 
 def _ior_at_default(ior: float | None) -> bool:
@@ -68,6 +69,11 @@ def _ior_at_default(ior: float | None) -> bool:
 def _transmission_at_default(t: float | None) -> bool:
     """True if ``t`` is None or matches the KHR spec default (0.0)."""
     return t is None or math.isclose(t, _KHR_TRANSMISSION_DEFAULT, abs_tol=1e-9)
+
+
+def _clearcoat_at_default(c: float | None) -> bool:
+    """True if ``c`` is None or matches the KHR_materials_clearcoat default (0.0)."""
+    return c is None or math.isclose(c, _KHR_CLEARCOAT_DEFAULT, abs_tol=1e-9)
 
 
 def _color_hex_to_int(hex_str: str) -> int:
@@ -172,6 +178,10 @@ def to_threejs(
         result["ior"] = scalars["ior"]
     if "transmission" in scalars and scalars["transmission"] is not None:
         result["transmission"] = scalars["transmission"]
+    if scalars.get("emissive") is not None:
+        result["emissive"] = list(scalars["emissive"])
+    if scalars.get("clearcoat") is not None:
+        result["clearcoat"] = scalars["clearcoat"]
 
     # Textures as data URIs
     for channel, prop in _THREEJS_TEX_MAP.items():
@@ -239,6 +249,21 @@ def to_gltf(
     if not _transmission_at_default(transmission):
         material.setdefault("extensions", {})["KHR_materials_transmission"] = {
             "transmissionFactor": transmission
+        }
+
+    # Emissive — core glTF 2.0 material field (NOT under an extension).
+    # Spec default is [0, 0, 0]; we emit on presence and let the no-op
+    # case (all zeros) through since callers may want explicit black.
+    emissive = scalars.get("emissive")
+    if emissive is not None:
+        material["emissiveFactor"] = list(emissive)
+
+    # Clearcoat extension — omit when zero/None (spec default), mirrors
+    # the KHR_materials_ior / _transmission suppression pattern.
+    clearcoat = scalars.get("clearcoat")
+    if not _clearcoat_at_default(clearcoat):
+        material.setdefault("extensions", {})["KHR_materials_clearcoat"] = {
+            "clearcoatFactor": clearcoat
         }
 
     # Textures
@@ -380,6 +405,13 @@ def _build_mtlx_tree(
         ET.SubElement(shader, "input", name="metallic", type="float", value=str(metalness))
     if "ior" in scalars and scalars["ior"] is not None:
         ET.SubElement(shader, "input", name="ior", type="float", value=str(scalars["ior"]))
+
+    # Emissive RGB on the shader scalar path. Texture-bound emission is
+    # already routed through the nodegraph above (channel "emission").
+    emissive = scalars.get("emissive")
+    if emissive is not None and "emission" not in tex_filenames:
+        rgb = ",".join(f"{c:g}" for c in tuple(emissive)[:3])
+        ET.SubElement(shader, "input", name="emissiveColor", type="color3", value=rgb)
 
     # Connect texture outputs to shader
     for usd_input, (out_name, mtlx_type) in output_refs.items():
