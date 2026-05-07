@@ -1,61 +1,60 @@
 ---
 # Bake workflow — atomic HF push per (source, tier) per ADR-0007.
 #
-# Invokes the Dagger `bake` function (#136) which wraps
-# mat-vis-baker hf-bake in a python:3.12-slim container. Container
-# bootstraps inside Dagger — no separate install steps here.
-# Reproduce locally with: dagger call bake --source=... --tier=1k ...
+# As of mat-vis#306: cells come from `mat_vis_baker.release_matrix`
+# (the canonical source-of-truth for what a release line contains).
+# This workflow no longer expands `sources=all` at dispatch time —
+# instead it asks the matrix what cells the line declares, then runs
+# one matrix sibling per cell.
 #
-# #233: matrix workflow_dispatch. A single dispatch can target N
-# sources (`-f sources=ambientcg,polyhaven,gpuopen` or `-f sources=all`)
-# and they run sequentially under a job-level concurrency group, so the
-# repo-budget concurrency from #225/#227 no longer drops middle
-# dispatches when N>2 are queued in quick succession.
+# Reproduce locally:
+#   uv run --with . mat-vis-baker matrix list v2026.04
+#   dagger call bake --source=ambientcg --tier=1k --release-tag=v2026.04.3 ...
+# Or in one shot:
+#   dagger call bake-matrix --line=v2026.04 --release-tag=v2026.04.3 ...
+#
+# Each cell still runs as its own matrix sibling so the GH Actions UI
+# preserves per-cell logs / status / re-run granularity.
 
 name: Bake
 
 on:  # yamllint disable-line rule:truthy
   workflow_dispatch:
     inputs:
-      sources:
+      line:
         description: >-
-          Comma-separated sources, or "all". "all" expands to
-          ambientcg,polyhaven,gpuopen for textured tiers, and adds
-          physicallybased only when tier=scalar.
-        required: false
-        default: 'all'
+          Release line (CalVer prefix, e.g. "v2026.04"). Cells come
+          from mat_vis_baker.release_matrix.get_release(line). Edit
+          src/mat_vis_baker/release_matrix.py to change cell membership.
+        required: true
+        default: 'v2026.04'
         type: string
-      source:
+      release-tag:
+        description: 'Calver patch tag (e.g. v2026.04.3) — must share the line prefix'
+        required: true
+        default: 'v2026.04.3'
+        type: string
+      filter-source:
         description: >-
-          DEPRECATED (#233) — single-source legacy input; use `sources`.
-          When `sources` is left at its default and `source` is set,
-          `source` is treated as a 1-element matrix. Accepts the same
-          values as the old choice list: ambientcg|polyhaven|gpuopen|
-          physicallybased. Remove after one milestone.
+          Restrict to one source (e.g. "gpuopen"). Empty = all cells in the line.
+          Spot-test selector for partial re-bakes.
         required: false
         default: ''
         type: string
-      tier:
-        description: 'Resolution tier (scalar for physicallybased)'
-        required: true
-        default: '1k'
-        type: choice
-        options:
-          - 128
-          - 256
-          - 512
-          - 1k
-          - 2k
-          - 4k
-          - 8k
-          - scalar
+      filter-tier:
+        description: >-
+          Restrict to one tier (e.g. "1k", "scalar"). Empty = all tiers.
+          Spot-test selector for partial re-bakes.
+        required: false
+        default: ''
+        type: string
       limit:
-        description: 'Max materials (0 = all)'
+        description: 'Per-cell max materials (0 = all)'
         required: false
         default: '0'
         type: string
       offset:
-        description: 'Skip first N materials'
+        description: 'Per-cell skip first N materials'
         required: false
         default: '0'
         type: string
@@ -69,13 +68,8 @@ on:  # yamllint disable-line rule:truthy
         required: false
         default: '734003200'
         type: string
-      release-tag:
-        description: 'Calver data release tag (e.g. v2026.04.1)'
-        required: true
-        default: 'v2026.04.1'
-        type: string
       dry-run:
-        description: 'Bake to local tar; skip the HF push'
+        description: 'Bake to local; skip the HF push'
         required: false
         default: false
         type: boolean
@@ -109,58 +103,48 @@ env:
   OTEL_METRICS_EXPORTER: "none"
 
 # #235 hotfix: workflow-level budget — serialise *every* dispatch
-# against a given HF repo. Previously this was at workflow level, then
-# moved to job level by #233 to support matrix fan-out. The job-level
-# group conflicted with matrix siblings (one-pending-per-group cancels
-# mid-matrix). Reverted here to workflow level; serialization within
-# one dispatch is now done by `matrix.max-parallel: 1` below.
+# against a given HF repo. matrix.max-parallel below serializes WITHIN
+# one dispatch; this serializes BETWEEN dispatches.
 concurrency:
   group: bake-${{ inputs.repo-id }}-budget
   cancel-in-progress: false
 
 jobs:
   plan:
-    name: plan (matrix expansion)
+    name: plan (read release matrix)
     runs-on: ubuntu-latest
     outputs:
-      sources: ${{ steps.expand.outputs.sources }}
+      cells: ${{ steps.matrix.outputs.cells }}
     steps:
-      - id: expand
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - id: matrix
         env:
-          SOURCES_INPUT: ${{ inputs.sources }}
-          SOURCE_LEGACY: ${{ inputs.source }}
-          TIER: ${{ inputs.tier }}
+          LINE: ${{ inputs.line }}
+          FILTER_SOURCE: ${{ inputs.filter-source }}
+          FILTER_TIER: ${{ inputs.filter-tier }}
+        # mat-vis#306: matrix expansion delegated to the canonical
+        # source-of-truth (`mat_vis_baker.release_matrix`). The CLI
+        # subcommand prints {"line": "...", "cells": [...]}; we keep
+        # only the cells array for `fromJson(needs.plan.outputs.cells)`.
         run: |
           set -euo pipefail
-          # #233: resolve effective sources list.
-          #   - `sources` wins when both are set.
-          #   - bare legacy `source` (with default `sources=all`) is
-          #     promoted to a 1-element matrix for back-compat.
-          #   - "all" expands to the textured trio; physicallybased is
-          #     scalar-only and joins the matrix only when tier=scalar.
-          sources="$SOURCES_INPUT"
-          if [ -n "$SOURCE_LEGACY" ] && [ "$sources" = "all" ]; then
-            sources="$SOURCE_LEGACY"
+          extra=()
+          if [ -n "${FILTER_SOURCE:-}" ]; then extra+=(--filter-source "$FILTER_SOURCE"); fi
+          if [ -n "${FILTER_TIER:-}" ]; then extra+=(--filter-tier "$FILTER_TIER"); fi
+          payload=$(uv run --with . mat-vis-baker matrix list "$LINE" "${extra[@]}")
+          echo "matrix payload: $payload"
+          cells=$(printf '%s' "$payload" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["cells"]))')
+          if [ "$cells" = "[]" ]; then
+            echo "::error::no cells matched line=$LINE filter-source=${FILTER_SOURCE:-} filter-tier=${FILTER_TIER:-}"
+            exit 1
           fi
-
-          python3 - "$sources" "$TIER" <<'PY' >>"$GITHUB_OUTPUT"
-          import json, sys
-          raw, tier = sys.argv[1], sys.argv[2]
-          if raw == "all":
-              expanded = ["ambientcg", "polyhaven", "gpuopen"]
-              if tier == "scalar":
-                  expanded.append("physicallybased")
-          else:
-              expanded = [s.strip() for s in raw.split(",") if s.strip()]
-          if not expanded:
-              raise SystemExit("error: empty sources list after expansion")
-          print(f"sources={json.dumps(expanded)}")
-          PY
-          echo "Plan: tier=$TIER sources=$(tail -n1 "$GITHUB_OUTPUT")"
+          echo "cells=$cells" >>"$GITHUB_OUTPUT"
+          echo "Plan: $cells"
 
   bake:
     needs: plan
-    name: hf-bake ${{ matrix.source }} ${{ inputs.tier }}
+    name: hf-bake ${{ matrix.cell.source }} ${{ matrix.cell.tier }}
     runs-on: ubuntu-latest
     # GH-hosted runners hard-cap at 360 min; 350 leaves headroom for
     # the post-step log upload and any slack in the scheduler.
@@ -169,14 +153,12 @@ jobs:
       fail-fast: false
       # #235 hotfix: serialise the matrix siblings WITHIN one dispatch
       # via matrix.max-parallel. Job-level concurrency-group serialization
-      # (added in #233) doesn't work for matrix siblings — GH's "one
-      # pending slot per group" rule cancels every sibling beyond the
-      # second within the same run, killing #214 phase-7 polyhaven on
-      # the first prod-derive matrix dispatch. matrix.max-parallel is
-      # the correct within-run primitive.
+      # doesn't work for matrix siblings — GH's "one pending slot per
+      # group" rule cancels every sibling beyond the second within the
+      # same run. matrix.max-parallel is the correct within-run primitive.
       max-parallel: 1
       matrix:
-        source: ${{ fromJson(needs.plan.outputs.sources) }}
+        cell: ${{ fromJson(needs.plan.outputs.cells) }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
@@ -191,18 +173,14 @@ jobs:
         run: python3 scripts/check-dagger-shell-safety.py
 
       - name: hf-bake
-        uses: dagger/dagger-for-github@v8.4.1
+        # #297: dagger-call composite wraps with retry-on-141 + flake telemetry.
+        uses: ./.github/actions/dagger-call
         with:
-          verb: call
-          module: .dagger
-          # Dagger fn sentinels: limit=0 (no cap), offset=0 (no skip),
-          # shard-index/total=-1 (unsharded). The baker CLI adopts the
-          # same sentinel convention so re-plumbing is a pure rename.
           args: >-
             bake
             --context=.
-            --source=${{ matrix.source }}
-            --tier=${{ inputs.tier }}
+            --source=${{ matrix.cell.source }}
+            --tier=${{ matrix.cell.tier }}
             --release-tag=${{ inputs.release-tag }}
             --repo-id=${{ inputs.repo-id }}
             --allow-prod=${{ inputs.allow-prod }}
@@ -222,8 +200,8 @@ jobs:
         if: inputs.dry-run != true
         run: |
           uv run python scripts/check_upstream_schema_drift.py \
-            --source "${{ matrix.source }}" \
-            --candidate "https://huggingface.co/datasets/${{ inputs.repo-id }}/resolve/${{ inputs.release-tag }}/${{ matrix.source }}.json"
+            --source "${{ matrix.cell.source }}" \
+            --candidate "https://huggingface.co/datasets/${{ inputs.repo-id }}/resolve/${{ inputs.release-tag }}/${{ matrix.cell.source }}.json"
 
       - name: Notify on failure
         if: failure()
@@ -231,7 +209,7 @@ jobs:
         with:
           label-prefix: "[bake-failed]"
           workflow-name: "bake"
-          target: "${{ matrix.source }}/${{ inputs.tier }} @ ${{ inputs.release-tag }}"
+          target: "${{ matrix.cell.source }}/${{ matrix.cell.tier }} @ ${{ inputs.release-tag }}"
           context: >-
             Likely causes: upstream API transient (rate-limit or 5xx),
             runner disk filled during fetch, or HF push auth/size error.
@@ -239,11 +217,9 @@ jobs:
             bake leaves the target revision unchanged — safe to retry.
 
   # #263 phase C: post-bake gate. Runs validate_release.py against the
-  # live HF substrate (no metrics parquet needed — uses
-  # baked_ids_from_release_manifest). Catches the v2026.04.0 class of
-  # regression by comparing the just-baked release-tag against the
-  # previous CalVer tag. Hard-fails the workflow on >5% drop or
-  # cross-tier parity skew >20%.
+  # live HF substrate. Catches the v2026.04.0 class of regression by
+  # comparing the just-baked release-tag against the previous CalVer
+  # tag. Hard-fails the workflow on >5% drop or cross-tier parity skew >20%.
   validate:
     name: validate-release ${{ inputs.release-tag }}
     needs: bake
