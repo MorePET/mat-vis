@@ -454,3 +454,103 @@ def test_find_tier_parity_violations_from_hf_detects_gap():
     assert v["tier"] == "2k"
     assert v["actual_count"] == 200
     assert v["leader_count"] == 1000
+
+
+# ── mat-vis#344: tier-missing-from-current is the worst regression class ──
+
+
+def test_regression_detects_tier_completely_missing_from_current(tmp_path):
+    """A tier that existed in the previous release but is gone from
+    the current one is the worst-case regression — every consumer of
+    that tier breaks immediately. Pre-#344 the metrics path skipped
+    these (only iterated rows where current existed)."""
+    p = tmp_path / "per-file-metrics.parquet"
+    _seed(
+        p,
+        # v2026.04.0 had gpuopen at 1k AND 512.
+        {
+            "release_tag": "v2026.04.0",
+            "source": "gpuopen",
+            "tier": "1k",
+            "materials_committed": 454,
+        },
+        {
+            "release_tag": "v2026.04.0",
+            "source": "gpuopen",
+            "tier": "512",
+            "materials_committed": 454,
+        },
+        # v2026.04.1 has only 1k (the matrix-only-declares-1k bug).
+        {
+            "release_tag": "v2026.04.1",
+            "source": "gpuopen",
+            "tier": "1k",
+            "materials_committed": 454,
+        },
+    )
+
+    regressions = find_regressions(p, current_tag="v2026.04.1", min_ratio=0.95)
+    # 1k is fine; 512 is the violation.
+    assert len(regressions) == 1
+    r = regressions[0]
+    assert r["source"] == "gpuopen"
+    assert r["tier"] == "512"
+    assert r["actual_count"] == 0
+    assert r["previous_count"] == 454
+    assert r["ratio"] == 0.0
+    assert r["kind"] == "tier_missing"
+
+
+def test_existing_count_drop_still_marked_as_count_drop(tmp_path):
+    """The existing v2026.04.0 reproduction (1k stays present but
+    drops count) keeps its semantics — kind=count_drop, not
+    tier_missing."""
+    p = tmp_path / "per-file-metrics.parquet"
+    _seed(
+        p,
+        {
+            "release_tag": "v2026.04.0",
+            "source": "gpuopen",
+            "tier": "1k",
+            "materials_committed": 2234,
+        },
+        {
+            "release_tag": "v2026.04.1",
+            "source": "gpuopen",
+            "tier": "1k",
+            "materials_committed": 10,
+        },
+    )
+    [r] = find_regressions(p, current_tag="v2026.04.1", min_ratio=0.95)
+    assert r["kind"] == "count_drop"
+
+
+def test_regression_from_hf_detects_tier_completely_missing(tmp_path):
+    """Same blind-spot fix on the --from-hf path. Mock baked_ids so
+    previous has gpuopen at {1k, 512} and current has only {1k}."""
+    from unittest.mock import patch
+
+    api = MagicMock()
+    current = {("gpuopen", "1k"): {f"m{i}" for i in range(454)}}
+    previous = {
+        ("gpuopen", "1k"): {f"m{i}" for i in range(454)},
+        ("gpuopen", "512"): {f"m{i}" for i in range(454)},
+    }
+    with patch(
+        "scripts.validate_release.baked_ids_from_release_manifest",
+        side_effect=lambda _api, _repo, tag: current if tag == "v2026.04.1" else previous,
+    ):
+        regressions = find_regressions_from_hf(
+            api,
+            repo_id="gerchowl/mat-vis",
+            current_tag="v2026.04.1",
+            previous_tag="v2026.04.0",
+            min_ratio=0.95,
+        )
+
+    assert len(regressions) == 1
+    r = regressions[0]
+    assert r["source"] == "gpuopen"
+    assert r["tier"] == "512"
+    assert r["actual_count"] == 0
+    assert r["kind"] == "tier_missing"

@@ -138,6 +138,13 @@ def find_regressions(
     Previous release = the newest ``release_tag`` strictly less than
     ``current_tag`` (lexicographic — fine for CalVer ``vYYYY.MM.N``).
     No previous row → no regression possible (first-ever release).
+
+    mat-vis#344: iterate the UNION of (source, tier) keys across both
+    current and previous, not just current's keys. A tier present in
+    previous but completely absent from current (``actual_count=0``)
+    is the worst regression class — every consumer of that tier
+    silently breaks. The pre-#344 code skipped these via
+    ``if current is None: continue``.
     """
     rows = load_aggregated_counts(metrics_path)
 
@@ -150,15 +157,16 @@ def find_regressions(
     for (source, tier), group in by_key.items():
         group.sort(key=lambda r: (r["release_tag"], r.get("timestamp", "")))
         current = next((r for r in group if r["release_tag"] == current_tag), None)
-        if current is None:
-            continue
         prior = [r for r in group if r["release_tag"] < current_tag]
         if not prior:
-            continue
+            continue  # first-ever release; nothing to regress against
         previous = prior[-1]
         if previous["actual_count"] <= 0:
-            continue
-        ratio = current["actual_count"] / previous["actual_count"]
+            continue  # previous was empty (free-pass per existing semantics)
+        # mat-vis#344: tier-missing-from-current → actual_count = 0,
+        # ratio = 0, which violates any min_ratio > 0.
+        curr_count = current["actual_count"] if current is not None else 0
+        ratio = curr_count / previous["actual_count"]
         if ratio < min_ratio:
             regressions.append(
                 {
@@ -166,9 +174,12 @@ def find_regressions(
                     "tier": tier,
                     "current_tag": current_tag,
                     "previous_tag": previous["release_tag"],
-                    "actual_count": current["actual_count"],
+                    "actual_count": curr_count,
                     "previous_count": previous["actual_count"],
                     "ratio": ratio,
+                    # mat-vis#344: distinguishes "tier shrunk" from
+                    # "tier vanished entirely" for operator triage.
+                    "kind": "tier_missing" if current is None else "count_drop",
                 }
             )
     return regressions
@@ -307,15 +318,21 @@ def find_regressions_from_hf(
     if not previous_baked:
         return []
 
+    # mat-vis#344: iterate the UNION of keys, not just current's. A
+    # tier present in previous but missing from current is the
+    # worst-case regression — every consumer of that tier silently
+    # breaks. Pre-#344 the loop iterated current_baked.items() and
+    # `prev_ids = previous_baked.get(...); if not prev_ids: continue`,
+    # so prev-only keys never entered the loop.
+    all_keys = set(current_baked.keys()) | set(previous_baked.keys())
     regressions: list[dict[str, Any]] = []
-    for (source, tier), curr_ids in current_baked.items():
-        prev_ids = previous_baked.get((source, tier))
-        if not prev_ids:
-            continue
+    for source, tier in sorted(all_keys):
+        prev_ids = previous_baked.get((source, tier)) or set()
+        curr_ids = current_baked.get((source, tier)) or set()
         prev_count = len(prev_ids)
-        curr_count = len(curr_ids)
         if prev_count <= 0:
-            continue
+            continue  # nothing to regress against (newly-added tier)
+        curr_count = len(curr_ids)
         ratio = curr_count / prev_count
         if ratio < min_ratio:
             regressions.append(
@@ -327,6 +344,13 @@ def find_regressions_from_hf(
                     "actual_count": curr_count,
                     "previous_count": prev_count,
                     "ratio": ratio,
+                    # mat-vis#344: tier-vanished is worth flagging
+                    # distinctly so the operator's triage starts in the
+                    # right place ("did upstream go away?" vs "did the
+                    # bake plan get pruned?").
+                    "kind": (
+                        "tier_missing" if (source, tier) not in current_baked else "count_drop"
+                    ),
                 }
             )
     return regressions
