@@ -17,6 +17,7 @@ rejected, and what would trigger revisiting.
 10. [0010 — Sharded derive pipeline via GH Actions matrix](0010-sharded-pipeline-via-gh-matrix.md) — partly supersedes 0009
 11. [0011 — mat_vis curated + upstream.raw mirror (hybrid index)](0011-mat-vis-curated-plus-upstream-mirror.md) — partly reshapes 0001's record surface
 12. [0012 — Per-file substrate on Hugging Face (drop the tar)](0012-per-file-substrate-drop-tar.md) — partly supersedes 0007, retires 0010's merge-shards path
+13. [0013 — Adapter canonical color input + colorspace discipline + scalar coverage](0013-adapter-color-input-and-scalar-coverage.md) — Proposed; resolves #298/#302/#303/#304/#305 under one design
 
 ## Template
 
