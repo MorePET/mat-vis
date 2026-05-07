@@ -163,10 +163,15 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # #295: content-drift gate needs git tag history for previous-tag resolution.
+          # Schema-drift gate doesn't (it auto-discovers via GH API).
+          fetch-depth: 0
 
-      # `uv` is needed by the schema-drift gate below; install once up-front
-      # so the gate doesn't fail with `uv: command not found` (latent since
-      # #170 — gate had never fired against a non-dry-run bake until #214).
+      # `uv` is needed by the schema + content drift gates below; install
+      # once up-front so the gates don't fail with `uv: command not found`
+      # (latent since #170 — schema gate had never fired against a non-dry-run
+      # bake until #214).
       - uses: astral-sh/setup-uv@v6
 
       - name: Dagger shell-safety lint (#61)
@@ -202,6 +207,41 @@ jobs:
           uv run python scripts/check_upstream_schema_drift.py \
             --source "${{ matrix.cell.source }}" \
             --candidate "https://huggingface.co/datasets/${{ inputs.repo-id }}/resolve/${{ inputs.release-tag }}/${{ matrix.cell.source }}.json"
+
+      # mat-vis#295: per-material upstream.raw equality vs the previous
+      # release on HF. Catches silent upstream content edits that
+      # schema-drift is structurally blind to (keys stay the same, values
+      # change). Free pass on first cut (no previous catalog).
+      - name: Resolve previous release tag (for content-drift gate)
+        id: prev_for_drift
+        if: inputs.dry-run != true
+        env:
+          CURRENT_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          prev=$(git tag --list 'v*' --sort=-v:refname \
+            | awk -v cur="$CURRENT_TAG" '$0 < cur { print; exit }')
+          echo "previous_tag=${prev}" >>"${GITHUB_OUTPUT}"
+          echo "previous tag: ${prev:-<none>}"
+
+      - name: Upstream content-drift gate (#295)
+        if: inputs.dry-run != true && steps.prev_for_drift.outputs.previous_tag != ''
+        env:
+          REPO_ID: ${{ inputs.repo-id }}
+          CURRENT_TAG: ${{ inputs.release-tag }}
+          PREVIOUS_TAG: ${{ steps.prev_for_drift.outputs.previous_tag }}
+          SRC: ${{ matrix.cell.source }}
+        run: |
+          set -euo pipefail
+          waiver_arg=()
+          if [ -f .github/content-drift-waivers.yaml ]; then
+            waiver_arg+=(--waivers .github/content-drift-waivers.yaml)
+          fi
+          uv run --with pyyaml python scripts/check_upstream_content_drift.py \
+            --source "${SRC}" \
+            --candidate "https://huggingface.co/datasets/${REPO_ID}/resolve/${CURRENT_TAG}/${SRC}.json" \
+            --previous  "https://huggingface.co/datasets/${REPO_ID}/resolve/${PREVIOUS_TAG}/${SRC}.json" \
+            "${waiver_arg[@]}"
 
       - name: Notify on failure
         if: failure()
