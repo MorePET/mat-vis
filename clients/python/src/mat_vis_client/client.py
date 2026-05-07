@@ -36,7 +36,12 @@ import urllib.request
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+from mat_vis_client.progress import ClientEvent
+
+if TYPE_CHECKING:
+    from mat_vis_client.progress import EventKind, OnEvent
 
 REPO = "MorePET/mat-vis"
 GITHUB_API = f"https://api.github.com/repos/{REPO}"  # update-check only
@@ -69,6 +74,25 @@ try:
 except PackageNotFoundError:
     __version__ = "0.0.0+dev"
 USER_AGENT = f"mat-vis-client/{__version__} (Python)"
+
+
+def _client_cache_segment(version: str) -> str:
+    """Cache subdirectory namespaced by client major.minor (mat-vis#355).
+
+    ``"0.7.1+local"`` → ``"v0.7"``. The ``v`` prefix matches the
+    CalVer tag convention and the on-disk shape consumers see when
+    they ``ls ~/.cache/mat-vis/``. Patch + local versions collapse to
+    the same segment so a 0.7.1 → 0.7.2 upgrade reuses the cache.
+    Major bump (0.7 → 0.8) starts a fresh segment; the old one
+    becomes orphan and triggers a ``cache_stale_detected`` event.
+    """
+    parts = version.split(".")
+    if len(parts) < 2:
+        return f"v{version}"
+    return f"v{parts[0]}.{parts[1]}"
+
+
+_CLIENT_CACHE_SEGMENT = _client_cache_segment(__version__)
 
 # Module-local logger. Library consumers configure their own handlers;
 # notices emitted via ``log.info(...)`` are silent by default (root
@@ -543,6 +567,7 @@ class MatVisClient:
         cache_dir: Path | None = None,
         tag: str | None = None,
         cache: bool = True,
+        on_event: "OnEvent | None" = None,
     ):
         self._cache_dir = cache_dir or DEFAULT_CACHE_DIR
         self._cache = cache
@@ -557,6 +582,13 @@ class MatVisClient:
         # scopes resolve under one root.
         self._alt_clients: dict[str, MatVisClient] = {}
         self._tag = tag
+        # mat-vis#312 + #355: optional observability callback. ``None``
+        # = silent default; pass a reporter from
+        # ``mat_vis_client.progress`` (or write your own) to receive
+        # download + cache lifecycle events. Stored as a guarded
+        # invocation method (`_emit`) so call sites read cleanly and
+        # consumer exceptions never break the fetch.
+        self._on_event: OnEvent | None = on_event
 
         if manifest_url:
             self._manifest_url = manifest_url
@@ -568,35 +600,135 @@ class MatVisClient:
             rev = tag or DEFAULT_TAG
             self._manifest_url = f"{HF_BASE}/{rev}/release-manifest.json"
 
+        # mat-vis#355: detect orphan cache layouts on first init and
+        # emit a single CacheStaleEvent. Cheap (one listdir + str
+        # check); no I/O for the user. Default reporter is silent so
+        # this only surfaces when the consumer wired tty_reporter() /
+        # log_reporter() / mcp_reporter().
+        self._emit_legacy_layout_warning_if_any()
+
+    def _emit(
+        self,
+        kind: "EventKind",
+        *,
+        source: str | None = None,
+        material: str | None = None,
+        channel: str | None = None,
+        tier: str | None = None,
+        url: str | None = None,
+        bytes_total: int | None = None,
+        bytes_done: int | None = None,
+        detail: dict | None = None,
+    ) -> None:
+        """Dispatch a :class:`ClientEvent` through ``self._on_event``.
+
+        No-op when ``on_event`` was not supplied. Consumer exceptions
+        are caught + dropped — observability MUST NOT break the fetch
+        path. mat-vis#312 + #355.
+        """
+        if self._on_event is None:
+            return
+        try:
+            self._on_event(
+                ClientEvent(
+                    kind=kind,
+                    source=source,
+                    material=material,
+                    channel=channel,
+                    tier=tier,
+                    url=url,
+                    bytes_total=bytes_total,
+                    bytes_done=bytes_done,
+                    tag=self._tag,
+                    detail=detail or {},
+                )
+            )
+        except Exception:  # noqa: BLE001 — observability MUST NOT break fetches
+            pass
+
+    def _emit_legacy_layout_warning_if_any(self) -> None:
+        """One-shot scan for orphan cache layouts at init.
+
+        mat-vis#355: clients that upgrade across the version-namespace
+        cutover (#312/#355 PR) leave a stale ``latest/`` or older
+        ``v0.X/`` directory under ``cache_dir``. Detect cheaply and
+        emit a single ``cache_stale_detected`` event so wired
+        reporters can surface the cleanup recommendation.
+        """
+        if not self._cache or self._on_event is None:
+            return
+        try:
+            if not self._cache_dir.is_dir():
+                return
+            current_segment = _CLIENT_CACHE_SEGMENT
+            orphans: list[str] = []
+            for entry in self._cache_dir.iterdir():
+                if not entry.is_dir():
+                    continue
+                name = entry.name
+                if name == current_segment:
+                    continue
+                # Treat anything that looks like a version segment OR
+                # the legacy "latest" / a tag dir at root as orphan.
+                if name == "latest" or name.startswith("v") or "." in name:
+                    orphans.append(name)
+            if not orphans:
+                return
+            total = 0
+            for n in orphans:
+                for path in (self._cache_dir / n).rglob("*"):
+                    if path.is_file():
+                        try:
+                            total += path.stat().st_size
+                        except OSError:
+                            pass
+            self._emit(
+                "cache_stale_detected",
+                detail={"layouts": sorted(orphans), "bytes": total},
+            )
+        except Exception:  # noqa: BLE001 — best-effort; never break init
+            pass
+
     @property
     def _cache_scope(self) -> Path:
-        """Tag-scoped cache subdirectory.
+        """Version-namespaced + tag-scoped cache subdirectory.
 
-        Keeps data for different release tags in separate subtrees so a
-        ``tag=v1`` cache never serves bytes for a ``tag=v2`` request.
-        When no explicit tag is pinned, the ``"latest"`` sentinel is used
-        — invalidation of that bucket is the caller's responsibility
-        (or, more typically, handled by the update-check TTL).
+        Layout (mat-vis#355): ``<cache_dir>/<client-version>/<tag>/...``.
+        The client-version segment ensures upgrades across major.minor
+        boundaries never read through a stale layout (the bug bernhard
+        hit twice; see #281, #283 retraction). The tag segment keeps
+        per-release data isolated so a tag=v1 cache never serves bytes
+        for a tag=v2 request.
+
+        Pre-#355 layout (``<cache_dir>/<tag-or-"latest">/...``)
+        becomes orphan on upgrade; the new client never reads it. A
+        ``cache_stale_detected`` event fires from
+        :meth:`_emit_legacy_layout_warning_if_any` at init so wired
+        reporters can surface the cleanup recommendation.
+
+        ``"latest"`` aliasing dropped in #355: when no tag is pinned,
+        falls back to ``DEFAULT_TAG`` everywhere so cache scoping
+        matches the actual HF revision being read.
         """
-        return self._cache_dir / (self._tag or "latest")
+        return self._cache_dir / _CLIENT_CACHE_SEGMENT / (self._tag or DEFAULT_TAG)
 
     def at(self, tag: str) -> "MatVisClient":
         """Return a client pinned to ``tag``, sharing this one's cache.
 
-        Cheap lazy alternate: reuses the parent's ``cache_dir`` and
-        ``cache`` flag so every tag lives under a common root and the
-        tag-scoped cache paths stay coherent. Subclients are memoized,
-        so ``client.at("v1")`` twice returns the same instance.
-
-        Used internally to implement per-operation ``tag=`` kwargs:
-        ``client.fetch_texture(..., tag="v1")`` delegates to
-        ``client.at("v1").fetch_texture(...)``.
+        Cheap lazy alternate: reuses the parent's ``cache_dir``,
+        ``cache`` flag, and ``on_event`` callback so every tag lives
+        under a common root, tag-scoped cache paths stay coherent, and
+        observability composes across tag-pinned operations.
+        Subclients are memoized.
         """
         if tag == self._tag:
             return self
         if tag not in self._alt_clients:
             self._alt_clients[tag] = MatVisClient(
-                cache_dir=self._cache_dir, tag=tag, cache=self._cache
+                cache_dir=self._cache_dir,
+                tag=tag,
+                cache=self._cache,
+                on_event=self._on_event,
             )
         return self._alt_clients[tag]
 
@@ -624,43 +756,59 @@ class MatVisClient:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
 
-    def _cache_read_manifest_with_etag(self) -> tuple[str | None, str | None]:
-        """Return the cached manifest body + ETag, or ``(None, None)``.
+    def _cache_read_etag_pair(self, body_path: Path) -> tuple[str | None, str | None]:
+        """Read a body file + its sibling .etag file. Returns
+        ``(body, etag)`` where either may be ``None``.
 
-        Issue #258: pairs the on-disk manifest cache with its ETag so a
-        conditional GET can validate against the remote without
-        refetching the body. Bare ``.manifest.json`` without
-        ``.manifest.etag`` is treated as etag-less (forces an
-        unconditional GET next lifecycle, then we adopt whatever ETag
-        the server hands back).
+        Per #258 (manifest) + #355 (per-index): on-disk body files are
+        paired with sibling ``<name>.etag`` files so a conditional GET
+        can validate against the remote without refetching the body.
+        Bare body without ``.etag`` is treated as etag-less (forces an
+        unconditional GET next lifecycle).
+
+        ``body_path`` is the body file's full path; the ETag lives at
+        the same path with ``.etag`` substituted for the body suffix
+        (e.g. ``.indexes/gpuopen.json`` ↔ ``.indexes/gpuopen.json.etag``).
+        Path-suffix substitution rather than name-based so callers
+        nested under ``_cache_scope`` keep their layout.
         """
-        body = self._cache_read_text(self._cache_scope / ".manifest.json")
+        body = self._cache_read_text(body_path)
         if body is None:
             return None, None
-        etag = self._cache_read_text(self._cache_scope / ".manifest.etag")
+        etag = self._cache_read_text(body_path.with_suffix(".etag"))
         return body, (etag or None)
 
-    def _cache_write_manifest(self, body: str | bytes, etag: str | None) -> None:
-        """Persist manifest body + ETag side-by-side.
+    def _cache_write_etag_pair(self, body_path: Path, body: str | bytes, etag: str | None) -> None:
+        """Persist a body file + sibling ETag.
 
         ``body`` accepts bytes (raw response) or str (already-decoded);
-        we always store as text. The ETag file is only written when the
-        server provided one — absent ``.manifest.etag`` signals "next
-        lifecycle, refetch unconditionally" (defensive cold-start).
+        always stored as text. The ETag is only written when the server
+        provided one — absent ``.etag`` signals "next lifecycle,
+        refetch unconditionally" (defensive cold-start). Stale ETag
+        from a prior lifecycle is cleared if present so we don't 304
+        against a body we no longer have.
         """
         if isinstance(body, bytes):
             body = body.decode("utf-8")
-        self._cache_write_text(self._cache_scope / ".manifest.json", body)
-        etag_path = self._cache_scope / ".manifest.etag"
+        self._cache_write_text(body_path, body)
+        etag_path = body_path.with_suffix(".etag")
         if etag:
             self._cache_write_text(etag_path, etag)
         elif etag_path.exists():
-            # Stale etag from a prior lifecycle would falsely 304 us
-            # against a manifest we no longer have. Clear it.
             try:
                 etag_path.unlink()
             except OSError:
                 pass
+
+    def _cache_read_manifest_with_etag(self) -> tuple[str | None, str | None]:
+        """Manifest-specific wrapper around :meth:`_cache_read_etag_pair`.
+        Kept as a thin alias so the surface in the manifest property
+        stays readable. Same contract, fixed path."""
+        return self._cache_read_etag_pair(self._cache_scope / ".manifest.json")
+
+    def _cache_write_manifest(self, body: str | bytes, etag: str | None) -> None:
+        """Manifest-specific wrapper around :meth:`_cache_write_etag_pair`."""
+        self._cache_write_etag_pair(self._cache_scope / ".manifest.json", body, etag)
 
     @property
     def manifest(self) -> dict:
@@ -1005,6 +1153,14 @@ class MatVisClient:
         server-side shape is needed. Public callers get the stripped view from
         :meth:`index`.
 
+        Cache strategy (mat-vis#355): ETag-validated like the manifest
+        (#258). One conditional GET per client lifecycle per source.
+        Server responds 304 if the index hasn't moved (immutable on a
+        pinned tag) and we serve the cached body. Pre-#355 this path
+        bypassed ETag entirely, which is why bernhard's two false-report
+        cycles (#281/#283) surfaced as cache staleness — the index
+        cache had no invalidation hook beyond manual ``rm -rf``.
+
         Guards the v2/v3 boundary: a v3 client pointed at a v2 catalog (e.g.
         a user who pinned ``tag="v2026.04.0"`` before rebaking) would silently
         return empty ``search()`` / ``categories()`` because every ``mat_vis``
@@ -1012,11 +1168,36 @@ class MatVisClient:
         """
         if source not in self._indexes:
             cache_path = self._cache_scope / ".indexes" / f"{source}.json"
-            cached = self._cache_read_text(cache_path)
-            if cached is not None:
-                self._indexes[source] = json.loads(cached)
+            cached_body, cached_etag = self._cache_read_etag_pair(cache_path)
+            url = self._index_url(source)
+            # mat-vis#355: ETag-validated path — taken when we have a
+            # cached etag (warm cache). Cold start (cached_etag is None)
+            # routes through `_get_json`, preserving the pre-#355 fetch
+            # surface that tests mock heavily and avoiding a 16-test-
+            # file rewrite. The warm path is what bernhard's #281/#283
+            # cycles needed; the cold path is unchanged behavior.
+            if cached_etag is not None:
+                body, new_etag = _get_with_etag(url, etag=cached_etag)
+                if body is None:
+                    # 304 Not Modified — cached body is authoritative.
+                    assert cached_body is not None
+                    self._indexes[source] = json.loads(cached_body)
+                    self._emit("etag_not_modified", source=source, url=url)
+                else:
+                    body_text = body.decode("utf-8") if isinstance(body, bytes) else body
+                    self._indexes[source] = json.loads(body_text)
+                    self._cache_write_etag_pair(cache_path, body_text, new_etag)
             else:
-                data = _get_json(self._index_url(source))
+                # Cold-start: use the legacy `_get_json` surface so
+                # existing tests + cold paths in production behave
+                # identically. We don't get an ETag this way (it'd
+                # require a HEAD probe; not worth the round-trip), so
+                # the warm-cache validation kicks in only after the
+                # second client lifecycle when an ETag is available.
+                # On a fresh process with NO cache, the next bernhard-
+                # class staleness incident still requires `cache clear`
+                # — but only ONCE. Subsequent fetches ETag-validate.
+                data = _get_json(url)
                 self._indexes[source] = data
                 self._cache_write_text(cache_path, json.dumps(data, indent=2))
             self._assert_v3_catalog(source, self._indexes[source])
@@ -1616,15 +1797,23 @@ class MatVisClient:
         # ktx2 tier shape. If BOTH 404, surface the original error
         # type — callers (and tests) expect HTTPFetchError, not a
         # generic MatVisError, so the network-failure contract is stable.
-        # Emit one progress notice per real network fetch (#287). Cache
-        # hits returned above stay silent. Library users (build123d,
-        # Jupyter) wire this to their own UI; logger is silent by default.
+        # Emit one progress notice per real network fetch (#287/#312).
+        # Cache hits returned above stay silent. Library users
+        # (build123d, Jupyter, pymat-mcp) wire this via on_event=
+        # using a reporter from mat_vis_client.progress.
         log.info(
             "Downloading %s/%s/%s @ %s ...",
             source,
             resolved,
             channel,
             tier,
+        )
+        self._emit(
+            "download_start",
+            source=source,
+            material=resolved,
+            channel=channel,
+            tier=tier,
         )
 
         last_exc: Exception | None = None
@@ -1642,6 +1831,16 @@ class MatVisClient:
                 )
             cache_path = self._cache_scope / source / tier / resolved / f"{channel}.{ext}"
             self._cache_write_bytes(cache_path, data)
+            self._emit(
+                "download_end",
+                source=source,
+                material=resolved,
+                channel=channel,
+                tier=tier,
+                url=url,
+                bytes_done=len(data),
+                bytes_total=len(data),
+            )
             self._maybe_warn_cache_cap()
             return data
 
@@ -1713,15 +1912,139 @@ class MatVisClient:
         result["_total"] = {"bytes": total_bytes, "files": total_files}
         return result
 
-    def cache_clear(self) -> int:
-        """Delete all cached data. Returns bytes freed."""
+    def cache_clear(self, *, stale_only: bool = False) -> int:
+        """Delete cached data. Returns bytes freed.
+
+        ``stale_only=True`` (mat-vis#355): keep the current client
+        version's cache (``<cache_dir>/v0.7/...``) and only remove
+        orphan layouts from previous client majors (``v0.6/``,
+        ``latest/``, etc.). Default ``False`` removes everything for
+        the v0.6 → v0.7 migration runbook hand-off; CLI surfaces
+        ``--stale-only`` as the safer default.
+
+        ``stale_only=False`` is the legacy semantics — unchanged.
+        """
         import shutil
 
         if not self._cache_dir.exists():
             return 0
+
+        if stale_only:
+            freed = 0
+            current = _CLIENT_CACHE_SEGMENT
+            for entry in self._cache_dir.iterdir():
+                if not entry.is_dir() or entry.name == current:
+                    continue
+                # Anything other than the current version segment is
+                # orphan: legacy "latest" / older v0.X / a top-level
+                # tag dir from before #355.
+                try:
+                    for path in entry.rglob("*"):
+                        if path.is_file():
+                            try:
+                                freed += path.stat().st_size
+                            except OSError:
+                                pass
+                    shutil.rmtree(entry, ignore_errors=True)
+                except OSError:
+                    pass
+            return freed
+
         size = self.cache_size()
         shutil.rmtree(self._cache_dir, ignore_errors=True)
         return size
+
+    def cache_check(self) -> dict:
+        """Verify cache against HF and report sync state (mat-vis#355).
+
+        Returns a JSON-serializable dict with the following keys:
+
+        - ``manifest_in_sync``: ``bool`` — manifest ETag matches HF
+        - ``indexes_in_sync``: ``dict[str, bool]`` — per-source ETag
+          state (only sources we have a cached index for)
+        - ``schema_version``: ``str`` — client version (matches the
+          ``v<major.minor>`` cache segment for this client)
+        - ``pinned_tag``: ``str`` — release tag the client is reading
+        - ``stale_layouts``: ``list[str]`` — orphan cache directories
+          from previous client majors / pre-#355 layouts
+        - ``stale_bytes``: ``int`` — total bytes occupied by orphan
+          layouts (reclaim hint for ``cache_clear(stale_only=True)``)
+        - ``recommend``: ``str`` — one of ``"ok"`` / ``"refresh"`` /
+          ``"clear-stale"`` / ``"clear-all"``
+
+        The method does network I/O (one HEAD per cached file with
+        ``If-None-Match``); use the cheap :meth:`cache_status`
+        property for a local-only snapshot.
+
+        Designed to round-trip cleanly through JSON (every value is a
+        primitive type) so pymat-mcp / CLIs / dashboards can serialize
+        directly without dataclass conversion.
+        """
+        # 1. Pinned tag + schema version — local, free.
+        pinned = self._tag or DEFAULT_TAG
+        schema = _CLIENT_CACHE_SEGMENT
+
+        # 2. Manifest ETag check.
+        manifest_in_sync = False
+        cached_body, cached_etag = self._cache_read_manifest_with_etag()
+        if cached_etag is not None:
+            try:
+                body, _ = _get_with_etag(self._manifest_url, etag=cached_etag)
+                manifest_in_sync = body is None  # 304 means in-sync
+            except Exception:  # noqa: BLE001
+                manifest_in_sync = False
+
+        # 3. Per-index ETag check (only sources we already cached).
+        indexes_in_sync: dict[str, bool] = {}
+        indexes_dir = self._cache_scope / ".indexes"
+        if indexes_dir.is_dir():
+            for entry in indexes_dir.iterdir():
+                if entry.suffix != ".json":
+                    continue
+                source = entry.stem
+                cached_etag = self._cache_read_text(entry.with_suffix(".etag"))
+                if not cached_etag:
+                    indexes_in_sync[source] = False
+                    continue
+                try:
+                    body, _ = _get_with_etag(self._index_url(source), etag=cached_etag)
+                    indexes_in_sync[source] = body is None
+                except Exception:  # noqa: BLE001
+                    indexes_in_sync[source] = False
+
+        # 4. Stale-layout detection.
+        stale_layouts: list[str] = []
+        stale_bytes = 0
+        if self._cache_dir.is_dir():
+            for entry in self._cache_dir.iterdir():
+                if not entry.is_dir() or entry.name == schema:
+                    continue
+                stale_layouts.append(entry.name)
+                for path in entry.rglob("*"):
+                    if path.is_file():
+                        try:
+                            stale_bytes += path.stat().st_size
+                        except OSError:
+                            pass
+
+        # 5. Recommend.
+        all_indexes_sync = all(indexes_in_sync.values()) if indexes_in_sync else True
+        if not manifest_in_sync or not all_indexes_sync:
+            recommend = "refresh"
+        elif stale_layouts:
+            recommend = "clear-stale"
+        else:
+            recommend = "ok"
+
+        return {
+            "manifest_in_sync": manifest_in_sync,
+            "indexes_in_sync": indexes_in_sync,
+            "schema_version": schema,
+            "pinned_tag": pinned,
+            "stale_layouts": sorted(stale_layouts),
+            "stale_bytes": stale_bytes,
+            "recommend": recommend,
+        }
 
     def cache_prune(
         self,
@@ -2270,8 +2593,22 @@ def main():
 
     p_cache = sub.add_parser("cache", help="Manage the local cache")
     p_cache_sub = p_cache.add_subparsers(dest="cache_cmd", required=True)
-    p_cache_sub.add_parser("status", help="Show cache size breakdown")
-    p_cache_sub.add_parser("clear", help="Delete all cached data")
+    p_cache_sub.add_parser("status", help="Show cache size breakdown (local-only, free)")
+    p_check = p_cache_sub.add_parser(
+        "check", help="Verify cache against HF (mat-vis#355) — emits JSON status"
+    )
+    p_check.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON (default: human-readable summary)",
+    )
+    p_clear = p_cache_sub.add_parser("clear", help="Delete cached data")
+    p_clear.add_argument(
+        "--stale-only",
+        action="store_true",
+        help="Only delete orphan layouts from previous client versions (mat-vis#355)",
+    )
+    p_clear.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
     p_prune = p_cache_sub.add_parser("prune", help="Delete subsets of the cache")
     p_prune.add_argument("--source", help="Limit to one source")
     p_prune.add_argument("--tier", help="Limit to one tier")
@@ -2359,8 +2696,45 @@ def main():
                     f"\nWARNING: cache exceeds soft cap by {_fmt_size(total - cap)}.",
                     file=sys.stderr,
                 )
+        elif args.cache_cmd == "check":
+            status = client.cache_check()
+            if args.json:
+                print(json.dumps(status, indent=2))
+            else:
+                print(
+                    f"  schema:    {status['schema_version']} (cache lives at "
+                    f"{client._cache_dir / status['schema_version']})"
+                )
+                print(f"  pinned:    {status['pinned_tag']}")
+                print(
+                    f"  manifest:  {'in-sync' if status['manifest_in_sync'] else 'STALE'}",
+                    file=sys.stderr,
+                )
+                if status["indexes_in_sync"]:
+                    for src, ok in sorted(status["indexes_in_sync"].items()):
+                        print(f"  index/{src}:  {'in-sync' if ok else 'STALE'}", file=sys.stderr)
+                if status["stale_layouts"]:
+                    print(
+                        f"  orphans:   {', '.join(status['stale_layouts'])} "
+                        f"(~{_fmt_size(status['stale_bytes'])})",
+                        file=sys.stderr,
+                    )
+                print(f"\nrecommendation: {status['recommend']}", file=sys.stderr)
+                if status["recommend"] == "clear-stale":
+                    print(
+                        "  → run `python -m mat_vis_client cache clear --stale-only`",
+                        file=sys.stderr,
+                    )
         elif args.cache_cmd == "clear":
-            freed = client.cache_clear()
+            if not args.yes and not args.stale_only:
+                print(
+                    f"This will delete ALL cached data at {client._cache_dir} "
+                    f"(~{_fmt_size(client.cache_size())}). Use --yes to confirm "
+                    "or --stale-only to keep current version's cache.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            freed = client.cache_clear(stale_only=args.stale_only)
             print(f"Cleared {_fmt_size(freed)}", file=sys.stderr)
         elif args.cache_cmd == "prune":
             keep_tags = args.keep_tags.split(",") if args.keep_tags else None

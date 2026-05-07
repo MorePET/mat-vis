@@ -187,7 +187,7 @@ def mock_client():
         # Issue #258: pair the cache body with an ETag so the conditional
         # GET in `manifest` would short-circuit — but tests below patch
         # `_get_with_etag` directly to assert no HTTP escapes either way.
-        scope = Path(tmp) / "v2026.04.0"
+        scope = Path(tmp) / "v0.6" / "v2026.04.0"
         scope.mkdir(parents=True, exist_ok=True)
         (scope / ".manifest.json").write_text(json.dumps(MOCK_MANIFEST))
         (scope / ".manifest.etag").write_text('"mock-etag"')
@@ -254,8 +254,8 @@ class TestClientManifest:
             assert url.endswith("/v2026.04.0/release-manifest.json")
             assert kwargs.get("etag") is None
             # Body + etag both cached under tag scope
-            cached_body = Path(tmp) / "v2026.04.0" / ".manifest.json"
-            cached_etag = Path(tmp) / "v2026.04.0" / ".manifest.etag"
+            cached_body = Path(tmp) / "v0.6" / "v2026.04.0" / ".manifest.json"
+            cached_etag = Path(tmp) / "v0.6" / "v2026.04.0" / ".manifest.etag"
             assert cached_body.exists()
             assert json.loads(cached_body.read_text()) == MOCK_MANIFEST
             assert cached_etag.read_text() == '"abc123"'
@@ -308,7 +308,7 @@ class TestManifestEtagCache:
             # First call has no etag (cold cache).
             _, kwargs = mock_get.call_args
             assert kwargs.get("etag") is None
-            scope = Path(tmp) / "v2026.04.0"
+            scope = Path(tmp) / "v0.6" / "v2026.04.0"
             assert (scope / ".manifest.json").exists()
             assert (scope / ".manifest.etag").read_text() == '"v1"'
 
@@ -331,7 +331,7 @@ class TestManifestEtagCache:
         """Fresh client + same cache_dir + 304: cached body served, no body refetch."""
         with tempfile.TemporaryDirectory() as tmp:
             # Seed cache from a "previous" lifecycle.
-            scope = Path(tmp) / "v2026.04.0"
+            scope = Path(tmp) / "v0.6" / "v2026.04.0"
             scope.mkdir(parents=True, exist_ok=True)
             (scope / ".manifest.json").write_text(json.dumps(MOCK_MANIFEST))
             (scope / ".manifest.etag").write_text('"v1"')
@@ -353,7 +353,7 @@ class TestManifestEtagCache:
     def test_fresh_process_server_mutated_200(self):
         """Fresh client + same cache_dir + 200 with new body: cache replaced."""
         with tempfile.TemporaryDirectory() as tmp:
-            scope = Path(tmp) / "v2026.04.0"
+            scope = Path(tmp) / "v0.6" / "v2026.04.0"
             scope.mkdir(parents=True, exist_ok=True)
             (scope / ".manifest.json").write_text(json.dumps(MOCK_MANIFEST))
             (scope / ".manifest.etag").write_text('"v1"')
@@ -391,7 +391,7 @@ class TestManifestEtagCache:
             ):
                 m = client.manifest
             assert m == MOCK_MANIFEST
-            scope = Path(tmp) / "v2026.04.0"
+            scope = Path(tmp) / "v0.6" / "v2026.04.0"
             assert (scope / ".manifest.json").exists()
             # No etag file written → next lifecycle fetches unconditionally.
             assert not (scope / ".manifest.etag").exists()

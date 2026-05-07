@@ -426,6 +426,7 @@ class MatVisClient:
         cache_dir: Path | None = None,
         tag: str | None = None,
         cache: bool = True,
+        on_event=None,
     ):
         self._cache_dir = cache_dir or DEFAULT_CACHE_DIR
         self._cache = cache
@@ -436,6 +437,12 @@ class MatVisClient:
         self._indexes: dict[str, list[dict]] = {}
         self._alt_clients: dict[str, "MatVisClient"] = {}
         self._tag = tag
+        # mat-vis#312 + #355: signature parity with the packaged
+        # client. The standalone doesn't fire events (no progress
+        # module bundled), but the kwarg must exist so consumers that
+        # construct clients uniformly across the two install paths
+        # don't get TypeError when they pass `on_event=...`.
+        self._on_event = on_event
 
         if manifest_url:
             self._manifest_url = manifest_url
@@ -457,7 +464,10 @@ class MatVisClient:
             return self
         if tag not in self._alt_clients:
             self._alt_clients[tag] = MatVisClient(
-                cache_dir=self._cache_dir, tag=tag, cache=self._cache
+                cache_dir=self._cache_dir,
+                tag=tag,
+                cache=self._cache,
+                on_event=self._on_event,
             )
         return self._alt_clients[tag]
 
@@ -1400,15 +1410,42 @@ class MatVisClient:
         result["_total"] = {"bytes": total_bytes, "files": total_files}
         return result
 
-    def cache_clear(self) -> int:
-        """Delete all cached data. Returns bytes freed."""
+    def cache_clear(self, *, stale_only: bool = False) -> int:
+        """Delete cached data. Returns bytes freed.
+
+        ``stale_only=True`` (mat-vis#355): signature parity with the
+        packaged client. The standalone has no version-namespace, so
+        this is a no-op that returns 0 — consumers using the
+        standalone don't accumulate orphan layouts the way the
+        packaged client can.
+        """
         import shutil
 
         if not self._cache_dir.exists():
             return 0
+        if stale_only:
+            return 0
         size = self.cache_size()
         shutil.rmtree(self._cache_dir, ignore_errors=True)
         return size
+
+    def cache_check(self) -> dict:
+        """Verify cache against HF (mat-vis#355).
+
+        Standalone stub: returns a minimal compatible shape so
+        consumers swapping the packaged client for the standalone
+        get a structurally-identical response (just less informative).
+        Real ETag round-trips are reserved for the packaged client.
+        """
+        return {
+            "manifest_in_sync": None,
+            "indexes_in_sync": {},
+            "schema_version": "standalone",
+            "pinned_tag": self._tag or DEFAULT_TAG,
+            "stale_layouts": [],
+            "stale_bytes": 0,
+            "recommend": "unsupported-on-standalone",
+        }
 
     def cache_prune(
         self,
