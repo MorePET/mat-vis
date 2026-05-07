@@ -107,3 +107,40 @@ def test_fetch_texture_silent_on_cache_hit(tmp_cache, caplog):
     assert data == TINY_PNG
     download_msgs = [r.getMessage() for r in caplog.records if "Downloading" in r.getMessage()]
     assert not download_msgs, f"cache hit must be silent, got 'Downloading' logs: {download_msgs}"
+
+
+# ── mat-vis#333: log.info from #287 is silent in default loggers ──
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="mat-vis#333: on_download callback hook not implemented",
+)
+def test_client_accepts_on_download_callback() -> None:
+    """``MatVisClient`` should accept an ``on_download=`` callback that
+    fires on each cache-miss download. Replaces the silent ``log.info``
+    from #287 (whose close was premature — see bernhard's #312).
+
+    The callback is the proper user-facing surface: zero default behavior,
+    consumers wire their UI (tqdm, rich, custom). See mat-vis#333 for the
+    full design (callback + TTY default).
+
+    This test is the forcing function — checks the API surface exists.
+    Full behavioural test (callback fires per cache-miss with correct
+    args) belongs in the fix PR.
+
+    bernhard's repro at https://github.com/MorePET/mat-vis/issues/312 —
+    5 calls to ``Vis(...).to_threejs()`` over fresh cache produces zero
+    output today.
+    """
+    import inspect
+
+    from mat_vis_client import MatVisClient
+
+    sig = inspect.signature(MatVisClient.__init__)
+    assert "on_download" in sig.parameters, (
+        "MatVisClient.__init__ should accept an on_download= callback "
+        "kwarg (mat-vis#333). Today only log.info fires — silent in "
+        "default loggers (consumers' apps default to WARNING). "
+        "bernhard's #312 cascade: '5 downloads, zero feedback'."
+    )
