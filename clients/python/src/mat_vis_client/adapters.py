@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import math
+import re
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from pathlib import Path
@@ -101,6 +102,24 @@ def _resolve_metalness(scalars: dict) -> float | None:
             f"values ({metalness!r} vs {metallic!r}); pick one"
         )
     return metalness if metalness is not None else metallic
+
+
+def _sanitize_material_name(name: str) -> str:
+    """Sanitize a material name for filesystem + MaterialX XML safety.
+
+    Real corpora contain spaces ("Stainless Steel 304"), slashes
+    ("Saint-Gobain/LYSO"), and other path-unsafe / XML-name-unsafe
+    characters. Replaces any non-[A-Za-z0-9_-] character with an
+    underscore, strips leading/trailing underscores, falls back to
+    "material" if the result is empty. Same rule used for both the
+    on-disk filename and the MaterialX ``name=`` attributes (spaces /
+    slashes break MTLX parsers anyway).
+
+    ADR-0013 §Decision-4 / #305.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", name)
+    safe = re.sub(r"_+", "_", safe).strip("_")
+    return safe or "material"
 
 
 # ── Three.js adapter ───────────────────────────────────────────
@@ -437,6 +456,7 @@ def generate_mtlx_xml(
         channels: Channel names (color, normal, roughness, ...) present
             in ``texture_dir``; others are skipped.
     """
+    safe_name = _sanitize_material_name(material_name)
     tex_filenames: dict[str, str] = {}
     if texture_dir is not None:
         tex_dir = Path(texture_dir)
@@ -444,7 +464,7 @@ def generate_mtlx_xml(
             png_path = tex_dir / f"{ch}.png"
             if png_path.exists():
                 tex_filenames[ch] = str(png_path)
-    root = _build_mtlx_tree(scalars, tex_filenames, material_name)
+    root = _build_mtlx_tree(scalars, tex_filenames, safe_name)
     return _mtlx_tree_to_string(root)
 
 
@@ -485,9 +505,10 @@ def export_mtlx(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    tex_filenames = _resolve_tex_filenames(textures, out, material_name, texture_dir, channels)
-    root = _build_mtlx_tree(scalars, tex_filenames, material_name)
+    safe_name = _sanitize_material_name(material_name)
+    tex_filenames = _resolve_tex_filenames(textures, out, safe_name, texture_dir, channels)
+    root = _build_mtlx_tree(scalars, tex_filenames, safe_name)
 
-    mtlx_path = out / f"{material_name}.mtlx"
+    mtlx_path = out / f"{safe_name}.mtlx"
     mtlx_path.write_text(_mtlx_tree_to_string(root), encoding="utf-8")
     return mtlx_path
