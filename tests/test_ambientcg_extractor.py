@@ -185,9 +185,14 @@ def test_fetch_one_builds_stable_mat_vis_shape(tmp_path: Path) -> None:
     assert rec.mat_vis.pbr is not None
     assert rec.mat_vis.attribution is not None
     assert rec.mat_vis.dates is not None
-    # pbr stays empty — ambientcg doesn't expose scalar PBR properties
-    assert rec.mat_vis.pbr.color_rgb is None
+    # ambientcg doesn't expose scalar PBR properties upstream, but the
+    # baker-side glTF-MR neutral-multiplier convention (mat-vis#290
+    # follow-up) populates color_rgb=[1,1,1] because _fake_zip_bytes()
+    # ships a *_Color.png. roughness/metalness stay None — no matching
+    # texture in this fixture.
+    assert rec.mat_vis.pbr.color_rgb == [1.0, 1.0, 1.0]
     assert rec.mat_vis.pbr.roughness is None
+    assert rec.mat_vis.pbr.metalness is None
 
 
 # ── upstream mirror (Phase C, mat-vis#152) ──────────────────────
@@ -262,3 +267,80 @@ def test_upstream_allowlist_locks_conservative_keyset() -> None:
     assert "dimensionX" in UPSTREAM_ALLOWLIST
     assert "downloadFolders" not in UPSTREAM_ALLOWLIST
     assert "previewLinks" not in UPSTREAM_ALLOWLIST
+
+
+# ── glTF-MR neutral-multiplier convention (mat-vis#290 follow-up) ──
+#
+# ambientcg doesn't expose scalar PBR properties upstream — the only
+# path that can populate ``pbr.*`` is the baker-side convention. These
+# tests pin that wire-up so the substrate carries spec-aligned scalars
+# whenever the matching texture is in the baked set, and stays
+# all-None otherwise.
+
+
+def _multi_channel_zip_bytes() -> bytes:
+    """ambientcg-shaped ZIP carrying Color + Metalness + Roughness PNGs."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for suffix in ("Color", "Metalness", "Roughness"):
+            zf.writestr(
+                f"Bricks097_1K-PNG/Bricks097_1K-PNG_{suffix}.png",
+                b"\x89PNG\r\n\x1a\nfake",
+            )
+    return buf.getvalue()
+
+
+def _normal_only_zip_bytes() -> bytes:
+    """ambientcg-shaped ZIP carrying ONLY a normal map — no PBR scalar texture."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "Bricks097_1K-PNG/Bricks097_1K-PNG_NormalGL.png",
+            b"\x89PNG\r\n\x1a\nfake",
+        )
+    return buf.getvalue()
+
+
+def test_ambientcg_pbr_convention_applied(tmp_path: Path) -> None:
+    """color + metalness + roughness textures → all three scalars filled."""
+    entry = _entry()
+    mock_resp = MagicMock(content=_multi_channel_zip_bytes())
+    with patch("mat_vis_baker.sources.ambientcg.retry_request", return_value=mock_resp):
+        rec = _fetch_one(entry, "1k", tmp_path, mtlx_dir=None)
+
+    assert rec.status == "ok"
+    assert set(rec.maps) >= {"color", "metalness", "roughness"}
+    assert rec.mat_vis.pbr.color_rgb == [1.0, 1.0, 1.0]
+    assert rec.mat_vis.pbr.metalness == 1.0
+    assert rec.mat_vis.pbr.roughness == 1.0
+
+
+def test_ambientcg_pbr_no_convention_when_no_pbr_texture(tmp_path: Path) -> None:
+    """Only a normal map shipped → all PBR scalars stay None."""
+    entry = _entry()
+    mock_resp = MagicMock(content=_normal_only_zip_bytes())
+    with patch("mat_vis_baker.sources.ambientcg.retry_request", return_value=mock_resp):
+        rec = _fetch_one(entry, "1k", tmp_path, mtlx_dir=None)
+
+    assert rec.status == "ok"
+    assert "normal" in rec.maps
+    assert "color" not in rec.maps
+    assert rec.mat_vis.pbr.color_rgb is None
+    assert rec.mat_vis.pbr.metalness is None
+    assert rec.mat_vis.pbr.roughness is None
+
+
+def test_ambientcg_pbr_all_none_on_failed_fetch(tmp_path: Path) -> None:
+    """Failed-fetch path (textures empty) → pbr stays the default
+    empty PBRBlock with everything None."""
+    entry = _entry()
+    with patch(
+        "mat_vis_baker.sources.ambientcg.retry_request",
+        side_effect=RuntimeError("boom"),
+    ):
+        rec = _fetch_one(entry, "1k", tmp_path, mtlx_dir=None)
+
+    assert rec.status == "failed"
+    assert rec.mat_vis.pbr.color_rgb is None
+    assert rec.mat_vis.pbr.metalness is None
+    assert rec.mat_vis.pbr.roughness is None

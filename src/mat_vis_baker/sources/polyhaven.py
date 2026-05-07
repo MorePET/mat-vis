@@ -18,9 +18,11 @@ from mat_vis_baker.common import (
     DatesBlock,
     MaterialRecord,
     MatVisBlock,
+    PBRBlock,
     PhysicalBlock,
     UpstreamBlock,
     _filter_upstream,
+    apply_pbr_neutral_multiplier_conventions,
     normalize_category,
     normalize_channel,
     retry_request,
@@ -336,6 +338,14 @@ def _fetch_one(
         cat = normalize_category(cat_str, [*cat_list[1:], *tags])
         description = meta.get("description") or None
 
+        # glTF-MR neutral-multiplier convention (mat-vis#290 follow-up):
+        # polyhaven doesn't currently parse PBR scalars from any source,
+        # so the helper is the only path that populates ``pbr.*`` fields
+        # — fills color/metalness/roughness with their glTF-MR neutral
+        # multipliers when the matching texture is in the baked set.
+        pbr = PBRBlock()
+        apply_pbr_neutral_multiplier_conventions(pbr, textures)
+
         return MaterialRecord(
             id=slug,
             source="polyhaven",
@@ -349,6 +359,7 @@ def _fetch_one(
                     dimensions_m=_dimensions_m(meta.get("dimensions")),
                     max_resolution_px=_max_resolution_px(meta.get("max_resolution")),
                 ),
+                pbr=pbr,
                 attribution=AttributionBlock(
                     authors=_authors(meta),
                     license_spdx="CC0-1.0",
