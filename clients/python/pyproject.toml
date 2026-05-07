@@ -26,6 +26,11 @@ dependencies = []
 # when both metalness and roughness PNGs are present (it remains a
 # zero-dependency client by default).
 gltf = ["pillow>=10.0"]
+# #359: opt-in fuzzy ranking for ``client.search(query=...)``. Without
+# this extra, ``query=`` falls back to token-AND substring matching
+# (functional but coarser ranking). rapidfuzz is a small compiled wheel
+# (~250KB) — kept opt-in so the default install stays zero-dep.
+search = ["rapidfuzz>=3.0"]
 
 [project.scripts]
 mat-vis-client = "mat_vis_client.client:main"

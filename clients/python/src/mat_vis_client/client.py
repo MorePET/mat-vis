@@ -38,6 +38,7 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from mat_vis_client.match import Match
 from mat_vis_client.progress import ClientEvent
 
 if TYPE_CHECKING:
@@ -147,6 +148,52 @@ def _fmt_size(n: int) -> str:
 # Default soft cap: 5 GB (configurable via MAT_VIS_CACHE_MAX_SIZE).
 DEFAULT_CACHE_MAX_BYTES = _parse_size(os.environ.get("MAT_VIS_CACHE_MAX_SIZE", "5GB"))
 
+
+def _rank_by_query(matches: list["Match"], query: str) -> list["Match"]:
+    """Rank ``matches`` by fuzzy similarity to ``query``.
+
+    Tokenizes ``query`` on whitespace; tokens AND-narrow (every token
+    must appear in ``name`` or any ``tag``). When ``rapidfuzz`` is
+    installed (``mat-vis-client[search]`` extra), ranking uses
+    ``WRatio`` against ``name`` (weighted ×1.5) and the tag-joined
+    string. Without rapidfuzz, falls back to token-AND substring with
+    a stable id-sort within the matched set.
+    """
+    if not query.strip():
+        return matches
+    tokens = [t.casefold() for t in query.split() if t]
+
+    def _haystack(m: "Match") -> tuple[str, str]:
+        mv = m.mat_vis
+        return (mv.get("name") or "").casefold(), " ".join(
+            (t or "").casefold() for t in (mv.get("tags") or [])
+        )
+
+    # Token-AND prefilter: every token must appear in name OR tags.
+    filtered = []
+    for m in matches:
+        n, tg = _haystack(m)
+        if all((tok in n) or (tok in tg) for tok in tokens):
+            filtered.append(m)
+
+    try:
+        from rapidfuzz import fuzz  # type: ignore[import-not-found]
+    except ImportError:
+        # No fuzz library — stable id-sort within matched set.
+        filtered.sort(key=lambda m: m.id)
+        return filtered
+
+    # Score: max(WRatio(query, name) * 1.5, WRatio(query, tags))
+    scored: list[tuple[float, "Match"]] = []
+    for m in filtered:
+        n, tg = _haystack(m)
+        s_name = fuzz.WRatio(query, n) * 1.5 if n else 0.0
+        s_tags = fuzz.WRatio(query, tg) if tg else 0.0
+        scored.append((max(s_name, s_tags), m))
+    scored.sort(key=lambda pair: (-pair[0], pair[1].id))
+    return [m for _, m in scored]
+
+
 # Previously a hardcoded frozenset of 10 names. The client doesn't need a
 # static enum — categories are discoverable at runtime from rowmap filenames
 # in the release manifest. See MatVisClient.categories(). Kept as a
@@ -177,6 +224,9 @@ class NotFoundError(MatVisError):
 
     - ``key``: the missing name (e.g. ``"Rock999"``)
     - ``available``: sorted list of valid names at this level
+    - ``candidates``: top-3 fuzzy did-you-mean suggestions (#359). Empty
+      when ``available`` is small enough to render directly without
+      ranking, OR when no candidate scores above the cutoff.
     - ``context``: optional path qualifier (e.g. ``"ambientcg/1k"``)
     - ``kind``: class-level label ("material", "source", ...)
     """
@@ -188,13 +238,27 @@ class NotFoundError(MatVisError):
         key: str,
         available: list[str] | None = None,
         context: str = "",
+        candidates: list[str] | None = None,
     ) -> None:
         self.key = key
         self.available = list(available or [])
         self.context = context
+        # #359: did-you-mean suggestions. Computed by callers (typically
+        # via ``difflib.get_close_matches`` or ``rapidfuzz``) so the
+        # exception class stays dependency-free; we just hold the list.
+        # When the caller doesn't compute it, fall back to a small
+        # difflib pass against ``available`` so error messages still
+        # surface likely-typo hints automatically.
+        if candidates is None and available:
+            candidates = difflib.get_close_matches(key, list(available), n=3, cutoff=0.6)
+        self.candidates = list(candidates or [])
         where = f" in {context}" if context else ""
-        hint = f". Available: {self.available}" if self.available else ""
-        super().__init__(f"{self.kind} {key!r} not found{where}{hint}")
+        msg_bits = [f"{self.kind} {key!r} not found{where}"]
+        if self.candidates:
+            msg_bits.append(f"Did you mean: {', '.join(repr(c) for c in self.candidates)}?")
+        if self.available:
+            msg_bits.append(f"Available: {self.available}")
+        super().__init__(". ".join(msg_bits))
 
 
 class MaterialNotFoundError(NotFoundError):
@@ -1280,8 +1344,8 @@ class MatVisClient:
             return entry
         return {k: v for k, v in entry.items() if k != "upstream"}
 
-    def index(self, source: str) -> list[dict]:
-        """Fetch and cache the per-source catalog JSON.
+    def index(self, source: str) -> list[Match]:
+        """Fetch and cache the per-source catalog JSON. Returns ``list[Match]``.
 
         v0.6.0: resolves to ``<HF_BASE>/<revision>/<source>.json`` via
         the manifest. No GH-Raw fallback — the catalog lives in the
@@ -1291,8 +1355,12 @@ class MatVisClient:
         every entry — it's the verbatim upstream response, intentionally
         NOT part of the stable query surface. Use :meth:`upstream` to
         access it for a specific material.
+
+        #359: returns ``list[Match]`` (dict-subclass) for shape parity
+        with :meth:`search`. ``isinstance(m, dict)`` stays True so all
+        existing key-access patterns keep working.
         """
-        return [self._strip_upstream(e) for e in self._load_index_raw(source)]
+        return [Match(self._strip_upstream(e)) for e in self._load_index_raw(source)]
 
     def upstream(
         self,
@@ -1339,23 +1407,49 @@ class MatVisClient:
         self,
         category: str | None = None,
         *,
+        # text + structural filters (#359)
+        query: str | None = None,
+        name: str | None = None,
+        tag: str | None = None,
+        is_conductor: bool | None = None,
+        has_map: str | None = None,
+        transmission_range: tuple[float, float] | None = None,
+        dispersion_range: tuple[float, float] | None = None,
+        # scalar filters (existing)
         roughness: float | None = None,
         metalness: float | None = None,
         roughness_range: tuple[float, float] | None = None,
         metalness_range: tuple[float, float] | None = None,
+        # scoping
         source: str | None = None,
         tier: str = "1k",
-        tag: str | None = None,
-        score: bool = False,
+        release: str | None = None,
+        # tuning
+        distance: bool = False,
         limit: int | None = None,
-    ) -> list[dict]:
-        """Search materials by category and scalar ranges.
+    ) -> list[Match]:
+        """Discover materials by text + filters. Returns ``list[Match]``.
 
-        Fetches index JSON for the given source (or all sources for the
-        tier) and filters locally. Returns matching index entries.
+        The single discovery verb on the client (#359). With no ``query=``,
+        results are sorted by id; with ``query=``, ranked by fuzzy
+        similarity (rapidfuzz when ``mat-vis-client[search]`` is installed,
+        token-AND substring fallback otherwise). Structural filters
+        AND-narrow the candidate set first; ``query=`` ranks within.
 
         Args:
             category: Filter by material category (e.g. "metal", "wood").
+            query: Free-text fuzzy match across (name, tags). Tokens
+                AND-narrow; ranking uses rapidfuzz.WRatio with name >
+                tag weighting when the ``[search]`` extra is present.
+            name: Substring on ``mat_vis.name`` (case-insensitive).
+            tag: Substring on any tag in ``mat_vis.tags``.
+            is_conductor: Filter by Phase 1 procedural-PBR conductor
+                stamp (#316). Useful to discriminate procedural-walker
+                metals from convention metals.
+            has_map: Material has this map name in ``maps[]``
+                (e.g. ``"opacity"``, ``"displacement"``, ``"normal"``).
+            transmission_range: (min, max) on ``pbr.transmission`` (#340).
+            dispersion_range: (min, max) on ``pbr.dispersion`` (#340).
             roughness: Scalar shorthand. Matches within ± ``_SCALAR_WIDEN``.
                 Mutually exclusive with ``roughness_range``.
             metalness: Scalar shorthand. Same semantics as ``roughness``.
@@ -1364,21 +1458,30 @@ class MatVisClient:
             source: Limit search to one source. If None, searches all
                     sources available for the given tier.
             tier: Only return materials that have this tier available.
-            tag: Optional release tag override (see .at()).
-            score: When True and a scalar shorthand is passed, attach a
-                ``score`` field (absolute distance) and sort ascending.
+            release: Optional release tag override (see :meth:`.at`).
+                Renamed from ``tag=`` (#359, which now means material-tag).
+            distance: When True and a scalar shorthand is passed, attach
+                a ``"distance"`` field (absolute scalar distance) and
+                sort ascending. Renamed from ``score=`` (#359).
             limit: Cap the returned list length.
         """
-        if tag is not None and tag != self._tag:
-            return self.at(tag).search(
+        if release is not None and release != self._tag:
+            return self.at(release).search(
                 category,
+                query=query,
+                name=name,
+                tag=tag,
+                is_conductor=is_conductor,
+                has_map=has_map,
+                transmission_range=transmission_range,
+                dispersion_range=dispersion_range,
                 roughness=roughness,
                 metalness=metalness,
                 roughness_range=roughness_range,
                 metalness_range=metalness_range,
                 source=source,
                 tier=tier,
-                score=score,
+                distance=distance,
                 limit=limit,
             )
         # Scalar + range on the same dimension is ambiguous — reject.
@@ -1410,13 +1513,39 @@ class MatVisClient:
                 return []
 
         sources = [source] if source else self.sources(tier)
-        results: list[dict] = []
+        name_q = name.casefold() if name else None
+        tag_q = tag.casefold() if tag else None
+        results: list[Match] = []
 
         for src in sources:
             for entry in self.index(src):
                 mv = entry.get("mat_vis") or {}
                 pbr = mv.get("pbr") or {}
                 if category and mv.get("category") != category:
+                    continue
+                # name= substring (case-insensitive on mat_vis.name)
+                if name_q and name_q not in (mv.get("name") or "").casefold():
+                    continue
+                # tag= substring on any tag
+                if tag_q is not None:
+                    tags = mv.get("tags") or []
+                    if not any(tag_q in (t or "").casefold() for t in tags):
+                        continue
+                # is_conductor= exact bool
+                if is_conductor is not None and pbr.get("is_conductor") != is_conductor:
+                    continue
+                # has_map= membership
+                if has_map is not None and has_map not in (entry.get("maps") or []):
+                    continue
+                # transmission_range / dispersion_range — None is excluded
+                # (range filter implies "must have a value to compare")
+                if transmission_range is not None and not _in_range(
+                    pbr.get("transmission"), *transmission_range
+                ):
+                    continue
+                if dispersion_range is not None and not _in_range(
+                    pbr.get("dispersion"), *dispersion_range
+                ):
                     continue
                 if roughness_range and not _in_range(pbr.get("roughness"), *roughness_range):
                     continue
@@ -1425,22 +1554,30 @@ class MatVisClient:
                 # Scalar-only entries (e.g. physicallybased) advertise no
                 # textures — treat missing/empty ``available_tiers`` as
                 # tier-independent so they pass any tier filter (#167).
-                # Textured entries still get gated to the requested tier.
                 entry_tiers = entry.get("available_tiers")
                 if entry_tiers and tier not in entry_tiers:
                     continue
-                results.append(entry)
+                results.append(Match(entry))
 
-        if score and (roughness is not None or metalness is not None):
+        # query= fuzzy text ranking. Structural filters above have already
+        # AND-narrowed; this just sorts within. Pure-Python token-AND
+        # substring fallback when rapidfuzz isn't installed.
+        if query:
+            results = _rank_by_query(results, query)
+        elif distance and (roughness is not None or metalness is not None):
             for r in results:
-                pbr = (r.get("mat_vis") or {}).get("pbr") or {}
-                s = 0.0
+                pbr = r.pbr
+                d = 0.0
                 if roughness is not None and pbr.get("roughness") is not None:
-                    s += abs(pbr["roughness"] - roughness)
+                    d += abs(pbr["roughness"] - roughness)
                 if metalness is not None and pbr.get("metalness") is not None:
-                    s += abs(pbr["metalness"] - metalness)
-                r["score"] = s
-            results.sort(key=lambda r: r["score"])
+                    d += abs(pbr["metalness"] - metalness)
+                r["distance"] = d
+            results.sort(key=lambda r: r["distance"])
+        else:
+            # Stable id-sort default — predictable for both single-source
+            # and multi-source scans.
+            results.sort(key=lambda r: r.id)
 
         if limit is not None:
             results = results[:limit]
@@ -1673,19 +1810,74 @@ class MatVisClient:
 
     def asset(
         self,
-        source: str,
-        material_id: str,
-        tier: str = "1k",
+        ref: "Match | str | None" = None,
+        material_id: str | None = None,
+        tier: str | None = None,
+        *,
+        source: str | None = None,
+        id: str | None = None,
     ) -> "VisAsset":
-        """Return a :class:`VisAsset` ergonomic wrapper for ``(source, material_id, tier)``.
+        """Return a :class:`VisAsset` for a material. Polymorphic dispatch (#359).
+
+        Three input shapes:
+
+        - ``asset(match)`` — a :class:`Match` from ``search()``/``index()``;
+          identity comes from the Match (with ``tier=`` defaulted from its
+          ``available_tiers`` if not given).
+        - ``asset("ambientcg/Rock064")`` — a string ``"source/id"`` ref.
+          Malformed refs raise ``ValueError``.
+        - ``asset(source="ambientcg", id="Rock064")`` — explicit kwargs.
+        - ``asset("ambientcg", "Rock064", "1k")`` — legacy 3-positional
+          form (preserved so existing callers don't break).
 
         VisAsset bundles identity, lazy scalars, lazy textures, and adapter
-        methods (``.to_threejs() / .to_gltf() / .to_mtlx()``) that delegate
-        to the free-function primitive layer in :mod:`mat_vis_client.adapters`.
-        Creation is free — no network IO until ``.scalars`` / ``.textures``
-        / an adapter method is accessed. Mat-vis#93.
+        methods (``.to_threejs() / .to_gltf() / .to_mtlx()``). Creation
+        is free — no network IO until ``.scalars`` / ``.textures`` / an
+        adapter method is accessed. Mat-vis#93.
         """
-        return VisAsset(self, source, material_id, tier)
+        # Resolve the (source, material_id, tier) triple from whichever
+        # input shape the caller used.
+        s, mid, t = self._resolve_asset_triple(ref, material_id, tier, source, id)
+        return VisAsset(self, s, mid, t)
+
+    def _resolve_asset_triple(
+        self,
+        ref: "Match | str | None",
+        positional_mid: str | None,
+        positional_tier: str | None,
+        kw_source: str | None,
+        kw_id: str | None,
+    ) -> tuple[str, str, str]:
+        """Resolve the polymorphic ``asset()`` input into ``(source, id, tier)``.
+
+        Precedence: positional ref > positional source/material_id/tier
+        triple (legacy) > kwargs. Tier defaults to ``"1k"`` when nothing
+        else gives one.
+        """
+        # Match handle path.
+        if isinstance(ref, Match):
+            t = positional_tier or "1k"
+            # Match knows which tiers it's staged at — prefer one of
+            # those when the caller didn't ask for a specific tier.
+            if positional_tier is None and ref.tiers:
+                t = ref.tiers[0] if "1k" not in ref.tiers else "1k"
+            return ref.source, ref.id, t
+        # String ref path (must contain '/').
+        if isinstance(ref, str) and positional_mid is None and kw_source is None and kw_id is None:
+            if "/" not in ref:
+                raise ValueError(f"asset() string ref must be 'source/id', got {ref!r}")
+            s, mid = ref.split("/", 1)
+            return s, mid, positional_tier or "1k"
+        # Legacy 3-positional path: ``asset("source", "id", "1k")``.
+        if isinstance(ref, str) and positional_mid is not None:
+            return ref, positional_mid, positional_tier or "1k"
+        # Pure-kwarg path.
+        if kw_source is not None and kw_id is not None:
+            return kw_source, kw_id, positional_tier or "1k"
+        raise TypeError(
+            "asset() requires a Match, a 'source/id' string, "
+            "(source, id, tier) positionals, or source=, id=, tier= kwargs"
+        )
 
     def _scalars_for(self, source: str, material_id: str) -> dict:
         """Look up PBR scalars for a material from the source index.
