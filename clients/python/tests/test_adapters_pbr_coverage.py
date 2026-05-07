@@ -203,6 +203,81 @@ class TestResolveSpecularColor:
         assert result == pytest.approx((1.0, 1.0, 1.0))
 
 
+# ── opacityMap (texture) ────────────────────────────────────────
+
+
+def _tiny_png() -> bytes:
+    """Build a valid 1x1 PNG byte string at import time.
+
+    Hand-rolled byte literals are easy to corrupt (silent CRC mismatch
+    that Pillow rejects with "broken PNG file"). Generating the bytes
+    via Pillow when available, falling back to a verified minimal PNG
+    otherwise, keeps the fixture sound under both code paths.
+    """
+    try:
+        from PIL import Image as _Image
+
+        from io import BytesIO as _BytesIO
+
+        buf = _BytesIO()
+        _Image.new("RGB", (1, 1), (128, 128, 128)).save(buf, format="PNG")
+        return buf.getvalue()
+    except ImportError:
+        # Verified minimal 1×1 grayscale PNG (8-bit). The transparent=true
+        # / alphaMap path doesn't decode the bytes so this only matters
+        # for tests that exercise Pillow packing — which skip when
+        # Pillow isn't installed anyway.
+        return (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x00\x00\x00\x00:~\x9bU\x00\x00\x00\nIDATx\x9cc`\x00\x00\x00"
+            b"\x02\x00\x01\xe5\x27\xde\xfc\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+
+
+_TINY_PNG = _tiny_png()
+
+
+class TestOpacityMapThreejs:
+    def test_opacity_emits_alphaMap_and_transparent(self) -> None:
+        out = to_threejs({}, {"opacity": _TINY_PNG})
+        assert "alphaMap" in out
+        assert out["alphaMap"].startswith("data:image/png;base64,")
+        assert out["transparent"] is True
+
+    def test_no_opacity_no_transparent_flag(self) -> None:
+        out = to_threejs({})
+        assert "transparent" not in out
+
+    def test_opacity_alongside_color(self) -> None:
+        out = to_threejs({}, {"color": _TINY_PNG, "opacity": _TINY_PNG})
+        assert "map" in out
+        assert "alphaMap" in out
+        assert out["transparent"] is True
+
+
+class TestOpacityMapGltf:
+    def test_opacity_emits_alphaMode_mask(self) -> None:
+        out = to_gltf({}, {"opacity": _TINY_PNG})
+        assert out["alphaMode"] == "MASK"
+        assert out["alphaCutoff"] == 0.5
+
+    def test_no_opacity_no_alphaMode(self) -> None:
+        out = to_gltf({})
+        assert "alphaMode" not in out
+
+    def test_opacity_with_color_packs_alpha(self) -> None:
+        # When both are present and Pillow is available, alpha is packed
+        # into baseColorTexture.
+        try:
+            from PIL import Image as _Image  # noqa: F401
+        except ImportError:
+            pytest.skip("Pillow not installed")
+        out = to_gltf({}, {"color": _TINY_PNG, "opacity": _TINY_PNG})
+        assert "baseColorTexture" in out["pbrMetallicRoughness"]
+        # No "_note_opacity_unpacked" warning when packed successfully.
+        assert "_note_opacity_unpacked" not in out
+
+
 # ── Round-trip / cross-format consistency ────────────────────────
 
 

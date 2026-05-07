@@ -372,6 +372,13 @@ def to_threejs(
         if channel in textures:
             result[prop] = _to_data_uri(textures[channel])
 
+    # When an opacity texture is present, the material needs
+    # transparent=true so Three.js samples alphaMap instead of
+    # rendering as fully opaque. Without this flag MeshPhysicalMaterial
+    # ignores alphaMap entirely. #340.
+    if "opacity" in textures:
+        result["transparent"] = True
+
     return result
 
 
@@ -496,6 +503,28 @@ def to_gltf(
             "dispersion": dispersion
         }
 
+    # Opacity texture — glTF 2.0 has no standalone alphaMap slot. Alpha
+    # must live in baseColorTexture's alpha channel + alphaMode/alphaCutoff
+    # at the material level. Pack with Pillow when available; otherwise
+    # emit alphaMode flagging + drop the texture (consumers can fetch
+    # the standalone PNG from the substrate). Mirrors the
+    # metallicRoughnessTexture packing pattern. #340.
+    if "opacity" in textures:
+        material["alphaMode"] = "MASK"
+        material["alphaCutoff"] = 0.5
+        if "color" in textures and Image is not None:
+            packed_uri = _pack_base_color_with_alpha(
+                color_png=textures["color"],
+                opacity_png=textures["opacity"],
+            )
+            pbr["baseColorTexture"] = {"source": {"uri": packed_uri}}
+        elif "color" not in textures or Image is None:
+            material["_note_opacity_unpacked"] = (
+                "opacity texture provided but baseColorTexture alpha not packed "
+                "(install `mat-vis-client[gltf]` to enable Pillow packing). The "
+                "standalone opacity PNG is available in the substrate texture set."
+            )
+
     # Textures
     def _tex_ref(png_bytes: bytes) -> dict:
         return {"source": {"uri": _to_data_uri(png_bytes)}}
@@ -526,6 +555,34 @@ def to_gltf(
             pbr["metallicRoughnessTexture"] = {"source": {"uri": packed_uri}}
 
     return material
+
+
+def _pack_base_color_with_alpha(
+    *,
+    color_png: bytes,
+    opacity_png: bytes,
+) -> str:
+    """Pack baseColor (RGB) + opacity (alpha) into a single RGBA PNG.
+
+    glTF 2.0 has no standalone alphaMap slot — alpha must live in the
+    baseColorTexture's alpha channel. We use Three.js's convention of
+    sourcing alpha from the opacity image's green channel (works for
+    both single-channel grayscale PNGs and color3 opacity images, since
+    PNG decoders broadcast L→RGB on grayscale inputs).
+
+    Color image dimensions are the reference; opacity is resized to
+    match if they differ.
+    """
+    assert Image is not None  # caller checks
+    color = Image.open(BytesIO(color_png)).convert("RGB")
+    opacity = Image.open(BytesIO(opacity_png)).convert("L")
+    if opacity.size != color.size:
+        opacity = opacity.resize(color.size)
+    r, g, b = color.split()
+    packed = Image.merge("RGBA", (r, g, b, opacity))
+    buf = BytesIO()
+    packed.save(buf, format="PNG")
+    return _to_data_uri(buf.getvalue())
 
 
 def _pack_metallic_roughness(

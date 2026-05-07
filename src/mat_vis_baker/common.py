@@ -384,6 +384,8 @@ _CHANNEL_MAPS: dict[str, dict[str, str]] = {
         "height": "displacement",
         "emissive": "emission",
         "emission": "emission",
+        "opacity": "opacity",
+        "alpha": "opacity",
     },
 }
 

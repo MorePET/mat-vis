@@ -79,6 +79,12 @@ def test_mat_vis_block_has_stable_key_set() -> None:
         "is_conductor",
         "metalness_mean",
         "metalness_source",
+        # Full MeshPhysicalMaterial coverage (#340) — additive.
+        "clearcoat_roughness",
+        "specular_intensity",
+        "specular_color",
+        "thickness",
+        "dispersion",
     }
     # Nested AttributionBlock
     assert set(mv["attribution"].keys()) == {"authors", "license_spdx", "source_url"}
@@ -104,6 +110,12 @@ def test_mat_vis_block_defaults_are_null_or_empty() -> None:
     assert mv["pbr"]["is_conductor"] is None
     assert mv["pbr"]["metalness_mean"] is None
     assert mv["pbr"]["metalness_source"] is None
+    # Full MeshPhysicalMaterial coverage (#340) — additive, default-None.
+    assert mv["pbr"]["clearcoat_roughness"] is None
+    assert mv["pbr"]["specular_intensity"] is None
+    assert mv["pbr"]["specular_color"] is None
+    assert mv["pbr"]["thickness"] is None
+    assert mv["pbr"]["dispersion"] is None
     assert mv["attribution"]["authors"] == []
     assert mv["dates"]["published"] is None
     assert mv["dates"]["updated"] is None
