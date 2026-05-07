@@ -192,8 +192,22 @@ def _fetch_manifest_with_parent(api: HfApi, repo_id: str, revision: str) -> tupl
     return manifest, parent_sha
 
 
-def _merge_manifest_for_source(manifest: dict, source: str, tier: str, release_tag: str) -> dict:
-    """Layer this bake's (source, tier) into ``manifest`` and return it."""
+def _merge_manifest_for_source(
+    manifest: dict,
+    source: str,
+    tier: str,
+    release_tag: str,
+    *,
+    mtlx_filename: str | None = None,
+) -> dict:
+    """Layer this bake's (source, tier) into ``manifest`` and return it.
+
+    ``mtlx_filename`` (#292): when provided, stamp ``sources.<src>.mtlx``
+    so clients (`MatVisClient._fetch_mtlx_original_map`) read the bundled
+    upstream MaterialX JSON instead of guessing ``{source}-mtlx.json`` and
+    silently 404-caching an empty dict. Sources without upstream .mtlx
+    (e.g. ambientcg) leave the field absent.
+    """
     manifest["schema_version"] = 3
     manifest["release_tag"] = release_tag
     sources = manifest.setdefault("sources", {})
@@ -201,6 +215,8 @@ def _merge_manifest_for_source(manifest: dict, source: str, tier: str, release_t
     src_entry["catalog"] = f"{source}.json"
     tiers = src_entry.setdefault("tiers", {})
     tiers[tier] = {"complete": True}
+    if mtlx_filename is not None:
+        src_entry["mtlx"] = mtlx_filename
     return manifest
 
 
@@ -533,6 +549,35 @@ def bake_one_per_file(
     index = build_index(all_records, source)
     catalog_path.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n")
 
+    # #292: pack upstream .mtlx files into ``<source>-mtlx.json`` and ship
+    # it alongside the catalog. Both gpuopen (writes
+    # ``mtlx_dir/gpuopen/<mid>/material.mtlx``) and polyhaven (writes
+    # ``mtlx_dir/polyhaven/<slug>.mtlx``) drop their upstream .mtlx into
+    # ``mtlx_dir`` during fetch, so we reuse ``pack_original_mtlx_json``
+    # to bundle them. Sources without upstream .mtlx (ambientcg) yield
+    # zero files; we skip the commit + manifest stamp in that case so
+    # the manifest doesn't advertise an empty file.
+    from mat_vis_baker.mtlx_tier import pack_original_mtlx_json
+
+    mtlx_json_path: Path | None = None
+    mtlx_filename: str | None = None
+    source_mtlx_dir = mtlx_dir / source
+    if source_mtlx_dir.is_dir() and any(source_mtlx_dir.rglob("*.mtlx")):
+        mtlx_json_path = pack_original_mtlx_json(
+            mtlx_dir=mtlx_dir,
+            source=source,
+            output_dir=work_dir,
+        )
+        # Only stamp the manifest if pack actually produced a non-empty map.
+        try:
+            packed = json.loads(mtlx_json_path.read_text())
+        except Exception:  # noqa: BLE001
+            packed = {}
+        if packed:
+            mtlx_filename = f"{source}-mtlx.json"
+        else:
+            mtlx_json_path = None
+
     # release-manifest.json — the entry point that JS/shell/Rust clients
     # fetch first. The Python client has a tree-fallback, but the static
     # file is the source of truth.
@@ -582,9 +627,35 @@ def bake_one_per_file(
         for attempt in range(max_retries):
             existing_manifest, parent_sha = _fetch_manifest_with_parent(api, repo_id, release_tag)
             merged = _merge_manifest_for_source(
-                existing_manifest, source, storage_tier, release_tag
+                existing_manifest,
+                source,
+                storage_tier,
+                release_tag,
+                mtlx_filename=mtlx_filename,
             )
             manifest_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
+            # #292: ship the packed upstream-MTLX JSON in the same atomic
+            # commit as catalog + manifest. The manifest entry that points
+            # at it lands in the same commit, so a client that sees the
+            # manifest field is guaranteed to find the file (no
+            # write-before-advertise race).
+            catalog_ops = [
+                CommitOperationAdd(
+                    path_in_repo=f"{source}.json",
+                    path_or_fileobj=str(catalog_path),
+                ),
+                CommitOperationAdd(
+                    path_in_repo="release-manifest.json",
+                    path_or_fileobj=str(manifest_path),
+                ),
+            ]
+            if mtlx_json_path is not None:
+                catalog_ops.append(
+                    CommitOperationAdd(
+                        path_in_repo=f"{source}-mtlx.json",
+                        path_or_fileobj=str(mtlx_json_path),
+                    )
+                )
             try:
                 # #225: 429 retry sits *inside* the CAS loop. The helper
                 # re-raises 412 unchanged so the precondition matcher
@@ -595,16 +666,7 @@ def bake_one_per_file(
                     source=source,
                     repo_id=repo_id,
                     repo_type="dataset",
-                    operations=[
-                        CommitOperationAdd(
-                            path_in_repo=f"{source}.json",
-                            path_or_fileobj=str(catalog_path),
-                        ),
-                        CommitOperationAdd(
-                            path_in_repo="release-manifest.json",
-                            path_or_fileobj=str(manifest_path),
-                        ),
-                    ],
+                    operations=catalog_ops,
                     commit_message=f"feat(data): {release_tag} — {source} catalog + manifest",
                     revision=release_tag,
                     parent_commit=parent_sha,
