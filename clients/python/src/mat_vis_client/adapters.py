@@ -406,6 +406,18 @@ def _build_mtlx_tree(
     if "ior" in scalars and scalars["ior"] is not None:
         ET.SubElement(shader, "input", name="ior", type="float", value=str(scalars["ior"]))
 
+    # Diffuse color on the scalar path — when a "color" texture is bound,
+    # the nodegraph path above provides diffuseColor via the <image>
+    # node (with srgb_texture colorspace). The scalar fallback is for
+    # PBR-scalar-only materials (most metals/plastics) so MTLX renderers
+    # don't fall back to white. ADR-0013 §Decision-2 / #317.
+    # NOTE: 0.6.5 emits sRGB-byte/255 (matches naive _color_hex_to_rgba);
+    # 0.7.0 will switch to linear via _srgb_to_linear under #304.
+    if scalars.get("color_hex") is not None and "color" not in tex_filenames:
+        rgba = _color_hex_to_rgba(scalars["color_hex"])
+        rgb = ",".join(f"{c:g}" for c in rgba[:3])
+        ET.SubElement(shader, "input", name="diffuseColor", type="color3", value=rgb)
+
     # Emissive RGB on the shader scalar path. Texture-bound emission is
     # already routed through the nodegraph above (channel "emission").
     emissive = scalars.get("emissive")
