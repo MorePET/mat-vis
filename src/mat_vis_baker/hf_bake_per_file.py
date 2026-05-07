@@ -380,6 +380,7 @@ def bake_one_per_file(
     allow_prod: bool = False,
     limit: int | None = None,
     offset: int = 0,
+    filter_ids: list[str] | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     batch_max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
     dry_run: bool = False,
@@ -615,7 +616,14 @@ def bake_one_per_file(
                 break
             batch_limit = min(batch_limit, remaining)
 
-        batch = fetch(tier, textures_dir, limit=batch_limit, offset=cursor, mtlx_dir=mtlx_dir)
+        batch = fetch(
+            tier,
+            textures_dir,
+            limit=batch_limit,
+            offset=cursor,
+            filter_ids=filter_ids,
+            mtlx_dir=mtlx_dir,
+        )
         if not batch:
             break
 

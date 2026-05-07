@@ -15,6 +15,7 @@ from pathlib import Path
 
 import requests
 
+from mat_vis_baker.sources import _apply_filter_ids
 from mat_vis_baker.common import (
     TIER_TO_PX,
     AttributionBlock,
@@ -392,6 +393,7 @@ def fetch(
     output_dir: Path,
     *,
     limit: int | None = None,
+    filter_ids: list[str] | None = None,
     offset: int = 0,
     session: requests.Session | None = None,
     mtlx_dir: Path | None = None,
@@ -404,6 +406,7 @@ def fetch(
 
     entries = _filter_with_downloads(entries, tier)
     log.info("%d materials have downloads for tier %s", len(entries), tier)
+    entries = _apply_filter_ids(entries, filter_ids, key="assetId", source="ambientcg")
     if offset:
         entries = entries[offset:]
     if limit:

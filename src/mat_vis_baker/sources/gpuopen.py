@@ -30,6 +30,7 @@ from pathlib import Path
 import requests
 
 from mat_vis_baker._mtlx_scalars import parse_standard_surface_scalars
+from mat_vis_baker.sources import _apply_filter_ids
 from mat_vis_baker.common import (
     TIER_TO_PX,
     AttributionBlock,
@@ -454,14 +455,25 @@ def fetch(
     *,
     limit: int | None = None,
     offset: int = 0,
+    filter_ids: list[str] | None = None,
     session: requests.Session | None = None,
     mtlx_dir: Path | None = None,
 ) -> list[MaterialRecord]:
-    """Fetch gpuopen materials. Layered mtlx graphs are flagged for baking."""
+    """Fetch gpuopen materials. Layered mtlx graphs are flagged for baking.
+
+    ``filter_ids`` (#342): restrict the per-material loop to specific
+    upstream ids (gpuopen UUIDs). Applied BEFORE ``offset`` / ``limit``
+    so callers can spot-test "Bronze Oxydized + Aluminum Hexagon"
+    without binary-searching the API result order. Empty list / None
+    → no filtering. Non-empty list that matches zero materials raises
+    ``ValueError`` with the unmatched ids — fail loud rather than
+    produce an empty bake by mistake.
+    """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     s = session or requests.Session()
     materials = _cached_materials(s)
+    materials = _apply_filter_ids(materials, filter_ids, key="id", source="gpuopen")
     if offset:
         materials = materials[offset:]
     if limit:
