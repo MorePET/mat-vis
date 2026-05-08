@@ -135,7 +135,7 @@ async function main() {
   const sphere = new THREE.Sphere();
   bbox.getBoundingSphere(sphere);
   const bbRadius = Math.max(sphere.radius, center.length());
-  const viewDir = new THREE.Vector3(0.3, 0.4, 1).normalize();
+  const viewDir = new THREE.Vector3(0.7, 0.55, 0.45).normalize();
   camera.position.copy(center).addScaledVector(viewDir, 5 * bbRadius);
   camera.near = Math.max(0.1, 0.01 * bbRadius);
   camera.far = 100 * bbRadius;
