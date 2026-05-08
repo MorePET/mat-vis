@@ -1054,6 +1054,25 @@ class MatVisClient:
 
         return unicodedata.normalize("NFKC", s).strip().casefold()
 
+    @staticmethod
+    def _entry_matches_id_or_name(entry: dict, query: str) -> bool:
+        """Three-way name-aware match for catalog lookups (mat-vis#372).
+
+        Standalone counterpart of the packaged client's predicate. Used
+        by ``_scalars_for`` and ``VisAsset._is_scalar_only_entry`` so
+        both share one matcher and can't drift.
+        """
+        if not isinstance(entry, dict):
+            return False
+        eid = entry.get("id", "")
+        name = (entry.get("mat_vis") or {}).get("name", "")
+        nq = MatVisClient._normalize_name(query)
+        return (
+            eid == query
+            or (eid and MatVisClient._normalize_name(eid) == nq)
+            or (name and MatVisClient._normalize_name(name) == nq)
+        )
+
     def _resolve_material_id(self, source: str, material_id: str, tier: str) -> str:
         """Resolve ``material_id`` to its canonical catalog id.
 
@@ -1297,18 +1316,10 @@ class MatVisClient:
         """
         scalars: dict = {}
         try:
-            norm_query = self._normalize_name(material_id)
             for entry in self.index(source):
-                entry_id = entry.get("id", "")
-                envelope = entry.get("mat_vis") or {}
-                entry_name = envelope.get("name") or ""
-                if not (
-                    entry_id == material_id
-                    or (entry_id and self._normalize_name(entry_id) == norm_query)
-                    or (entry_name and self._normalize_name(entry_name) == norm_query)
-                ):
+                if not self._entry_matches_id_or_name(entry, material_id):
                     continue
-                pbr = envelope.get("pbr") or {}
+                pbr = (entry.get("mat_vis") or {}).get("pbr") or {}
                 for k in ("roughness", "metalness", "ior"):
                     v = pbr.get(k)
                     if v is not None:
@@ -1914,15 +1925,9 @@ class VisAsset:
             return False
         if not isinstance(entries, list):
             return False
-        norm = self._client._normalize_name(self._material_id)
+        # mat-vis#372: route through the centralized 3-way predicate.
         for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            if (
-                entry.get("id") == self._material_id
-                or self._client._normalize_name((entry.get("mat_vis") or {}).get("name") or "")
-                == norm
-            ):
+            if self._client._entry_matches_id_or_name(entry, self._material_id):
                 tiers = entry.get("available_tiers")
                 return not tiers
         return False
