@@ -97,15 +97,15 @@ async function main() {
   const threejs = raw.threejs || (raw.items && raw.items[0] && raw.items[0].threejs);
   if (!threejs) throw new Error('spec missing threejs material dict');
 
-  // Load shader ball GLB once. build123d uses Z-up + meters; Three.js
-  // is Y-up. Scale m→mm, rotate Z-up→Y-up (matches pymat's
-  // visual_render.html convention for build123d-exported glTFs).
+  // Load shader ball GLB once. build123d uses meters; scale m→mm.
+  // build123d's export_gltf already converts its Z-up to glTF/Three.js
+  // Y-up convention — DO NOT add a manual rotation (was a bug; matches
+  // pymat's visual_render.html which also only scales without rotating).
   const gltf = await new Promise((resolve, reject) => {
     new GLTFLoader().load('shader_ball.glb', resolve, undefined, reject);
   });
   const shaderBall = gltf.scene;
   shaderBall.scale.set(1000, 1000, 1000);
-  shaderBall.rotateX(-Math.PI / 2);
 
   const mat = _buildMaterial(threejs);
   shaderBall.traverse((child) => {
@@ -114,16 +114,33 @@ async function main() {
   scene.add(shaderBall);
 
   // Bbox-fit the camera. After scale 1000 + rotate -90°X, bbox is
-  // roughly Y∈[-12,+10] (base→top), X∈[-11,+11], Z∈[-11,+11].
-  // Frame tightly: camera at ~30 units, slight elevation, looking at
-  // the ball's geometric center (roughly Y=0).
+  // roughly Y∈[-12,+10] (base→top), X∈[-11,+11], Z∈[-11,+11]. The
+  // plinth pulls the geometric center down to ~Y=-1, but the
+  // visually-interesting part is the upper sphere portion (Y > 0).
+  // Frame so the sphere dominates: lookAt biased upward, camera at
+  // gentle elevation matching bernhard's ocp_vscode reference (~10°
+  // from horizontal, mostly front-facing 3/4 view).
   const bbox = new THREE.Box3().setFromObject(shaderBall);
   const center = bbox.getCenter(new THREE.Vector3());
-  const size = bbox.getSize(new THREE.Vector3()).length();
+  const size = bbox.getSize(new THREE.Vector3());
+  // The shader ball's two openings sit at (±12.4, ±7.15, 0) post-
+  // rotation — both in the X–Y plane. To put them EDGE-ON (invisible
+  // on the sides, with the closed back of the outer shell visible as
+  // a crescent above the inner display sphere), the camera must look
+  // primarily along +Z. Tiny X offset gives a 3/4 hint without
+  // re-aligning with an opening; small +Y elevation matches bernhard's
+  // ocp_vscode reference (plinth peeks at bottom).
+  const lookTarget = new THREE.Vector3(center.x, center.y + size.y * 0.05, center.z);
+  // Frame the bbox diagonal so plinth + sphere both fit, with margin
+  // matching bernhard's reference (sphere fills ~70% of frame).
   const fovRad = camera.fov * Math.PI / 180;
-  const dist = (size / (2 * Math.tan(fovRad / 2))) * 1.15;
-  camera.position.set(center.x + dist * 0.6, center.y + dist * 0.35, center.z + dist * 0.85);
-  camera.lookAt(center);
+  const dist = (size.length() * 0.7) / (2 * Math.tan(fovRad / 2));
+  camera.position.set(
+    lookTarget.x + dist * 0.12,
+    lookTarget.y + dist * 0.18,
+    lookTarget.z + dist * 0.98
+  );
+  camera.lookAt(lookTarget);
 
   // 3 warmup renders for shader compile + PBR convergence
   for (let i = 0; i < 3; i++) renderer.render(scene, camera);

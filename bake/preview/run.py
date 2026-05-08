@@ -168,6 +168,11 @@ def main():
     parser.add_argument(
         "--skip-check", action="store_true", help="skip the post-bake fingerprint check"
     )
+    parser.add_argument(
+        "--tag",
+        default=None,
+        help="explicit substrate revision (HF branch or tag). Default: client picks DEFAULT_TAG",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -183,7 +188,7 @@ def main():
     from mat_vis_client import MatVisClient
     from playwright.sync_api import sync_playwright
 
-    client = MatVisClient()
+    client = MatVisClient(tag=args.tag) if args.tag else MatVisClient()
     log.info("active release tag: %s", client._tag)
 
     with tempfile.TemporaryDirectory() as tmpd:
