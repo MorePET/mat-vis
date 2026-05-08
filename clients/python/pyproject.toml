@@ -31,6 +31,14 @@ gltf = ["pillow>=10.0"]
 # (functional but coarser ranking). rapidfuzz is a small compiled wheel
 # (~250KB) — kept opt-in so the default install stays zero-dep.
 search = ["rapidfuzz>=3.0"]
+# Test-only deps. PyYAML loads the shared ``fixtures/expected_pbr.yaml``
+# source-of-truth used by the Layer 3 / Layer 4 field-passthrough tests
+# (mat-vis#382). Kept under an opt-in extra so the runtime install
+# stays zero-dependency.
+test = [
+    "pytest>=7",
+    "pyyaml>=6.0",
+]
 
 [project.scripts]
 mat-vis-client = "mat_vis_client.client:main"

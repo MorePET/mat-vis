@@ -460,9 +460,11 @@ source = { editable = "clients/python" }
 [package.metadata]
 requires-dist = [
     { name = "pillow", marker = "extra == 'gltf'", specifier = ">=10.0" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=7" },
+    { name = "pyyaml", marker = "extra == 'test'", specifier = ">=6.0" },
     { name = "rapidfuzz", marker = "extra == 'search'", specifier = ">=3.0" },
 ]
-provides-extras = ["gltf", "search"]
+provides-extras = ["gltf", "search", "test"]
 
 [[package]]
 name = "materialx"
