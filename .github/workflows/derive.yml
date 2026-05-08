@@ -125,8 +125,19 @@ env:
 # #235 hotfix: workflow-level budget — see the matching block in
 # bake.yml. Job-level concurrency in #233 conflicted with matrix
 # siblings; reverted to workflow level + matrix.max-parallel: 1 below.
+#
+# Group key includes kind/source-tier/target-tier so distinct-purpose
+# dispatches (e.g. resize 1k→512 vs resize 1k→256 vs ktx2-1k) don't
+# displace each other in the queue. GHA's "at most one pending per
+# group with cancel-in-progress=false" rule cancelled sibling resize
+# dispatches that all shared the legacy ``derive-{repo}-budget`` key —
+# repeatable trigger when a user fires three target-tiers in quick
+# succession (the third dispatch would cancel the second's pending
+# slot, leaving a hole in the chain). Same-purpose double-dispatch
+# (e.g. retrying resize 1k→512 while one is still queued) still
+# serializes correctly because that case shares the group key.
 concurrency:
-  group: derive-${{ inputs.repo-id }}-budget
+  group: derive-${{ inputs.repo-id }}-${{ inputs.kind }}-${{ inputs.source-tier }}-${{ inputs.target-tier }}-budget
   cancel-in-progress: false
 
 jobs:
