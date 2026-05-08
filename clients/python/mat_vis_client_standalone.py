@@ -1298,13 +1298,39 @@ class MatVisClient:
             "positionals, or source=, id=, tier= kwargs"
         )
 
+    # mat-vis#380: full-PBR passthrough. Adapter side already routes
+    # every key listed here to the correct MeshPhysicalMaterial /
+    # KHR-extension property; the gap was purely on the read side.
+    _PBR_SCALAR_PASSTHROUGH: tuple[str, ...] = (
+        "roughness",
+        "metalness",
+        "ior",
+        "transmission",
+        "thickness",
+        "dispersion",
+        "clearcoat",
+        "clearcoat_roughness",
+        "specular_intensity",
+        "emissive",
+    )
+
     def _scalars_for(self, source: str, material_id: str) -> dict:
         """Look up PBR scalars for a material from the source index.
 
-        v3 (ADR-0011): reads ``mat_vis.pbr.*`` and synthesizes a
-        ``color_hex`` string from ``pbr.color_rgb`` for the adapters
-        (``to_threejs`` / ``to_gltf`` / ``to_mtlx``) which still consume
-        the hex shape.
+        v3 (ADR-0011): reads ``mat_vis.pbr.*`` and forwards every field
+        the adapters can consume so glass-class / coated / authored-
+        specular materials reach the renderer with their distinguishing
+        scalars instead of silently rendering as opaque-default-grey.
+        mat-vis#380.
+
+        Synthesizes a ``color_hex`` string from ``pbr.color_rgb`` and
+        forwards ``pbr.specular_color`` (linear RGB) as
+        ``specular_color_linear`` so the adapters'
+        ``_resolve_specular_color`` path picks it up without redoing
+        the colorspace boundary.
+
+        Dumb-adapter contract (ADR-0013 / mat-vis#290): copy verbatim,
+        don't inject defaults, don't normalize.
 
         Lookup is name-aware (mat-vis#368): match canonical id exactly,
         OR casefold-normalized id, OR casefold-normalized
@@ -1320,7 +1346,7 @@ class MatVisClient:
                 if not self._entry_matches_id_or_name(entry, material_id):
                     continue
                 pbr = (entry.get("mat_vis") or {}).get("pbr") or {}
-                for k in ("roughness", "metalness", "ior"):
+                for k in self._PBR_SCALAR_PASSTHROUGH:
                     v = pbr.get(k)
                     if v is not None:
                         scalars[k] = v
@@ -1332,6 +1358,9 @@ class MatVisClient:
                         int(round(g * 255)),
                         int(round(b * 255)),
                     )
+                spec_rgb = pbr.get("specular_color")
+                if isinstance(spec_rgb, list) and len(spec_rgb) >= 3:
+                    scalars["specular_color_linear"] = list(spec_rgb[:3])
                 break
         except Exception:
             pass

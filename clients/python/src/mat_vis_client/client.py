@@ -1919,24 +1919,52 @@ class MatVisClient:
             "(source, id, tier) positionals, or source=, id=, tier= kwargs"
         )
 
+    # Plain float/int passthrough fields read verbatim from
+    # ``mat_vis.pbr.*`` into the adapter scalars dict. Adapter-side
+    # (``to_threejs`` / ``to_gltf``) already routes each of these to the
+    # correct MeshPhysicalMaterial / KHR-extension key — the gap was
+    # purely on the read side. mat-vis#380.
+    _PBR_SCALAR_PASSTHROUGH: tuple[str, ...] = (
+        "roughness",
+        "metalness",
+        "ior",
+        "transmission",
+        "thickness",
+        "dispersion",
+        "clearcoat",
+        "clearcoat_roughness",
+        "specular_intensity",
+        "emissive",
+    )
+
     def _scalars_for(self, source: str, material_id: str) -> dict:
         """Look up PBR scalars for a material from the source index.
 
-        Reads ``mat_vis.pbr.*`` (v3 catalog shape, ADR-0011). Returns a
-        flat dict keyed by the adapter interface's scalar names
-        (``roughness`` / ``metalness`` / ``ior`` / ``color_hex``) —
-        ``color_hex`` is synthesized from ``pbr.color_rgb`` for the
-        ``to_threejs`` / ``to_gltf`` / ``to_mtlx`` adapters which still
-        consume the hex shape.
+        Reads ``mat_vis.pbr.*`` (v3 catalog shape, ADR-0011) and passes
+        through every PBR field the adapters can consume so glass-class
+        materials (``transmission``, ``thickness``, ``dispersion``),
+        coated materials (``clearcoat`` / ``clearcoat_roughness``), and
+        gpuopen-style authored specular (``specular_intensity`` /
+        ``specular_color``) actually reach the renderer instead of
+        silently rendering as opaque-default-grey. mat-vis#380.
+
+        Returns a flat dict keyed by the adapter interface's scalar
+        names. ``color_hex`` is synthesized from ``pbr.color_rgb`` for
+        ``to_threejs`` / ``to_gltf`` / ``to_mtlx``; ``specular_color``
+        (linear RGB per :class:`PBRBlock`) is forwarded as
+        ``specular_color_linear`` so the shared
+        :func:`adapters._resolve_specular_color` path picks it up
+        without re-doing the de-gamma boundary.
+
+        Dumb-adapter contract (ADR-0013 / mat-vis#290): copy what's in
+        the substrate verbatim, do not inject defaults, do not normalize.
+        The baker already materialized neutral-multiplier conventions.
 
         Lookup is name-aware (mat-vis#368): substrate stores normalized
         lowercase ids, but callers (pymat, downstream tests) routinely
         pass display names like ``"Aluminum"`` or ``"Plastic (Acrylic)"``.
         Match against the canonical ``id`` exact, the casefold-normalized
-        ``id``, or the casefold-normalized ``mat_vis.name``. Without this,
-        scalar-only sources (physicallybased + the gpuopen scalar-only
-        subset) silently rendered as default-grey because every PBR scalar
-        was dropped.
+        ``id``, or the casefold-normalized ``mat_vis.name``.
 
         Silent on failure — returns ``{}`` if the index is unavailable or
         the material isn't found. Used by :class:`MtlxSource` to fill in
@@ -1948,7 +1976,7 @@ class MatVisClient:
                 if not self._entry_matches_id_or_name(entry, material_id):
                     continue
                 pbr = (entry.get("mat_vis") or {}).get("pbr") or {}
-                for k in ("roughness", "metalness", "ior"):
+                for k in self._PBR_SCALAR_PASSTHROUGH:
                     v = pbr.get(k)
                     if v is not None:
                         scalars[k] = v
@@ -1960,6 +1988,12 @@ class MatVisClient:
                         int(round(g * 255)),
                         int(round(b * 255)),
                     )
+                # specular_color is authored in linear RGB by the baker
+                # (cf. ``PBRBlock.specular_color``); forward as the
+                # ``specular_color_linear`` alias the adapters read.
+                spec_rgb = pbr.get("specular_color")
+                if isinstance(spec_rgb, list) and len(spec_rgb) >= 3:
+                    scalars["specular_color_linear"] = list(spec_rgb[:3])
                 break
         except Exception:
             pass
