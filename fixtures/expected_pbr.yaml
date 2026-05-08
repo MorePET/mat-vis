@@ -1,0 +1,171 @@
+---
+# fixtures/expected_pbr.yaml
+#
+# Single source of truth for the 5-layer field-passthrough test
+# architecture (mat-vis#382). Hand-curated bounds describe what each
+# material *physically is*, not what the substrate happens to emit on
+# any given day — so re-introducing #380-class adapter bugs (dropping
+# transmission / clearcoat / specular*) trips the Layer 3 / Layer 4
+# tests in <1 s.
+#
+# Bounds rationale per material is inline. Seed set drawn from
+# Bernhard's mat-vis#285 reference grid, deliberately spanning:
+#   * scalar-only transmissive (physicallybased Glass, Plastic Acrylic)
+#   * textured transmissive (gpuopen Frosted Glass)
+#   * scalar-only metals (gpuopen Chrome / Gold / Brass; physicallybased Aluminum)
+#   * textured metals (gpuopen Aluminum Brushed, Bronze Oxydized,
+#     Stainless Steel Brushed)
+#
+# Layer 3 (`MatVisClient._scalars_for`) consumes the ``expected``
+# bounds — each named field must be present in the returned scalars
+# dict and within its bound.
+# Layer 4 (`to_threejs` / `to_gltf` adapters) consumes the
+# ``renderer_keys`` map — each listed key must be present in the
+# adapter output (dotted paths nest into ``extensions.*``).
+schema_version: 1
+substrate_revision: v2026.04.99-tst-285
+
+entries:
+  # ── 1. Glass (physicallybased) — scalar-only transmissive ─────────
+  # Canonical optical glass: transmission=1.0, ior~1.5, near-mirror
+  # smoothness. Bounds keep KHR_materials_ior out of the glTF assertion
+  # set (the adapter intentionally omits the spec-default 1.5 to avoid
+  # no-op extension entries — see _ior_at_default).
+  - source: physicallybased
+    material: Glass
+    expected:
+      transmission: {min: 0.5, max: 1.0}
+      ior: {min: 1.4, max: 1.7}
+      roughness: {min: 0.0, max: 0.1}
+    renderer_keys:
+      threejs: [transmission, ior, roughness]
+      gltf:
+        - extensions.KHR_materials_transmission
+
+  # ── 2. Plastic (Acrylic) (physicallybased) — scalar-only transmissive
+  # PMMA: refractive (ior~1.49), fully transmissive. Distinct from
+  # Glass because acrylic's ior is meaningfully > 1.5, so the glTF
+  # KHR_materials_ior extension *should* fire. Catches both the #380
+  # transmission drop and any future ior-fp-drift regression.
+  - source: physicallybased
+    material: Plastic (Acrylic)
+    expected:
+      transmission: {min: 0.5, max: 1.0}
+      ior: {min: 1.45, max: 1.55}
+      roughness: {min: 0.0, max: 0.6}
+    renderer_keys:
+      threejs: [transmission, ior, roughness]
+      gltf:
+        - extensions.KHR_materials_transmission
+        - extensions.KHR_materials_ior
+
+  # ── 3. Frosted Glass (gpuopen) — textured transmissive ──────────────
+  # Authored as a transmissive layer with dispersion + non-trivial
+  # thickness; the substrate emits all three of transmission /
+  # dispersion / thickness for this material. Captures the full
+  # glass-class bug surface from #380.
+  - source: gpuopen
+    material: Glass
+    expected:
+      transmission: {min: 0.5, max: 1.0}
+      dispersion: {min: 0.05, max: 1.0}
+      thickness: {min: 1.0, max: 100.0}
+    renderer_keys:
+      threejs: [transmission, dispersion, thickness]
+      gltf:
+        - extensions.KHR_materials_transmission
+        - extensions.KHR_materials_dispersion
+        - extensions.KHR_materials_volume
+
+  # ── 4. Aluminum (physicallybased) — scalar-only metal ───────────────
+  # Pure metal: metalness=1.0, ior~1.34 (real Al is 1.34 at 550 nm),
+  # near-mirror roughness.
+  - source: physicallybased
+    material: Aluminum
+    expected:
+      metalness: {min: 0.9, max: 1.0}
+      roughness: {min: 0.0, max: 0.5}
+    renderer_keys:
+      threejs: [metalness, roughness]
+      gltf: []  # gltf metallicFactor lives at pbrMetallicRoughness.* — covered at L3
+
+  # ── 5. Chrome (gpuopen) — scalar-only metal ─────────────────────────
+  # Bernhard's reference uses ``tier=None`` (scalar) for Chrome;
+  # baker emits roughness/metalness/color_rgb only.
+  - source: gpuopen
+    material: Chrome
+    expected:
+      metalness: {min: 0.9, max: 1.0}
+      roughness: {min: 0.0, max: 0.5}
+    renderer_keys:
+      threejs: [metalness, roughness]
+      gltf: []
+
+  # ── 6. Gold (gpuopen) — scalar-only metal ───────────────────────────
+  # Same scalar-only path as Chrome; warm-coloured authored via
+  # color_rgb. Color check exercises the synthesized ``color_hex``
+  # passthrough alongside metalness.
+  - source: gpuopen
+    material: Gold
+    expected:
+      metalness: {min: 0.9, max: 1.0}
+      roughness: {min: 0.0, max: 0.6}
+    renderer_keys:
+      threejs: [metalness, roughness, color]
+      gltf: []
+
+  # ── 7. Aluminum Brushed (gpuopen) — textured metal ──────────────────
+  # Per #285's empirical table: authored ``base_color=[0.89, 0.89,
+  # 0.89]`` survives because no color texture; metalness=1.0 holds.
+  # Specular_intensity authored at 1.0 (default), so we don't assert
+  # specularFactor in glTF (extension would be omitted).
+  - source: gpuopen
+    material: Aluminum Brushed
+    expected:
+      metalness: {min: 0.9, max: 1.0}
+      roughness: {min: 0.0, max: 1.0}
+    renderer_keys:
+      threejs: [metalness, roughness]
+      gltf: []
+
+  # ── 8. Bronze Oxydized (gpuopen) — textured metal ───────────────────
+  # #285 lists this in the wrong-look set. Tile-bound texture supplies
+  # the hue; scalar passthrough must include metalness + roughness.
+  - source: gpuopen
+    material: Bronze Oxydized
+    expected:
+      metalness: {min: 0.9, max: 1.0}
+      roughness: {min: 0.0, max: 1.0}
+    renderer_keys:
+      threejs: [metalness, roughness]
+      gltf: []
+
+  # ── 9. Stainless Steel Brushed (gpuopen) — textured metal ───────────
+  # Same shape as Bronze Oxydized but authored with anisotropic
+  # roughness; we only assert the scalar passthrough exists.
+  - source: gpuopen
+    material: Stainless Steel Brushed
+    expected:
+      metalness: {min: 0.9, max: 1.0}
+      roughness: {min: 0.0, max: 1.0}
+    renderer_keys:
+      threejs: [metalness, roughness]
+      gltf: []
+
+  # ── 10. Perforated Metal (gpuopen) — clearcoat metal ────────────────
+  # #380 empirical table: substrate emits ``clearcoat_roughness=0.1,
+  # specular_intensity=1.0, dispersion=0.0``. We assert the clearcoat
+  # passthrough — pre-#381 the field never reached the adapter.
+  # NOTE: glTF KHR_materials_clearcoat only fires when clearcoat
+  # itself is non-zero; we avoid asserting it in the gltf renderer_keys
+  # because the substrate emits clearcoat_roughness without a non-zero
+  # clearcoat factor. The Layer 3 expected-bounds catches the #380
+  # passthrough gap regardless.
+  - source: gpuopen
+    material: Perforated Metal
+    expected:
+      clearcoat_roughness: {min: 0.0, max: 1.0}
+      metalness: {min: 0.9, max: 1.0}
+    renderer_keys:
+      threejs: [clearcoatRoughness, metalness]
+      gltf: []

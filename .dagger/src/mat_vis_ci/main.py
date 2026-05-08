@@ -322,7 +322,10 @@ class MatVisCi:
             .with_mounted_cache("/root/.cache/pip", pip_cache)
             .with_mounted_directory("/app", context)
             .with_workdir("/app/clients/python")
-            .with_exec(["pip", "install", "--quiet", "pytest", "."])
+            # ``[test]`` extra brings in PyYAML for the shared
+            # ``fixtures/expected_pbr.yaml`` source-of-truth used by
+            # the Layer 3 / Layer 4 passthrough tests (mat-vis#382).
+            .with_exec(["pip", "install", "--quiet", "pytest", ".[test]"])
             .with_env_variable("MAT_VIS_TAG", tag)
         )
         if live:
