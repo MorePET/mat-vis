@@ -1610,6 +1610,14 @@ class MatVisClient:
            b. 1 match, tier staged → return id.
            c. 1 match, tier not staged → :class:`MaterialNotStagedError`.
         4. Nothing matches → :class:`UnknownMaterialError`.
+
+        Special case ``tier="scalar"`` (mat-vis#370): scalar-only sources
+        (physicallybased + the 18-entry gpuopen scalar-only subset) carry
+        no texture tiers — ``"scalar"`` is the convention sentinel
+        (cf. pymat ``TIERS_SCALAR = ["scalar"]``), not a missing bake. We
+        skip the ``available_tiers`` membership check in that case so
+        every entry counts as "staged". Without this, scalar-only callers
+        always raised :class:`MaterialNotStagedError`.
         """
         try:
             idx = self.index(source)
@@ -1640,6 +1648,11 @@ class MatVisClient:
                 by_name.append(entry)
 
         def _is_staged(entry: dict) -> bool:
+            # mat-vis#370: tier="scalar" is the scalar-only sentinel —
+            # treat as always-staged so scalar-only callers don't trip
+            # MaterialNotStagedError.
+            if tier == "scalar":
+                return True
             return tier in (entry.get("available_tiers") or [])
 
         if by_id is not None:
@@ -1889,16 +1902,33 @@ class MatVisClient:
         ``to_threejs`` / ``to_gltf`` / ``to_mtlx`` adapters which still
         consume the hex shape.
 
+        Lookup is name-aware (mat-vis#368): substrate stores normalized
+        lowercase ids, but callers (pymat, downstream tests) routinely
+        pass display names like ``"Aluminum"`` or ``"Plastic (Acrylic)"``.
+        Match against the canonical ``id`` exact, the casefold-normalized
+        ``id``, or the casefold-normalized ``mat_vis.name``. Without this,
+        scalar-only sources (physicallybased + the gpuopen scalar-only
+        subset) silently rendered as default-grey because every PBR scalar
+        was dropped.
+
         Silent on failure — returns ``{}`` if the index is unavailable or
         the material isn't found. Used by :class:`MtlxSource` to fill in
         shader scalar inputs when a texture channel is absent.
         """
         scalars: dict = {}
         try:
+            norm_query = self._normalize_name(material_id)
             for entry in self.index(source):
-                if entry["id"] != material_id:
+                entry_id = entry.get("id", "")
+                envelope = entry.get("mat_vis") or {}
+                entry_name = envelope.get("name") or ""
+                if not (
+                    entry_id == material_id
+                    or (entry_id and self._normalize_name(entry_id) == norm_query)
+                    or (entry_name and self._normalize_name(entry_name) == norm_query)
+                ):
                     continue
-                pbr = (entry.get("mat_vis") or {}).get("pbr") or {}
+                pbr = envelope.get("pbr") or {}
                 for k in ("roughness", "metalness", "ior"):
                     v = pbr.get(k)
                     if v is not None:

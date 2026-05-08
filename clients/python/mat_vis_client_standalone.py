@@ -1060,6 +1060,10 @@ class MatVisClient:
         Per-file substrate (#186 / ADR-0012): "is this material staged
         for the requested tier?" comes from the v3 catalog entry's
         ``available_tiers`` field, not a separate rowmap.
+
+        Special case ``tier="scalar"`` (mat-vis#370): scalar-only sources
+        carry no texture tiers — ``"scalar"`` is the sentinel, not a
+        missing bake. Skip the ``available_tiers`` check in that case.
         """
         try:
             idx = self.index(source)
@@ -1090,6 +1094,10 @@ class MatVisClient:
                 by_name.append(entry)
 
         def _is_staged(entry: dict) -> bool:
+            # mat-vis#370: tier="scalar" is the scalar-only sentinel —
+            # treat as always-staged.
+            if tier == "scalar":
+                return True
             return tier in (entry.get("available_tiers") or [])
 
         if by_id is not None:
@@ -1279,15 +1287,28 @@ class MatVisClient:
         (``to_threejs`` / ``to_gltf`` / ``to_mtlx``) which still consume
         the hex shape.
 
+        Lookup is name-aware (mat-vis#368): match canonical id exactly,
+        OR casefold-normalized id, OR casefold-normalized
+        ``mat_vis.name``. Substrate stores lowercase ids; callers
+        routinely pass display names like ``"Aluminum"``.
+
         Silent on failure — returns ``{}`` if the index is unavailable or
         the material isn't found.
         """
         scalars: dict = {}
         try:
+            norm_query = self._normalize_name(material_id)
             for entry in self.index(source):
-                if entry["id"] != material_id:
+                entry_id = entry.get("id", "")
+                envelope = entry.get("mat_vis") or {}
+                entry_name = envelope.get("name") or ""
+                if not (
+                    entry_id == material_id
+                    or (entry_id and self._normalize_name(entry_id) == norm_query)
+                    or (entry_name and self._normalize_name(entry_name) == norm_query)
+                ):
                     continue
-                pbr = (entry.get("mat_vis") or {}).get("pbr") or {}
+                pbr = envelope.get("pbr") or {}
                 for k in ("roughness", "metalness", "ior"):
                     v = pbr.get(k)
                     if v is not None:
