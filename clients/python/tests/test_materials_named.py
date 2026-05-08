@@ -1,6 +1,6 @@
 """Red test for mat-vis#330: materials_named() output ergonomics.
 
-bernhard-42's mat-vis#311 sub-bullet "Consistently support material names":
+mat-vis#311 sub-bullet "Consistently support material names":
 ``client.materials("ambientcg", "1k")`` returns IDs (UUIDs for gpuopen,
 slugs for ambientcg/polyhaven). The catalog already carries human-readable
 names in ``entry.mat_vis.name``; ``materials()`` just doesn't surface them.
@@ -32,14 +32,14 @@ def test_materials_named_method_exists() -> None:
     HF tree to assert returned values). This test is the forcing
     function: the API surface must exist before the fix can claim closed.
 
-    bernhard's repro at https://github.com/MorePET/mat-vis/issues/311 —
+    Repro at https://github.com/MorePET/mat-vis/issues/311 —
     "Consistently support material names" section.
     """
     from mat_vis_client import MatVisClient
 
     assert hasattr(MatVisClient, "materials_named"), (
         "MatVisClient.materials_named is missing — see mat-vis#330. "
-        "Bernhard wants {id: display_name} dict alongside the existing "
+        "mat-vis#330 wants {id: display_name} dict alongside the existing "
         "materials() method so consumers can render material names in UI "
         "without a second round-trip through the catalog."
     )

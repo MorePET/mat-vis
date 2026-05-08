@@ -1,7 +1,7 @@
 """Scalar-only path bug fixes (mat-vis#368, mat-vis#370).
 
 Two bugs surfaced in the scalar-only render path (pymat
-``test_visual_regression.py::BERNHARD_SCALAR_ONLY``: the case rendered as
+``test_visual_regression.py::SCALAR_ONLY``: the case rendered as
 default-grey because both lookups failed silently for the typical
 display-name input).
 

@@ -199,7 +199,7 @@ def fetch(*, session: requests.Session | None = None) -> list[MaterialRecord]:
             # tiers.scalar.complete=True for physicallybased). Was [];
             # client.materials("physicallybased", "scalar") returned
             # empty for every dispatcher because `tier in []` matches
-            # nothing — see Bernhard's #313 cascade.
+            # nothing — see mat-vis#313 cascade.
             available_tiers=["scalar"],
             maps=[],
         )
