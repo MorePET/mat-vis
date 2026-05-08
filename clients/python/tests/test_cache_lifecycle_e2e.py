@@ -8,7 +8,7 @@ Two distinct scenarios — neither covered by the unit tests in
    spawn one client process that writes cache → exit → spawn
    another client process at the same ``cache_dir`` and assert
    the new client doesn't read through the prior version's
-   layout (the bernhard #281/#283 staleness class).
+   layout (the mat-vis#281/#283 staleness class).
 
    The HF round-trip is mocked at the URL level via a local
    ``http.server`` so the test runs in any environment without

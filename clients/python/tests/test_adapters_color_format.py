@@ -1,6 +1,6 @@
 """Tests for to_threejs ``color_format`` kwarg (ADR-0013 §Decision-2 / #298).
 
-py-mat #99 (Bernhard, build123d): emitting ``result["color"]`` as a
+py-mat#99 (build123d): emitting ``result["color"]`` as a
 hex int is opaque in the REPL, doesn't round-trip through JSON for
 non-Three.js consumers, and is un-Pythonic. ``color_format: Literal[
 "hex", "int"]`` exposes the choice; default is ``"hex"`` since 0.7.0.

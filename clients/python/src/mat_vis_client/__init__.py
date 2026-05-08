@@ -100,7 +100,7 @@ def get_client() -> MatVisClient:
     reporter auto-detects whether stderr is a TTY:
 
     - **REPL / Jupyter** (stderr is TTY): pretty one-line progress per
-      cache-miss download — bernhard's #312 repro now produces visible
+      cache-miss download — mat-vis#312 repro now produces visible
       feedback without consumers configuring loggers.
     - **CI / scripts** (stderr not TTY): degrades to a silent
       ``log_reporter`` at INFO. Default root-logger level is WARNING,

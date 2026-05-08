@@ -794,8 +794,8 @@ class MatVisClient:
 
         Layout (mat-vis#355): ``<cache_dir>/<client-version>/<tag>/...``.
         The client-version segment ensures upgrades across major.minor
-        boundaries never read through a stale layout (the bug bernhard
-        hit twice; see #281, #283 retraction). The tag segment keeps
+        boundaries never read through a stale layout (the bug surfaced
+        twice; see #281, #283 retraction). The tag segment keeps
         per-release data isolated so a tag=v1 cache never serves bytes
         for a tag=v2 request.
 
@@ -1174,7 +1174,7 @@ class MatVisClient:
         tiers. Hides the ``"scalar"`` sentinel from consumers of
         scalar-only sources like physicallybased; ``materials("physicallybased")``
         just works without the user having to type
-        ``materials("physicallybased", "scalar")``. Bernhard's #281
+        ``materials("physicallybased", "scalar")``. The mat-vis#281
         instinct (``tier=None``) is the friendlier path for both
         scalar-only and "I just want the catalog" multi-tier cases.
 
@@ -1257,8 +1257,8 @@ class MatVisClient:
         (#258). One conditional GET per client lifecycle per source.
         Server responds 304 if the index hasn't moved (immutable on a
         pinned tag) and we serve the cached body. Pre-#355 this path
-        bypassed ETag entirely, which is why bernhard's two false-report
-        cycles (#281/#283) surfaced as cache staleness — the index
+        bypassed ETag entirely, which is why the two false-report
+        cycles (mat-vis#281/#283) surfaced as cache staleness — the index
         cache had no invalidation hook beyond manual ``rm -rf``.
 
         Guards the v2/v3 boundary: a v3 client pointed at a v2 catalog (e.g.
@@ -1274,7 +1274,7 @@ class MatVisClient:
             # cached etag (warm cache). Cold start (cached_etag is None)
             # routes through `_get_json`, preserving the pre-#355 fetch
             # surface that tests mock heavily and avoiding a 16-test-
-            # file rewrite. The warm path is what bernhard's #281/#283
+            # file rewrite. The warm path is what the mat-vis#281/#283
             # cycles needed; the cold path is unchanged behavior.
             if cached_etag is not None:
                 body, new_etag = _get_with_etag(url, etag=cached_etag)
@@ -1294,8 +1294,9 @@ class MatVisClient:
                 # require a HEAD probe; not worth the round-trip), so
                 # the warm-cache validation kicks in only after the
                 # second client lifecycle when an ETag is available.
-                # On a fresh process with NO cache, the next bernhard-
-                # class staleness incident still requires `cache clear`
+                # On a fresh process with NO cache, the next
+                # mat-vis#281/#283-class staleness incident still
+                # requires `cache clear`
                 # — but only ONCE. Subsequent fetches ETag-validate.
                 data = _get_json(url)
                 self._indexes[source] = data
