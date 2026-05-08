@@ -259,15 +259,15 @@ class TestCacheClearStaleOnly:
 
 
 class TestGetClientDefaults:
-    """Independent reviewer of #358 caught: bernhard reaches mat-vis
-    via pymat's singleton, never wiring on_event= himself, so the
-    silent-by-default behavior left him exactly as broken as before
-    #287's silent log.info. Pin the post-fix behavior here so a
-    future refactor can't quietly remove it."""
+    """Independent reviewer of #358 caught: the reporter of mat-vis#312
+    reaches mat-vis via pymat's singleton, never wiring on_event=
+    themselves, so the silent-by-default behavior left them exactly as
+    broken as before #287's silent log.info. Pin the post-fix behavior
+    here so a future refactor can't quietly remove it."""
 
     def test_get_client_singleton_wires_tty_reporter_by_default(self, monkeypatch):
         """get_client() must produce a client with on_event set —
-        otherwise bernhard's #312 repro stays broken even after #358."""
+        otherwise mat-vis#312 repro stays broken even after #358."""
         # Reset singleton so the test runs with a fresh init.
         import mat_vis_client
 
@@ -277,7 +277,7 @@ class TestGetClientDefaults:
         c = mat_vis_client.get_client()
         assert c._on_event is not None, (
             "get_client() must wire on_event= by default — silent default leaves "
-            "bernhard's #312 repro broken (his pymat singleton path can't see events)"
+            "mat-vis#312 repro broken (the pymat singleton path can't see events)"
         )
 
     def test_mat_vis_no_progress_env_var_opts_out(self, monkeypatch):
@@ -309,8 +309,8 @@ class TestLegacyLayoutAlsoLogsWarning:
         (orphan / "marker").write_text("x" * 1024)
 
         with caplog.at_level(logging.WARNING, logger="mat-vis-client"):
-            # No on_event= — the silent-default path bernhard hits
-            # via pymat's singleton.
+            # No on_event= — the silent-default path that mat-vis#312
+            # hits via pymat's singleton.
             MatVisClient(cache_dir=tmp_path, tag="v2026.04.2")
 
         # The WARN line includes the layout count + cache_dir in the

@@ -1,6 +1,6 @@
 """Download-progress logging on cache miss (#287).
 
-bernhard-42 reports that ``show()`` over several uncached materials
+mat-vis#287: ``show()`` over several uncached materials
 pauses for many seconds with no feedback (each baked-material fetch
 ~0.8-1s). Library users (build123d, Jupyter, etc.) need a hook to know
 the client is actually doing work, not hung.
@@ -119,7 +119,7 @@ def test_fetch_texture_silent_on_cache_hit(tmp_cache, caplog):
 def test_client_accepts_on_download_callback() -> None:
     """``MatVisClient`` should accept an ``on_download=`` callback that
     fires on each cache-miss download. Replaces the silent ``log.info``
-    from #287 (whose close was premature — see bernhard's #312).
+    from #287 (whose close was premature — see mat-vis#312).
 
     The callback is the proper user-facing surface: zero default behavior,
     consumers wire their UI (tqdm, rich, custom). See mat-vis#333 for the
@@ -129,7 +129,7 @@ def test_client_accepts_on_download_callback() -> None:
     Full behavioural test (callback fires per cache-miss with correct
     args) belongs in the fix PR.
 
-    bernhard's repro at https://github.com/MorePET/mat-vis/issues/312 —
+    Repro at https://github.com/MorePET/mat-vis/issues/312 —
     5 calls to ``Vis(...).to_threejs()`` over fresh cache produces zero
     output today.
     """
@@ -142,5 +142,5 @@ def test_client_accepts_on_download_callback() -> None:
         "MatVisClient.__init__ should accept an on_download= callback "
         "kwarg (mat-vis#333). Today only log.info fires — silent in "
         "default loggers (consumers' apps default to WARNING). "
-        "bernhard's #312 cascade: '5 downloads, zero feedback'."
+        "mat-vis#312 cascade: '5 downloads, zero feedback'."
     )

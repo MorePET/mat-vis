@@ -12,7 +12,7 @@ The contract:
 - ``client.index()`` returns ``list[Match]`` (consistent with search()).
 - ``client.asset()`` is polymorphic — accepts a ``Match``, a ``"source/id"``
   string ref, or explicit ``source=, id=, tier=`` kwargs.
-- ``materials()`` is unchanged (returns ``list[str]``, protects bernhard's
+- ``materials()`` is unchanged (returns ``list[str]``, protects
   downstream tests).
 - ``SourceNotFoundError`` gains fuzzy did-you-mean for typos like
   ``ambient_cg`` → ``ambientcg``.
@@ -526,7 +526,7 @@ def test_source_not_found_includes_did_you_mean():
 
 
 def test_materials_still_returns_list_of_str():
-    """Bernhard's downstream tests rely on list[str]. Unchanged."""
+    """Downstream tests rely on list[str]. Unchanged."""
     from mat_vis_client import MatVisClient
 
     c = MatVisClient()

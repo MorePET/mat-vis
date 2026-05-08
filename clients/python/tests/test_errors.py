@@ -444,8 +444,8 @@ def test_resolve_name_prefers_mat_vis_name_over_top_level():
 
 
 def test_unknown_material_error_lists_names_not_uuids_with_close_matches():
-    """When the user typos a name (the bernhard repro: ``"TH Large Red
-    Bricks"`` missing the colon), the surfaced ``available`` list and
+    """When the user typos a name (the mat-vis#286 repro: ``"TH Large
+    Red Bricks"`` missing the colon), the surfaced ``available`` list and
     the rendered message should contain human names — and prioritize
     a close-match suggestion (#286).
     """
@@ -535,7 +535,7 @@ def test_material_not_staged_error_lists_available_tiers() -> None:
     """``MaterialNotStagedError`` includes an ``Available tiers: [...]``
     line so the user knows which tiers ARE staged.
 
-    bernhard mat-vis#311 sub-bullet "Unclear error messages":
+    mat-vis#311 sub-bullet "Unclear error messages":
     expectation was ``... is not staged for tier '3k'.
     Available tiers: ['1k', '2k', ...]``. Pre-#332 the message said
     "Needs a re-bake" (actionable only for maintainers).
@@ -555,7 +555,7 @@ def test_material_not_staged_error_lists_available_tiers() -> None:
     assert "Available tiers:" in msg
     assert "1k" in msg and "2k" in msg
     # Original "Needs a re-bake" wording is replaced when alternatives
-    # exist — bernhard's complaint was that line was non-actionable.
+    # exist — the mat-vis#311 complaint was that line was non-actionable.
     assert "Needs a re-bake" not in msg
 
 

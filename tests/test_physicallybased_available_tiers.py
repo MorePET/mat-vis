@@ -1,6 +1,6 @@
 """Test for mat-vis#331: physicallybased catalog ships available_tiers=["scalar"].
 
-bernhard-42's mat-vis#311 + #313: ``client.materials("physicallybased", "scalar")``
+mat-vis#311 + #313: ``client.materials("physicallybased", "scalar")``
 returned empty even though 86 materials exist in the catalog. Root cause was in
 the fetcher (``sources/physicallybased.py:197``) which hardcoded
 ``available_tiers=[]`` instead of ``available_tiers=["scalar"]``.
@@ -9,7 +9,7 @@ Was a strict-xfail forcing function until the fix landed; now a regular
 green test pinning the contract for the future.
 
 See https://github.com/MorePET/mat-vis/issues/331 (closed by this fix) and
-#313 for bernhard's user-visible repro that this unblocks in combination
+#313 for the user-visible repro that this unblocks in combination
 with mat#222.
 """
 
