@@ -85,7 +85,14 @@ def test_fetch_one_populates_pbr_from_mtlx(tmp_path: Path) -> None:
 
 
 def test_fetch_one_pbr_populated_when_mtlx_only(tmp_path: Path) -> None:
-    """No flat textures (needs_mtlx_bake path) still parses scalars."""
+    """No flat textures (needs_mtlx_bake path) still parses scalars.
+
+    mat-vis#369: ``available_tiers`` is ``["scalar"]`` (not ``[]``) when
+    the package has no texture maps — the 18 gpuopen scalar-only entries
+    (Chrome, Aluminum, Gold, …) hit this path. Symmetric with
+    physicallybased's ``["scalar"]`` convention; clients see the same
+    sentinel regardless of source.
+    """
     mock_resp = MagicMock(content=_zip_with_mtlx_only())
     with patch("mat_vis_baker.sources.gpuopen.retry_request", return_value=mock_resp):
         rec = _fetch_one(_mat(), "1k", tmp_path, mtlx_dir=None)
@@ -93,6 +100,21 @@ def test_fetch_one_pbr_populated_when_mtlx_only(tmp_path: Path) -> None:
     assert rec.needs_mtlx_bake is True
     assert rec.mat_vis.pbr.roughness == 0.7
     assert rec.mat_vis.pbr.color_rgb == [0.45, 0.30, 0.20]
+    assert rec.available_tiers == ["scalar"]
+
+
+def test_fetch_one_textured_keeps_tier_label(tmp_path: Path) -> None:
+    """Regression: textured entries still emit the requested tier label.
+
+    The ``["scalar"]`` fallback for scalar-only entries (#369) must not
+    leak into the textured path — entries with maps still emit ``["1k"]``.
+    """
+    mock_resp = MagicMock(content=_zip_with_mtlx_and_textures())
+    with patch("mat_vis_baker.sources.gpuopen.retry_request", return_value=mock_resp):
+        rec = _fetch_one(_mat(), "1k", tmp_path, mtlx_dir=None)
+
+    assert rec.available_tiers == ["1k"]
+    assert rec.maps  # at least one texture key
 
 
 def test_fetch_one_failed_path_keeps_empty_pbr(tmp_path: Path) -> None:

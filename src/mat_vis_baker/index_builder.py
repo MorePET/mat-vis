@@ -60,11 +60,18 @@ def build_index(records: list[MaterialRecord], source: str) -> list[dict]:
             "source": source,
             "mat_vis": asdict(rec.mat_vis),
             "maps": rec.maps,
+            # mat-vis#369: ``available_tiers`` is always present, always a
+            # non-empty list. Sources are responsible for emitting
+            # ``["scalar"]`` (not ``[]``) when a record has no texture
+            # tiers — physicallybased always does, gpuopen now does for
+            # the scalar-only subset (#369). Pre-#369 the key was omitted
+            # when empty, forcing consumers into ``entry.get(..., [])``
+            # gymnastics and diverging silently from the physicallybased
+            # ``["scalar"]`` convention.
+            "available_tiers": list(rec.available_tiers),
         }
         if rec.upstream is not None:
             entry["upstream"] = asdict(rec.upstream)
-        if rec.available_tiers:
-            entry["available_tiers"] = rec.available_tiers
         if rec.texture_hashes:
             entry["texture_hashes"] = rec.texture_hashes
         if rec.status == "failed":
