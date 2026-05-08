@@ -190,33 +190,6 @@ _GLTF_CASES = _flatten_renderer_cases("gltf") if yaml is not None and _FIXTURE_P
 _GLTF_IDS = [f"{s}-{m}-{k}" for s, m, k in _GLTF_CASES]
 
 
-# Renderer keys whose passthrough is broken on dev (mat-vis#380 root
-# cause: ``_scalars_for`` drops the upstream field, so the adapter
-# never sees it and the renderer-shaped key never appears in the
-# output dict). Tests on these keys XFAIL today and XPASS once #381
-# is rebased in.
-_THREEJS_BROKEN: frozenset[str] = frozenset(
-    {
-        "transmission",
-        "dispersion",
-        "thickness",
-        "clearcoat",
-        "clearcoatRoughness",
-        "specularIntensity",
-        "specularColor",
-    }
-)
-_GLTF_BROKEN: frozenset[str] = frozenset(
-    {
-        "extensions.KHR_materials_transmission",
-        "extensions.KHR_materials_dispersion",
-        "extensions.KHR_materials_volume",
-        "extensions.KHR_materials_clearcoat",
-        "extensions.KHR_materials_specular",
-    }
-)
-
-
 # ── Layer 4 — Three.js adapter output ────────────────────────────
 
 
@@ -231,25 +204,10 @@ class TestLayer4_ToThreejs:
     @pytest.mark.parametrize(("source", "material", "key"), _THREEJS_CASES, ids=_THREEJS_IDS)
     def test_threejs_key_present_in_output(
         self,
-        request: pytest.FixtureRequest,
         source: str,
         material: str,
         key: str,
     ) -> None:
-        if key in _THREEJS_BROKEN:
-            request.applymarker(
-                pytest.mark.xfail(
-                    strict=True,
-                    reason=(
-                        f"to_threejs output drops {key!r} on dev "
-                        "because _scalars_for upstream drops the "
-                        "passthrough (mat-vis#380). Passes once PR "
-                        "#381 is rebased in. Strict-xfail flips to "
-                        "XPASS-failed once #381 lands → drop this "
-                        "marker in the GREEN-phase follow-up commit."
-                    ),
-                )
-            )
         scalars = _scalars_via_client(source, material)
         out = to_threejs(scalars, textures=None)
         assert key in out, (
@@ -274,25 +232,10 @@ class TestLayer4_ToGltf:
     @pytest.mark.parametrize(("source", "material", "key"), _GLTF_CASES, ids=_GLTF_IDS)
     def test_gltf_key_present_in_output(
         self,
-        request: pytest.FixtureRequest,
         source: str,
         material: str,
         key: str,
     ) -> None:
-        if key in _GLTF_BROKEN:
-            request.applymarker(
-                pytest.mark.xfail(
-                    strict=True,
-                    reason=(
-                        f"to_gltf output drops {key!r} on dev because "
-                        "_scalars_for upstream drops the passthrough "
-                        "(mat-vis#380). Passes once PR #381 is rebased "
-                        "in. Strict-xfail flips to XPASS-failed once "
-                        "#381 lands → drop this marker in the "
-                        "GREEN-phase follow-up commit."
-                    ),
-                )
-            )
         scalars = _scalars_via_client(source, material)
         out = to_gltf(scalars, textures=None)
         try:

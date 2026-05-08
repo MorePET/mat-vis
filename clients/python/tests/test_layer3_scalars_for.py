@@ -185,22 +185,6 @@ _CASES = _flatten_fixture_cases() if yaml is not None and _FIXTURE_PATH.exists()
 _CASE_IDS = [f"{s}-{m}-{f}" for s, m, f, _ in _CASES]
 
 
-# Fields whose passthrough is broken on current dev (mat-vis#380).
-# Tests on these fields are expected to XFAIL today and XPASS once
-# #381 is rebased in. Anything else (roughness / metalness / ior)
-# already works on dev and stays a pass-today guard.
-_BROKEN_ON_DEV: frozenset[str] = frozenset(
-    {
-        "transmission",
-        "thickness",
-        "dispersion",
-        "clearcoat",
-        "clearcoat_roughness",
-        "specular_intensity",
-    }
-)
-
-
 # ── Layer 3: scalars_for passthrough ───────────────────────────
 
 
@@ -216,24 +200,10 @@ def test_scalars_for_field_within_bounds(
 
     Drives the Layer 3 contract from ``fixtures/expected_pbr.yaml``:
     each fixture entry's ``expected.<field>: {min, max}`` becomes one
-    row here. Pre-#381 the load-bearing rows
-    (transmission/thickness/dispersion/clearcoat_roughness/...) raise
-    ``KeyError`` because the field never reaches the scalars dict —
-    that XFAIL is the proof the test catches mat-vis#380.
+    row here. Tests caught mat-vis#380 in the RED phase; PR #381
+    fixed the passthrough and the xfail markers were dropped (this
+    file's GREEN follow-up).
     """
-    if field in _BROKEN_ON_DEV:
-        request.applymarker(
-            pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    f"{field!r} dropped by _scalars_for on dev (mat-vis#380); "
-                    "passes once PR #381's adapter-passthrough fix is rebased in. "
-                    "Strict-xfail flips to XPASS-failed once #381 lands → "
-                    "drop this marker in the GREEN-phase follow-up commit."
-                ),
-            )
-        )
-
     entry = _mock_entry(material, source)
     client = MatVisClient()
     with patch.object(client, "index", return_value=[entry]):
