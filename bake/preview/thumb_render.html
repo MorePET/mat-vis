@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>html,body{margin:0;padding:0;overflow:hidden;background:#1a1a2e}canvas{display:block}</style>
+</head>
+<body>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+
+// Single-material thumb renderer (mat-vis#361). Matches bernhard's
+// reference scene from mat-vis#285 ("should look like" image):
+//   geometry  = create_shader_ball (vendored shader_ball.glb)
+//   bg        = 0x1a1a2e (dark navy)
+//   IBL       = RoomEnvironment via PMREM
+//   tone-map  = ACES Filmic, exposure 1.0
+//   layout    = single shader ball, framed tight for 256² output
+//
+// Spec: ?spec=spec.json with one of:
+//   {threejs: {...}}      single material
+//   {items: [{label, threejs}]}  first item only (compat with grid spec)
+
+const params = new URLSearchParams(window.location.search);
+const specUrl = params.get('spec') || 'spec.json';
+
+// Render at 1024² and let the bench downsample to 256² with Lanczos
+// (per PBR specialist recommendation — kills specular aliasing +
+// roughness banding at thumbnail size).
+const W = parseInt(params.get('w') || '1024');
+const H = parseInt(params.get('h') || '1024');
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+
+const camera = new THREE.PerspectiveCamera(35, W / H, 0.1, 1000);
+
+const renderer = new THREE.WebGLRenderer({antialias: true, preserveDrawingBuffer: true});
+renderer.setSize(W, H);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+// Subtle fill — env map carries most of the look (matches bernhard's
+// ocp_vscode reference + pymat's visual_grid_render.html setup).
+scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+const dir = new THREE.DirectionalLight(0xffffff, 1.5);
+dir.position.set(20, 30, 20);
+scene.add(dir);
+
+const TEXTURE_KEYS = [
+  'map', 'normalMap', 'roughnessMap', 'metalnessMap',
+  'aoMap', 'emissiveMap', 'displacementMap', 'alphaMap',
+];
+
+function _loadTextureFromDataURI(dataUri) {
+  if (!dataUri || typeof dataUri !== 'string' || !dataUri.startsWith('data:')) return null;
+  const tex = new THREE.TextureLoader().load(dataUri);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function _buildMaterial(spec) {
+  const params = {};
+  if ('color' in spec && spec.color != null) params.color = spec.color;
+  if ('metalness' in spec && spec.metalness != null) params.metalness = spec.metalness;
+  if ('roughness' in spec && spec.roughness != null) params.roughness = spec.roughness;
+  if ('ior' in spec && spec.ior != null) params.ior = spec.ior;
+  if ('transmission' in spec && spec.transmission != null) params.transmission = spec.transmission;
+  if ('clearcoat' in spec && spec.clearcoat != null) params.clearcoat = spec.clearcoat;
+  if ('emissive' in spec && spec.emissive != null) {
+    params.emissive = new THREE.Color(spec.emissive[0] ?? 0, spec.emissive[1] ?? 0, spec.emissive[2] ?? 0);
+  }
+  for (const k of TEXTURE_KEYS) {
+    if (k in spec && spec[k]) {
+      const tex = _loadTextureFromDataURI(spec[k]);
+      if (tex) {
+        if (k !== 'map' && k !== 'emissiveMap') tex.colorSpace = THREE.NoColorSpace;
+        params[k] = tex;
+      }
+    }
+  }
+  return new THREE.MeshPhysicalMaterial(params);
+}
+
+async function main() {
+  const resp = await fetch(specUrl);
+  const raw = await resp.json();
+  // Accept either {threejs: {...}} or {items: [{threejs: {...}, ...}]}
+  const threejs = raw.threejs || (raw.items && raw.items[0] && raw.items[0].threejs);
+  if (!threejs) throw new Error('spec missing threejs material dict');
+
+  // Load shader ball GLB once. build123d uses Z-up + meters; Three.js
+  // is Y-up. Scale m→mm, rotate Z-up→Y-up (matches pymat's
+  // visual_render.html convention for build123d-exported glTFs).
+  const gltf = await new Promise((resolve, reject) => {
+    new GLTFLoader().load('shader_ball.glb', resolve, undefined, reject);
+  });
+  const shaderBall = gltf.scene;
+  shaderBall.scale.set(1000, 1000, 1000);
+  shaderBall.rotateX(-Math.PI / 2);
+
+  const mat = _buildMaterial(threejs);
+  shaderBall.traverse((child) => {
+    if (child.isMesh) child.material = mat;
+  });
+  scene.add(shaderBall);
+
+  // Bbox-fit the camera. After scale 1000 + rotate -90°X, bbox is
+  // roughly Y∈[-12,+10] (base→top), X∈[-11,+11], Z∈[-11,+11].
+  // Frame tightly: camera at ~30 units, slight elevation, looking at
+  // the ball's geometric center (roughly Y=0).
+  const bbox = new THREE.Box3().setFromObject(shaderBall);
+  const center = bbox.getCenter(new THREE.Vector3());
+  const size = bbox.getSize(new THREE.Vector3()).length();
+  const fovRad = camera.fov * Math.PI / 180;
+  const dist = (size / (2 * Math.tan(fovRad / 2))) * 1.15;
+  camera.position.set(center.x + dist * 0.6, center.y + dist * 0.35, center.z + dist * 0.85);
+  camera.lookAt(center);
+
+  // 3 warmup renders for shader compile + PBR convergence
+  for (let i = 0; i < 3; i++) renderer.render(scene, camera);
+  console.log(`thumb render ready (geom=${size.toFixed(1)} dist=${dist.toFixed(1)})`);
+  setTimeout(() => { window.__renderComplete = true; }, 800);
+}
+
+main().catch((err) => {
+  console.error('thumb render failed:', err);
+  window.__renderComplete = true;
+  window.__renderError = String(err);
+});
+</script>
+</body>
+</html>
