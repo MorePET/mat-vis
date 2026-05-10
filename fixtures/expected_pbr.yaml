@@ -169,3 +169,52 @@ entries:
     renderer_keys:
       threejs: [clearcoatRoughness, metalness]
       gltf: []
+
+  # ── 11-13. ambientcg textured neutral-multiplier triad ──────────────
+  # The #294 / #299 textured-passthrough convention: when a material's
+  # PBR is authored as textures (color/metalness/roughness maps), the
+  # substrate emits a *neutral multiplier identity* in the scalar
+  # block — color_rgb=[1,1,1], metalness=1.0, roughness=1.0 — so the
+  # texture acts as a pass-through modulator, not a tint over a
+  # nonzero floor.
+  #
+  # Catches the failure mode diagnosed via #361 thumb-bake (3 byte-
+  # identical PNGs from substrate-routing fallback to a pre-#294
+  # catalog where these blocks were empty). Bounds are tight on
+  # purpose: a future regression where the substrate emits
+  # `color_rgb=[0,0,0]` (a "black" floor that kills the texture
+  # multiplier visually) would trip ``min: 0.9`` here.
+  #
+  # Source-material set is bernhard's reference triad from #285:
+  # textured metal (Metal007), textured fabric authored as metal-
+  # multiplier (Fabric004), textured industrial plates (MetalPlates006).
+  - source: ambientcg
+    material: Metal 007
+    expected:
+      # ``color_rgb`` is a list — the L3 numeric-bounds check skips it
+      # by convention (only scalar fields are asserted there). The L4
+      # adapter-output check verifies ``color`` lands in the threejs
+      # output dict via ``renderer_keys`` below.
+      metalness: {min: 0.9, max: 1.0}
+      roughness: {min: 0.9, max: 1.0}
+    renderer_keys:
+      threejs: [color, metalness, roughness]
+      gltf: []
+
+  - source: ambientcg
+    material: Fabric 004
+    expected:
+      metalness: {min: 0.9, max: 1.0}
+      roughness: {min: 0.9, max: 1.0}
+    renderer_keys:
+      threejs: [color, metalness, roughness]
+      gltf: []
+
+  - source: ambientcg
+    material: Metal Plates 006
+    expected:
+      metalness: {min: 0.9, max: 1.0}
+      roughness: {min: 0.9, max: 1.0}
+    renderer_keys:
+      threejs: [color, metalness, roughness]
+      gltf: []

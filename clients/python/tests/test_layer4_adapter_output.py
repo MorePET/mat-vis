@@ -124,6 +124,28 @@ def _mock_entry(material: str, source: str) -> dict:
             "dispersion": 0.0,
             "color_rgb": [0.7, 0.7, 0.7],
         },
+        # ambientcg textured triad — neutral-multiplier identity per
+        # the #294 / #299 textured-passthrough convention. Mirrors the
+        # L3 mock entries; both files carry the same table so each
+        # suite is runnable in isolation. (#384 routing-failure surface.)
+        ("ambientcg", "Metal 007"): {
+            "roughness": 1.0,
+            "metalness": 1.0,
+            "metalness_source": "texture",
+            "color_rgb": [1.0, 1.0, 1.0],
+        },
+        ("ambientcg", "Fabric 004"): {
+            "roughness": 1.0,
+            "metalness": 1.0,
+            "metalness_source": "texture",
+            "color_rgb": [1.0, 1.0, 1.0],
+        },
+        ("ambientcg", "Metal Plates 006"): {
+            "roughness": 1.0,
+            "metalness": 1.0,
+            "metalness_source": "texture",
+            "color_rgb": [1.0, 1.0, 1.0],
+        },
     }
     pbr = pbr_by_material[(source, material)]
     return {
