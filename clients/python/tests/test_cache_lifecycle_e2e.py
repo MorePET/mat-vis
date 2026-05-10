@@ -227,7 +227,12 @@ def test_cross_process_warm_cache_serves_via_etag(stub_hf):
         assert out1 == {"manifest_tag": "v0.0.0-stub", "catalog_count": 1}
 
         # Cache file should exist with .etag siblings.
-        cache_scope = cache_dir / "v0.6" / "v0.0.0-stub"
+        # Layout (mat-vis#384): <cache_dir>/<client-version>/<repo-slug>/<tag>/.
+        # Default repo when only ``MAT_VIS_HF_BASE`` is set
+        # (stub-URL doesn't match the HF dataset URL pattern, so the
+        # resolver falls back to the production coord for slug
+        # purposes — the actual I/O still uses the stub base).
+        cache_scope = cache_dir / "v0.6" / "gerchowl__mat-vis" / "v0.0.0-stub"
         assert (cache_scope / ".manifest.json").exists()
         assert (cache_scope / ".manifest.etag").exists()
 
@@ -343,7 +348,12 @@ def test_real_hf_warm_cache_serves_via_304(e2e_or_skip):
             )
 
             # Verify ETag got written.
-            cache_scope = cache_dir / "v0.6" / E2E_FIXTURES_TAG
+            # mat-vis#384: cache layout includes the resolved repo
+            # slug. The legacy ``MAT_VIS_HF_BASE`` URL set above
+            # parses cleanly to ``E2E_FIXTURES_REPO``.
+            cache_scope = (
+                cache_dir / "v0.6" / E2E_FIXTURES_REPO.replace("/", "__") / E2E_FIXTURES_TAG
+            )
             etag_path = cache_scope / ".indexes" / f"{E2E_FIXTURE_SOURCE}.etag"
             # ETag is only written on the warm path (when cached_etag
             # was non-None at fetch time). Cold start uses _get_json

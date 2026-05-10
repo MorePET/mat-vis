@@ -103,6 +103,24 @@ mat-vis-client prefetch ambientcg 1k
 | `MAT_VIS_BACKOFF_BASE` | `1.0` | Exponential backoff base (seconds) |
 | `MAT_VIS_NO_UPDATE_CHECK` | — | Disable the once-a-day PyPI update check |
 | `MAT_VIS_UPDATE_CHECK` | — | Force update check even when stderr is not a TTY |
+| `MAT_VIS_DATASET` | — | `<repo>@<tag>` — combined dataset coord + tag override (mat-vis#384). |
+| `MAT_VIS_HF_DATASET` | — | Dataset coord (e.g. `gerchowl/mat-vis-tst`). Pair with `MAT_VIS_TAG`. |
+| `MAT_VIS_TAG` | — | Release tag (split-form companion to `MAT_VIS_HF_DATASET`). |
+| `MAT_VIS_HF_BASE` | — | Legacy: full resolve-URL prefix. Preserved for back-compat. |
+
+### Repo + tag override
+
+`MatVisClient` supports five layered ways to point at a non-default
+dataset (precedence high → low):
+
+1. Constructor kwargs: `MatVisClient(repo="gerchowl/mat-vis-tst", tag="v2026.04.99")`.
+2. `MAT_VIS_DATASET=gerchowl/mat-vis-tst@v2026.04.99` — combined env var.
+3. `MAT_VIS_HF_DATASET=gerchowl/mat-vis-tst` (+ optional `MAT_VIS_TAG=...`).
+4. `MAT_VIS_HF_BASE=https://...` — legacy full-URL form.
+5. Default `gerchowl/mat-vis` @ pinned `DEFAULT_TAG`.
+
+Cache is namespaced on `(repo, tag)` so two clients pointed at
+different repos with the same tag never collide on disk.
 
 ## Rate limits
 
