@@ -42,12 +42,27 @@ PYPI_API = "https://pypi.org/pypi/mat-vis-client/json"
 
 # v0.6.0 (ADR-0007): HF Datasets is the canonical substrate. URLs are
 # built as ``{HF_BASE}/<tag>/<path>``. No "latest" alias on HF — tag
-# is effectively required. ``MAT_VIS_HF_BASE`` overrides the default.
-HF_DATASET = "gerchowl/mat-vis"
+# is effectively required.
+#
+# Override precedence (high → low):
+#   1. ``MAT_VIS_HF_BASE``    — full resolve URL prefix (legacy, back-compat).
+#                               Only routes resolve URLs; the tree-listing
+#                               API still derives from ``HF_DATASET`` below
+#                               unless the dataset coord matches. Prefer
+#                               (2) for new code.
+#   2. ``MAT_VIS_HF_DATASET`` — dataset coordinate (e.g. ``gerchowl/mat-vis-tst``).
+#                               Routes BOTH resolve URLs AND the tree-listing
+#                               API to the same dataset (#384).
+#   3. Default                — production ``gerchowl/mat-vis``.
+HF_DATASET = os.environ.get("MAT_VIS_HF_DATASET", "gerchowl/mat-vis")
 HF_BASE = os.environ.get(
     "MAT_VIS_HF_BASE",
     f"https://huggingface.co/datasets/{HF_DATASET}/resolve",
 )
+# Tree-listing API endpoint. Derived from ``HF_DATASET`` so the
+# ``MAT_VIS_HF_DATASET`` override routes the manifest-from-tree
+# discovery path to the same dataset as resolve URLs (#384).
+HF_TREE_API = f"https://huggingface.co/api/datasets/{HF_DATASET}/tree"
 # Default tag when the caller doesn't pin one (#242). The dataset's
 # `main` branch is an empty baseline — every release lives on a
 # CalVer branch. Bump when a new prod release ships under the
@@ -515,7 +530,7 @@ class MatVisClient:
         ``<src>/<tier>/.tier_complete`` sentinels mark complete tiers.
         """
         rev = self._tag or DEFAULT_TAG
-        tree_url = f"https://huggingface.co/api/datasets/{HF_DATASET}/tree/{rev}?recursive=true"
+        tree_url = f"{HF_TREE_API}/{rev}?recursive=true"
         tree = _get_json(tree_url)
         paths = [e["path"] for e in tree if e.get("type") == "file"]
 
