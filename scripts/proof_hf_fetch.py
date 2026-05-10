@@ -19,15 +19,27 @@ Exits nonzero on any mismatch.
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
+import os
 import sys
 import urllib.request
 
-from PIL import Image
+DEFAULT_REPO = "gerchowl/mat-vis"
 
-REPO = "gerchowl/mat-vis"
-BASE = f"https://huggingface.co/datasets/{REPO}/resolve"
+
+def _resolve_base(repo: str | None) -> str:
+    """Pick the HF base URL. Precedence: --repo > MAT_VIS_HF_BASE > prod.
+
+    Mirrors the env-var semantics of mat_vis_client.client (HF_BASE).
+    """
+    if repo:
+        return f"https://huggingface.co/datasets/{repo}/resolve"
+    env_base = os.environ.get("MAT_VIS_HF_BASE")
+    if env_base:
+        return env_base
+    return f"https://huggingface.co/datasets/{DEFAULT_REPO}/resolve"
 
 
 def _get(url: str, headers: dict | None = None) -> bytes:
@@ -36,8 +48,11 @@ def _get(url: str, headers: dict | None = None) -> bytes:
         return r.read()
 
 
-def main(revision: str) -> int:
-    manifest = json.loads(_get(f"{BASE}/{revision}/release-manifest.json"))
+def main(revision: str, base: str) -> int:
+    from PIL import Image  # lazy: not needed for --print-url-only
+
+    print(f"using HF base: {base}")
+    manifest = json.loads(_get(f"{base}/{revision}/release-manifest.json"))
     assert manifest["schema_version"] == 2, (
         f"expected schema_version=2, got {manifest['schema_version']}"
     )
@@ -48,7 +63,7 @@ def main(revision: str) -> int:
 
     any_tar_checked = False
     for source, entry in sorted(manifest["sources"].items()):
-        catalog = json.loads(_get(f"{BASE}/{revision}/{entry['catalog']}"))
+        catalog = json.loads(_get(f"{base}/{revision}/{entry['catalog']}"))
         assert len(catalog) == entry["materials_count"], (
             f"{source}: catalog size {len(catalog)} != manifest "
             f"materials_count {entry['materials_count']}"
@@ -56,7 +71,7 @@ def main(revision: str) -> int:
         print(f"  {source}: catalog {len(catalog)} entries ✓")
 
         for tier, tier_info in (entry.get("tiers") or {}).items():
-            rowmap = json.loads(_get(f"{BASE}/{revision}/{tier_info['rowmap']}"))
+            rowmap = json.loads(_get(f"{base}/{revision}/{tier_info['rowmap']}"))
             mats = rowmap["materials"]
             assert mats, f"{source}/{tier}: rowmap has no materials"
 
@@ -66,7 +81,7 @@ def main(revision: str) -> int:
             hi = lo + spec["length"] - 1
 
             png_bytes = _get(
-                f"{BASE}/{revision}/{tier_info['tar']}",
+                f"{base}/{revision}/{tier_info['tar']}",
                 headers={"Range": f"bytes={lo}-{hi}"},
             )
             assert png_bytes[:8] == b"\x89PNG\r\n\x1a\n", f"{source}/{tier}/{mid}/{ch}: not a PNG"
@@ -89,7 +104,26 @@ def main(revision: str) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("usage: proof_hf_fetch.py <revision>", file=sys.stderr)
-        sys.exit(2)
-    sys.exit(main(sys.argv[1]))
+    parser = argparse.ArgumentParser(
+        description="Phase 3 proof: HF substrate is client-readable end-to-end.",
+    )
+    parser.add_argument("revision", help="HF revision (release tag or branch)")
+    parser.add_argument(
+        "--repo",
+        default=None,
+        help=(
+            "HF dataset coordinates, e.g. gerchowl/mat-vis-tst. "
+            "Overrides MAT_VIS_HF_BASE. Default: gerchowl/mat-vis."
+        ),
+    )
+    parser.add_argument(
+        "--print-url-only",
+        action="store_true",
+        help="Print the resolved manifest URL and exit (no network call).",
+    )
+    args = parser.parse_args()
+    base = _resolve_base(args.repo)
+    if args.print_url_only:
+        print(f"{base}/{args.revision}/release-manifest.json")
+        sys.exit(0)
+    sys.exit(main(args.revision, base))
