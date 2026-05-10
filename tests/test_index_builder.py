@@ -180,10 +180,19 @@ def test_entries_sorted_by_id() -> None:
     assert [e["id"] for e in entries] == ["Aaa", "Mmm", "Zzz"]
 
 
-def test_available_tiers_absent_when_empty() -> None:
-    """Record with no tiers omits the field entirely (ADR-0007 rationale)."""
-    entry = build_index([_minimal_rec()], source="ambientcg")[0]
-    assert "available_tiers" not in entry
+def test_available_tiers_always_present(_min_record_helper=_minimal_rec) -> None:
+    """mat-vis#369: ``available_tiers`` is always present on every entry.
+
+    Pre-#369 the key was omitted when the record's list was empty, which
+    forced consumers into ``entry.get(..., [])`` gymnastics and silently
+    diverged from the physicallybased ``["scalar"]`` convention. Now the
+    index_builder always emits the key. Sources are responsible for
+    populating it with at least one tier — ``["scalar"]`` for entries
+    with no texture maps, ``["1k"]`` etc. for textured entries.
+    """
+    entry = build_index([_min_record_helper()], source="ambientcg")[0]
+    assert "available_tiers" in entry
+    assert entry["available_tiers"] == []
 
 
 def test_available_tiers_present_when_populated() -> None:
@@ -191,6 +200,18 @@ def test_available_tiers_present_when_populated() -> None:
     rec.available_tiers = ["1k", "2k"]
     entry = build_index([rec], source="ambientcg")[0]
     assert entry["available_tiers"] == ["1k", "2k"]
+
+
+def test_available_tiers_scalar_sentinel_passes_through() -> None:
+    """Scalar-only entries (gpuopen subset, physicallybased) emit ``["scalar"]``.
+
+    Sources fetcher decision; index_builder is a passthrough — but pin
+    the shape so a regression in the fetcher fails this test loudly.
+    """
+    rec = _minimal_rec(mid="34f2c1f9-...", source="gpuopen")
+    rec.available_tiers = ["scalar"]
+    entry = build_index([rec], source="gpuopen")[0]
+    assert entry["available_tiers"] == ["scalar"]
 
 
 # ── upstream mirror (Phase C, mat-vis#152) ──────────────────────

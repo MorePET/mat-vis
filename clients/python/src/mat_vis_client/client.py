@@ -2995,14 +2995,18 @@ class VisAsset:
         return self._textures_cache
 
     def _is_scalar_only_entry(self) -> bool:
-        """True if this asset's index entry advertises no staged tiers.
+        """True if this asset's index entry advertises no texture tiers.
 
-        Scalar-only sources (currently just ``physicallybased``, but the
-        check is shape-driven so future scalar-only sources will work)
-        publish ``available_tiers=[]`` for every entry — there are no
-        textures to fetch. Best-effort: a missing index or lookup error
-        falls back to ``False``, preserving the existing (loud) error
-        path through :meth:`fetch_all_textures`.
+        Scalar-only entries are physicallybased (always) and the 18
+        gpuopen subset (mat-vis#369) — they publish
+        ``available_tiers=["scalar"]`` (the sentinel) under the post-#369
+        substrate convention. The check is shape-driven so future
+        scalar-only sources work without code changes. We treat
+        ``[]``/``None``/missing-key as scalar-only too, for resilience
+        to legacy substrates baked before #369 landed. Best-effort: a
+        missing index or lookup error falls back to ``False``,
+        preserving the existing (loud) error path through
+        :meth:`fetch_all_textures`.
         """
         try:
             entries = self._client.index(self._source)
@@ -3016,9 +3020,12 @@ class VisAsset:
         # _scalars_for. Now both sites share one matcher.
         for entry in entries:
             if self._client._entry_matches_id_or_name(entry, self._material_id):
-                tiers = entry.get("available_tiers")
-                # Explicitly empty list (or missing) → scalar-only entry.
-                return not tiers
+                tiers = entry.get("available_tiers") or []
+                # Scalar-only iff no tier is a real texture tier.
+                # Pre-#369 substrates emit ``[]`` or omit the key (both
+                # land here as ``[]`` after the ``or``); post-#369 emit
+                # ``["scalar"]``. Either way the entry is scalar-only.
+                return all(t == "scalar" for t in tiers)
         return False
 
     def to_threejs(self, *, color_format: Literal["hex", "int"] = "hex") -> dict:

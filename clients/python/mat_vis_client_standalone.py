@@ -2125,7 +2125,12 @@ class VisAsset:
         return self._textures_cache
 
     def _is_scalar_only_entry(self) -> bool:
-        """True if this asset's index entry advertises no staged tiers."""
+        """True if this asset's index entry advertises no texture tiers.
+
+        Post-#369 the substrate convention is ``available_tiers=["scalar"]``
+        for scalar-only entries (was ``[]``/missing pre-#369; the
+        legacy shapes still resolve here for back-compat).
+        """
         try:
             entries = self._client.index(self._source)
         except Exception:
@@ -2135,8 +2140,9 @@ class VisAsset:
         # mat-vis#372: route through the centralized 3-way predicate.
         for entry in entries:
             if self._client._entry_matches_id_or_name(entry, self._material_id):
-                tiers = entry.get("available_tiers")
-                return not tiers
+                tiers = entry.get("available_tiers") or []
+                # Scalar-only iff no tier is a real texture tier.
+                return all(t == "scalar" for t in tiers)
         return False
 
     def to_threejs(self, *, color_format: Literal["hex", "int"] = "hex") -> dict:

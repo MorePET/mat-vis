@@ -435,7 +435,11 @@ def _fetch_one(
             source="gpuopen",
             mat_vis=_mat_vis(pbr=parsed_pbr),
             upstream=upstream,
-            available_tiers=[tier] if textures else [],
+            # mat-vis#369: scalar-only gpuopen entries (the 18 with no
+            # baked texture maps) get ``["scalar"]`` — symmetric with
+            # physicallybased. ``[]`` is no longer a valid catalog shape;
+            # every entry carries at least one tier.
+            available_tiers=[tier] if textures else ["scalar"],
             maps=sorted(textures.keys()),
             texture_paths=texture_paths,
             needs_mtlx_bake=needs_bake,
