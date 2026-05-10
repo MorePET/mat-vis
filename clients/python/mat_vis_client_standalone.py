@@ -33,8 +33,9 @@ import os
 import sys
 import time
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 REPO = "MorePET/mat-vis"
 GITHUB_API = f"https://api.github.com/repos/{REPO}"  # update-check only
@@ -349,6 +350,65 @@ class RateLimitError(MatVisError):
         self.url = url
         self.retry_after = retry_after
         super().__init__(message or f"Rate limited on {url}. Retry after {retry_after}s.")
+
+
+class NoPreviewError(MatVisError):
+    """Material has no preview because the source is scalar-only.
+
+    See `mat_vis_client.client.NoPreviewError` for full docstring.
+    """
+
+    def __init__(self, source: str, material_id: str):
+        self.source = source
+        self.material_id = material_id
+        super().__init__(
+            f"no preview available for {source}/{material_id}: "
+            f"source has no PNG textures (scalar-only entry). "
+            f"Tracked by mat-vis#361 (baked sphere previews)."
+        )
+
+
+class PreviewUnavailableError(MatVisError):
+    """No tier staged that's small enough to qualify as a preview.
+
+    See `mat_vis_client.client.PreviewUnavailableError` for full docstring.
+    """
+
+    def __init__(
+        self,
+        source: str,
+        material_id: str,
+        *,
+        available: list | None = None,
+    ):
+        self.source = source
+        self.material_id = material_id
+        self.available = list(available) if available else []
+        msg = (
+            f"no preview tier staged for {source}/{material_id}. "
+            f"Need one of [thumb, 128, 256, 512, 1k]; "
+            f"available: {self.available or 'none'}."
+        )
+        if self.available:
+            msg += (
+                f" Use .thumb_for(tier={self.available[0]!r}) to fetch "
+                f"a non-preview-sized texture explicitly."
+            )
+        super().__init__(msg)
+
+
+@dataclass(frozen=True)
+class ThumbResult:
+    """Non-raising preview result for iteration / MCP / CLI grids.
+
+    See `mat_vis_client.client.ThumbResult` for full docstring.
+    """
+
+    png: bytes | None
+    error: str | None
+    reason: str | None
+    channel: str | None
+    tier: str | None
 
 
 def _parse_retry_after(headers, default: int) -> int:
@@ -1566,6 +1626,50 @@ class MatVisClient:
             raise last_exc
         raise MatVisError(f"channel {channel!r} not available for {source}/{resolved} @ {tier}")
 
+    def prefetch_thumbs(
+        self,
+        source: str,
+        *,
+        max_workers: int = 8,
+        tag: str | None = None,  # noqa: ARG002 (signature parity; standalone is single-tag)
+    ) -> dict:
+        """Warm the on-disk cache with every material's preview thumbnail.
+
+        See `mat_vis_client.client.MatVisClient.prefetch_thumbs` for full docstring.
+        ``tag`` accepted for signature parity but ignored — the standalone
+        client is single-tag (no ``at()`` indirection).
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        entries = self.index(source)
+        targets: list = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            mid = entry.get("id")
+            if isinstance(mid, str):
+                targets.append(mid)
+
+        counters = {"ok": 0, "no_preview": 0, "unavailable": 0, "errors": 0}
+
+        def _one(material_id: str) -> str:
+            asset = VisAsset(self, source, material_id, "1k")
+            result = asset.safe_thumb()
+            if result.png is not None:
+                return "ok"
+            if result.error == "NoPreviewError":
+                return "no_preview"
+            if result.error == "PreviewUnavailableError":
+                return "unavailable"
+            return "errors"
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_one, mid) for mid in targets]
+            for fut in as_completed(futures):
+                counters[fut.result()] += 1
+
+        return counters
+
     # ── Cache management ────────────────────────────────────────
 
     def cache_size(self) -> int:
@@ -2054,6 +2158,163 @@ class VisAsset:
     def to_mtlx(self) -> "MtlxSource":
         """Return a fresh :class:`MtlxSource` for this asset's identity."""
         return MtlxSource(self._client, self._source, self._material_id, self._tier)
+
+    # ── Discovery surface (mat-vis#asset-thumb) ───────────────────
+    # Signature parity with mat_vis_client.client.VisAsset.
+
+    _PREVIEW_TIER_LADDER: ClassVar[tuple[str, ...]] = ("128", "256", "512", "1k")
+    _THUMB_CHANNEL_LADDER: ClassVar[tuple[str, ...]] = (
+        "color",
+        "basecolor",
+        "albedo",
+        "normal",
+        "roughness",
+    )
+
+    @property
+    def thumb(self) -> bytes:
+        """Small preview PNG. See packaged client for full docstring."""
+        return self.thumb_for()
+
+    def thumb_for(
+        self,
+        *,
+        channel: str | None = None,
+        tier: str = "thumb",
+    ) -> bytes:
+        """Fetch a preview-sized texture with explicit overrides.
+
+        See `mat_vis_client.client.VisAsset.thumb_for` for full docstring.
+        """
+        if self._is_scalar_only_entry():
+            raise NoPreviewError(self._source, self._material_id)
+
+        target_tiers = self._resolve_tier_candidates(tier)
+        if not target_tiers:
+            raise PreviewUnavailableError(
+                self._source,
+                self._material_id,
+                available=self._available_tiers(),
+            )
+
+        target_channels: tuple[str, ...]
+        if channel is None:
+            target_channels = self._THUMB_CHANNEL_LADDER
+        else:
+            target_channels = (channel,)
+
+        last_exc: Exception | None = None
+        for t in target_tiers:
+            for ch in target_channels:
+                try:
+                    return self._client.fetch_texture(self._source, self._material_id, ch, tier=t)
+                except NetworkError:
+                    raise
+                except HTTPFetchError as e:
+                    if 500 <= e.code < 600:
+                        raise
+                    last_exc = e
+                    continue
+                except (ChannelNotFoundError, MatVisError) as e:
+                    last_exc = e
+                    continue
+
+        if channel is not None or tier != "thumb":
+            if last_exc is not None:
+                raise last_exc
+        raise PreviewUnavailableError(
+            self._source,
+            self._material_id,
+            available=self._available_tiers(),
+        ) from last_exc
+
+    def safe_thumb(
+        self,
+        *,
+        channel: str | None = None,
+        tier: str = "thumb",
+    ) -> ThumbResult:
+        """Non-raising thumbnail fetch — returns :class:`ThumbResult`.
+
+        See `mat_vis_client.client.VisAsset.safe_thumb` for full docstring.
+        """
+        try:
+            png = self.thumb_for(channel=channel, tier=tier)
+        except (
+            NoPreviewError,
+            PreviewUnavailableError,
+            HTTPFetchError,
+            NetworkError,
+            MatVisError,
+        ) as e:
+            return ThumbResult(
+                png=None,
+                error=type(e).__name__,
+                reason=str(e),
+                channel=None,
+                tier=None,
+            )
+        return ThumbResult(png=png, error=None, reason=None, channel=channel, tier=tier)
+
+    def _available_tiers(self) -> list:
+        """Return the ``available_tiers`` list from this asset's index entry."""
+        try:
+            entries = self._client.index(self._source)
+        except Exception:
+            return []
+        if not isinstance(entries, list):
+            return []
+        norm = self._client._normalize_name(self._material_id)
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if (
+                entry.get("id") == self._material_id
+                or self._client._normalize_name((entry.get("mat_vis") or {}).get("name") or "")
+                == norm
+            ):
+                staged = entry.get("available_tiers") or []
+                return list(staged) if isinstance(staged, list) else []
+        return []
+
+    def _resolve_tier_candidates(self, tier: str) -> tuple:
+        """Resolve a tier name to the ordered candidate list to try.
+
+        See `mat_vis_client.client.VisAsset._resolve_tier_candidates`.
+        """
+        if tier != "thumb":
+            return (tier,)
+        staged = self._available_tiers()
+        if not staged:
+            return (self._tier,)
+        candidates: list = []
+        if "thumb" in staged:
+            candidates.append("thumb")
+        for t in self._PREVIEW_TIER_LADDER:
+            if t in staged and t not in candidates:
+                candidates.append(t)
+        return tuple(candidates)
+
+    def _repr_png_(self) -> bytes | None:
+        """IPython rich-repr hook: inline image in Jupyter cells."""
+        try:
+            return self.thumb
+        except Exception:
+            return None
+
+    def _repr_html_(self) -> str | None:
+        """IPython rich-repr fallback: diagnostic HTML when no PNG."""
+        result = self.safe_thumb()
+        if result.png is not None:
+            return None
+        return (
+            f'<div style="font-family:monospace;color:#888;'
+            f'border:1px solid #ddd;padding:6px 10px;border-radius:4px">'
+            f"<b>{type(self).__name__}</b>"
+            f"({self._source!r}, {self._material_id!r}, tier={self._tier!r})"
+            f"<br/>preview unavailable: <b>{result.error}</b>: {result.reason}"
+            f"</div>"
+        )
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, VisAsset) and (
