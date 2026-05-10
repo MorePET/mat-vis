@@ -42,7 +42,15 @@ PYPI_API = "https://pypi.org/pypi/mat-vis-client/json"
 
 # v0.6.0 (ADR-0007): HF Datasets is the canonical substrate. URLs are
 # built as ``{HF_BASE}/<tag>/<path>``. No "latest" alias on HF — tag
-# is effectively required. ``MAT_VIS_HF_BASE`` overrides the default.
+# is effectively required.
+#
+# Repo + tag override precedence (highest first, mat-vis#384):
+#   1. Constructor kwargs ``MatVisClient(repo=..., tag=...)``.
+#   2. ``MAT_VIS_DATASET=<repo>@<tag>`` — combined env var.
+#   3. ``MAT_VIS_HF_DATASET=<repo>`` (PR #388) + ``MAT_VIS_TAG=<tag>``
+#      (or fall back to ``DEFAULT_TAG``).
+#   4. ``MAT_VIS_HF_BASE=<full-url>`` — legacy back-compat.
+#   5. Default ``gerchowl/mat-vis`` @ ``DEFAULT_TAG``.
 HF_DATASET = "gerchowl/mat-vis"
 HF_BASE = os.environ.get(
     "MAT_VIS_HF_BASE",
@@ -53,6 +61,56 @@ HF_BASE = os.environ.get(
 # CalVer branch. Bump when a new prod release ships under the
 # per-file substrate (#186 / ADR-0012). Explicit ``tag=...`` wins.
 DEFAULT_TAG = "v2026.04.2"
+
+
+def _resolve_repo_and_tag(
+    *,
+    repo_kwarg: str | None,
+    tag_kwarg: str | None,
+) -> tuple[str, str, str | None]:
+    """Resolve ``(repo, tag, base_url_override)`` per mat-vis#384.
+
+    Mirror of the packaged client's helper — kept in lockstep so the
+    standalone honors the same precedence chain.
+    """
+    if repo_kwarg is not None and tag_kwarg is not None:
+        return repo_kwarg, tag_kwarg, None
+
+    combined = os.environ.get("MAT_VIS_DATASET")
+    env_repo: str | None = None
+    env_tag: str | None = None
+    if combined and "@" in combined:
+        env_repo, env_tag = combined.rsplit("@", 1)
+        env_repo = env_repo or None
+        env_tag = env_tag or None
+
+    if env_repo is None:
+        env_repo = os.environ.get("MAT_VIS_HF_DATASET")
+    if env_tag is None:
+        env_tag = os.environ.get("MAT_VIS_TAG")
+
+    repo = repo_kwarg or env_repo
+    tag = tag_kwarg or env_tag
+
+    base_override: str | None = None
+    if repo is None:
+        legacy_base = os.environ.get("MAT_VIS_HF_BASE")
+        if legacy_base:
+            base_override = legacy_base
+            import re as _re
+
+            m = _re.search(r"/datasets/([^/]+/[^/]+)/resolve", legacy_base)
+            if m:
+                repo = m.group(1)
+
+    if repo is None:
+        repo = HF_DATASET
+    if tag is None:
+        tag = DEFAULT_TAG
+
+    return repo, tag, base_override
+
+
 DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" / "mat-vis"))
 # Version is kept in sync with clients/python/pyproject.toml by
 # scripts/sync-standalone-version.py (run via pre-commit). Do not
@@ -443,6 +501,7 @@ class MatVisClient:
         manifest_url: str | None = None,
         cache_dir: Path | None = None,
         tag: str | None = None,
+        repo: str | None = None,
         cache: bool = True,
         on_event=None,
     ):
@@ -454,7 +513,12 @@ class MatVisClient:
         self._tier_complete: dict[tuple[str, str], bool] = {}
         self._indexes: dict[str, list[dict]] = {}
         self._alt_clients: dict[str, "MatVisClient"] = {}
-        self._tag = tag
+        # mat-vis#384: layered repo + tag resolution.
+        self._repo, self._tag, _base_override = _resolve_repo_and_tag(
+            repo_kwarg=repo,
+            tag_kwarg=tag,
+        )
+        self._base = _base_override or f"https://huggingface.co/datasets/{self._repo}/resolve"
         # mat-vis#312 + #355: signature parity with the packaged
         # client. The standalone doesn't fire events (no progress
         # module bundled), but the kwarg must exist so consumers that
@@ -468,13 +532,16 @@ class MatVisClient:
             # v0.6.0: HF substrate only. No "latest" alias on HF —
             # falls back to ``DEFAULT_TAG`` (#242) so out-of-the-box use
             # returns real data instead of the empty `main` baseline.
-            rev = tag or DEFAULT_TAG
-            self._manifest_url = f"{HF_BASE}/{rev}/release-manifest.json"
+            self._manifest_url = f"{self._base}/{self._tag}/release-manifest.json"
 
     @property
     def _cache_scope(self) -> Path:
-        """Tag-scoped cache subdirectory (v1 / v2 never collide)."""
-        return self._cache_dir / (self._tag or "latest")
+        """Repo-scoped + tag-scoped cache subdirectory (mat-vis#384).
+
+        Layout: ``<cache_dir>/<repo-slug>/<tag>/...``. Pre-#384
+        ``<cache_dir>/<tag>/`` layouts become one-shot orphans.
+        """
+        return self._cache_dir / self._repo.replace("/", "__") / (self._tag or "latest")
 
     def at(self, tag: str) -> "MatVisClient":
         """Return a client pinned to ``tag``, sharing this one's cache."""
@@ -484,6 +551,8 @@ class MatVisClient:
             self._alt_clients[tag] = MatVisClient(
                 cache_dir=self._cache_dir,
                 tag=tag,
+                # mat-vis#384: forward resolved repo so .at() preserves routing.
+                repo=self._repo,
                 cache=self._cache,
                 on_event=self._on_event,
             )
@@ -515,7 +584,11 @@ class MatVisClient:
         ``<src>/<tier>/.tier_complete`` sentinels mark complete tiers.
         """
         rev = self._tag or DEFAULT_TAG
-        tree_url = f"https://huggingface.co/api/datasets/{HF_DATASET}/tree/{rev}?recursive=true"
+        # mat-vis#384: route the tree-listing API through the resolved
+        # repo so a kwarg or env-var override actually moves the
+        # manifest discovery off the prod dataset (closes the bug
+        # called out in PR #388).
+        tree_url = f"https://huggingface.co/api/datasets/{self._repo}/tree/{rev}?recursive=true"
         tree = _get_json(tree_url)
         paths = [e["path"] for e in tree if e.get("type") == "file"]
 
@@ -711,7 +784,8 @@ class MatVisClient:
         return self._tag or self.manifest.get("release_tag", DEFAULT_TAG)
 
     def _hf_url(self, path: str) -> str:
-        return f"{HF_BASE}/{self._revision()}/{path}"
+        # mat-vis#384: composes from ``self._base`` (resolved at init).
+        return f"{self._base}/{self._revision()}/{path}"
 
     def sources(self, tier: str | None = None) -> list[str]:
         """List sources. With ``tier`` set, restricts to sources that

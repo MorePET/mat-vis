@@ -186,10 +186,12 @@ def mock_client():
         # first .manifest access would fall back to an unconditional
         # fetch and clobber our test mocks. Pre-set the in-memory
         # _manifest too so no HTTP is issued at all.
-        cache_path = Path(tmp) / "v0.6" / "v2026.04.1" / ".manifest.json"
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(MOCK_MANIFEST))
-        (Path(tmp) / "v0.6" / "v2026.04.1" / ".manifest.etag").write_text('"mock"')
+        # mat-vis#384: layout is now
+        # <cache_dir>/<client-version>/<repo-slug>/<tag>/.
+        scope = client._cache_scope
+        scope.mkdir(parents=True, exist_ok=True)
+        (scope / ".manifest.json").write_text(json.dumps(MOCK_MANIFEST))
+        (scope / ".manifest.etag").write_text('"mock"')
         client._manifest = MOCK_MANIFEST
         # Suppress the background update-check HTTP calls that would
         # otherwise consume our mocked _get_json side_effect iterations.
@@ -210,10 +212,11 @@ def mock_search_client():
     rich_manifest["sources"]["ambientcg"]["materials_count"] = 3
     with tempfile.TemporaryDirectory() as tmp:
         client = MatVisClient(tag="v2026.04.1", cache_dir=Path(tmp))
-        cache_path = Path(tmp) / "v0.6" / "v2026.04.1" / ".manifest.json"
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(rich_manifest))
-        (Path(tmp) / "v0.6" / "v2026.04.1" / ".manifest.etag").write_text('"mock"')
+        # mat-vis#384: layout includes repo slug.
+        scope = client._cache_scope
+        scope.mkdir(parents=True, exist_ok=True)
+        (scope / ".manifest.json").write_text(json.dumps(rich_manifest))
+        (scope / ".manifest.etag").write_text('"mock"')
         client._manifest = rich_manifest
         client._update_warned = True
         yield client
@@ -267,7 +270,8 @@ def _fresh_client(cache_dir: Path) -> MatVisClient:
     the conditional GET on first ``manifest`` access doesn't escape.
     """
     client = MatVisClient(tag="v2026.04.1", cache_dir=cache_dir)
-    scoped = cache_dir / "v0.6" / "v2026.04.1"
+    # mat-vis#384: layout includes repo slug.
+    scoped = client._cache_scope
     scoped.mkdir(parents=True, exist_ok=True)
     (scoped / ".manifest.json").write_text(json.dumps(MOCK_MANIFEST))
     (scoped / ".manifest.etag").write_text('"mock"')
@@ -431,7 +435,8 @@ class TestSchemaVersionStrict:
     """#69 — client requires ``schema_version``; no legacy fallback."""
 
     def _write_manifest(self, tmp: Path, data: dict) -> Path:
-        scoped = Path(tmp) / "v0.6" / "v2026.04.0"
+        # mat-vis#384: layout includes repo slug.
+        scoped = Path(tmp) / "v0.6" / "gerchowl__mat-vis" / "v2026.04.0"
         scoped.mkdir(parents=True, exist_ok=True)
         mf = scoped / ".manifest.json"
         mf.write_text(json.dumps(data))

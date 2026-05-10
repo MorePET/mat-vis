@@ -50,8 +50,23 @@ PYPI_API = "https://pypi.org/pypi/mat-vis-client/json"
 
 # v0.6.0 (ADR-0007): HF Datasets is the canonical substrate. URLs are
 # built as ``{HF_BASE}/<tag>/<path>``. There is no "latest" alias on HF
-# — callers must pin a revision (tag or branch). `MAT_VIS_HF_BASE`
-# overrides the default for tests / private mirrors.
+# — callers must pin a revision (tag or branch).
+#
+# Repo + tag override precedence (highest first, mat-vis#384):
+#
+#   1. Constructor kwargs ``MatVisClient(repo=..., tag=...)``.
+#   2. ``MAT_VIS_DATASET=<repo>@<tag>`` — combined env var, single
+#      string. Last ``@`` separates repo from tag so org/repo names
+#      with internal ``@`` (rare) round-trip cleanly.
+#   3. ``MAT_VIS_HF_DATASET=<repo>`` (PR #388) + ``MAT_VIS_TAG=<tag>``
+#      (or fall back to ``DEFAULT_TAG``) — split env-var form.
+#   4. ``MAT_VIS_HF_BASE=<full-url>`` — legacy back-compat. Full
+#      resolve-URL prefix; preserved verbatim so private mirrors with
+#      non-HF URL shapes keep working.
+#   5. Default: ``gerchowl/mat-vis`` @ ``DEFAULT_TAG``.
+#
+# All five layers are unit-tested in
+# ``tests/test_client_repo_resolution.py``.
 HF_DATASET = "gerchowl/mat-vis"
 HF_BASE = os.environ.get(
     "MAT_VIS_HF_BASE",
@@ -64,6 +79,84 @@ HF_BASE = os.environ.get(
 # under the per-file substrate (#186 / ADR-0012). The explicit
 # ``tag=...`` override still wins for callers that need it.
 DEFAULT_TAG = "v2026.04.2"
+
+
+def _resolve_repo_and_tag(
+    *,
+    repo_kwarg: str | None,
+    tag_kwarg: str | None,
+) -> tuple[str, str, str | None]:
+    """Resolve the effective ``(repo, tag, base_url_override)`` triple.
+
+    Walks the precedence chain documented above (mat-vis#384). Pure
+    function — no side effects, easy to unit-test.
+
+    Returns:
+        ``(repo, tag, base_url_override)``.
+
+        - ``repo``: dataset coordinate (e.g. ``gerchowl/mat-vis``).
+        - ``tag``: revision (CalVer release tag or branch).
+        - ``base_url_override``: when ``MAT_VIS_HF_BASE`` is the only
+          override active, the full legacy URL prefix. Callers should
+          use it verbatim to compose URLs (preserves private-mirror
+          shapes that don't match ``huggingface.co/datasets/<repo>``).
+          ``None`` when any higher-precedence layer is in effect.
+    """
+    # Layer 1: constructor kwargs win outright.
+    if repo_kwarg is not None and tag_kwarg is not None:
+        return repo_kwarg, tag_kwarg, None
+
+    # Layer 2: ``MAT_VIS_DATASET=repo@tag`` (combined). Last ``@``
+    # splits — defensive against repo names containing ``@`` (unusual
+    # but legal for branch-style refs).
+    combined = os.environ.get("MAT_VIS_DATASET")
+    env_repo: str | None = None
+    env_tag: str | None = None
+    if combined and "@" in combined:
+        env_repo, env_tag = combined.rsplit("@", 1)
+        env_repo = env_repo or None
+        env_tag = env_tag or None
+
+    # Layer 3: split form. ``MAT_VIS_HF_DATASET`` already exists in
+    # the standalone (PR #388); use it here too. Falls back to
+    # ``MAT_VIS_TAG`` then ``DEFAULT_TAG``.
+    if env_repo is None:
+        env_repo = os.environ.get("MAT_VIS_HF_DATASET")
+    if env_tag is None:
+        env_tag = os.environ.get("MAT_VIS_TAG")
+
+    # Constructor kwargs always win over their respective env layers.
+    repo = repo_kwarg or env_repo
+    tag = tag_kwarg or env_tag
+
+    # Layer 4: legacy ``MAT_VIS_HF_BASE``. Only honored when nothing
+    # higher set the repo, AND the env var is actually present (not
+    # just the module-level default). Pre-existing tests rely on the
+    # full URL being preserved (private mirrors).
+    base_override: str | None = None
+    if repo is None:
+        legacy_base = os.environ.get("MAT_VIS_HF_BASE")
+        if legacy_base:
+            base_override = legacy_base
+            # Best-effort repo extraction for cache namespacing.
+            # Pattern: ``https://<host>/datasets/<owner>/<name>/resolve``.
+            # Falls through to the default if the URL doesn't match —
+            # the override URL is still used verbatim for I/O.
+            import re as _re
+
+            m = _re.search(r"/datasets/([^/]+/[^/]+)/resolve", legacy_base)
+            if m:
+                repo = m.group(1)
+
+    # Layer 5: defaults.
+    if repo is None:
+        repo = HF_DATASET
+    if tag is None:
+        tag = DEFAULT_TAG
+
+    return repo, tag, base_override
+
+
 DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" / "mat-vis"))
 
 # SSoT for version: clients/python/pyproject.toml. Derived at runtime so
@@ -643,6 +736,7 @@ class MatVisClient:
         manifest_url: str | None = None,
         cache_dir: Path | None = None,
         tag: str | None = None,
+        repo: str | None = None,
         cache: bool = True,
         on_event: "OnEvent | None" = None,
     ):
@@ -658,7 +752,22 @@ class MatVisClient:
         # Each shares this instance's cache_dir + cache flag so all tag
         # scopes resolve under one root.
         self._alt_clients: dict[str, MatVisClient] = {}
-        self._tag = tag
+
+        # mat-vis#384: resolve the (repo, tag, base_override) triple
+        # via the layered precedence chain documented on
+        # ``_resolve_repo_and_tag``. ``self._tag`` keeps the resolved
+        # value so cache scoping + URL composition agree even when the
+        # caller relied on env vars / defaults.
+        self._repo, self._tag, _base_override = _resolve_repo_and_tag(
+            repo_kwarg=repo,
+            tag_kwarg=tag,
+        )
+        # The legacy ``MAT_VIS_HF_BASE`` form lets callers point at a
+        # private mirror with a non-HF URL shape. When that's the only
+        # override active, preserve the full prefix verbatim — don't
+        # try to recompose from ``self._repo`` (which may have been
+        # parsed best-effort from the URL or fallen back to default).
+        self._base = _base_override or f"https://huggingface.co/datasets/{self._repo}/resolve"
         # mat-vis#312 + #355: optional observability callback. ``None``
         # = silent default; pass a reporter from
         # ``mat_vis_client.progress`` (or write your own) to receive
@@ -674,8 +783,7 @@ class MatVisClient:
             # client picks a sensible default release (DEFAULT_TAG) so
             # out-of-the-box use returns real data instead of the empty
             # `main` baseline (#242). Explicit ``tag=...`` overrides.
-            rev = tag or DEFAULT_TAG
-            self._manifest_url = f"{HF_BASE}/{rev}/release-manifest.json"
+            self._manifest_url = f"{self._base}/{self._tag}/release-manifest.json"
 
         # mat-vis#355: detect orphan cache layouts on first init and
         # emit a single CacheStaleEvent. Cheap (one listdir + str
@@ -790,26 +898,32 @@ class MatVisClient:
 
     @property
     def _cache_scope(self) -> Path:
-        """Version-namespaced + tag-scoped cache subdirectory.
+        """Version-namespaced + repo-scoped + tag-scoped cache subdirectory.
 
-        Layout (mat-vis#355): ``<cache_dir>/<client-version>/<tag>/...``.
+        Layout (mat-vis#355 + mat-vis#384):
+        ``<cache_dir>/<client-version>/<repo-slug>/<tag>/...``.
+
         The client-version segment ensures upgrades across major.minor
         boundaries never read through a stale layout (the bug surfaced
-        twice; see #281, #283 retraction). The tag segment keeps
-        per-release data isolated so a tag=v1 cache never serves bytes
-        for a tag=v2 request.
+        twice; see #281, #283 retraction). The repo-slug segment
+        (added mat-vis#384) keeps per-dataset data isolated so a
+        ``MatVisClient(repo="gerchowl/mat-vis-tst", tag="v1")`` cache
+        never serves bytes for a default-repo ``tag="v1"`` request.
+        The tag segment keeps per-release data isolated likewise.
 
-        Pre-#355 layout (``<cache_dir>/<tag-or-"latest">/...``)
-        becomes orphan on upgrade; the new client never reads it. A
-        ``cache_stale_detected`` event fires from
-        :meth:`_emit_legacy_layout_warning_if_any` at init so wired
-        reporters can surface the cleanup recommendation.
-
-        ``"latest"`` aliasing dropped in #355: when no tag is pinned,
-        falls back to ``DEFAULT_TAG`` everywhere so cache scoping
-        matches the actual HF revision being read.
+        For the default repo (``gerchowl/mat-vis``) the layout
+        appearing under ``<client-version>/`` is
+        ``gerchowl__mat-vis/<tag>``. Pre-#384 default-repo caches
+        (``<client-version>/<tag>/...``) become one-shot orphans and
+        get reaped by the standard
+        :meth:`_emit_legacy_layout_warning_if_any` path.
         """
-        return self._cache_dir / _CLIENT_CACHE_SEGMENT / (self._tag or DEFAULT_TAG)
+        return (
+            self._cache_dir
+            / _CLIENT_CACHE_SEGMENT
+            / self._repo.replace("/", "__")
+            / (self._tag or DEFAULT_TAG)
+        )
 
     def at(self, tag: str) -> "MatVisClient":
         """Return a client pinned to ``tag``, sharing this one's cache.
@@ -826,6 +940,11 @@ class MatVisClient:
             self._alt_clients[tag] = MatVisClient(
                 cache_dir=self._cache_dir,
                 tag=tag,
+                # mat-vis#384: forward the resolved repo so
+                # ``client.at("v...")`` keeps routing to the same
+                # dataset even when the parent was constructed via
+                # env-var overrides.
+                repo=self._repo,
                 cache=self._cache,
                 on_event=self._on_event,
             )
@@ -1122,7 +1241,11 @@ class MatVisClient:
         return self._tag or self.manifest.get("release_tag", DEFAULT_TAG)
 
     def _hf_url(self, path: str) -> str:
-        return f"{HF_BASE}/{self._revision()}/{path}"
+        # mat-vis#384: composes from ``self._base`` (resolved at init
+        # via ``_resolve_repo_and_tag``) so a constructor ``repo=``
+        # kwarg or ``MAT_VIS_DATASET=repo@tag`` env var routes every
+        # URL through the chosen dataset, not just the manifest.
+        return f"{self._base}/{self._revision()}/{path}"
 
     def sources(self, tier: str | None = None) -> list[str]:
         """List sources. With ``tier`` set, restricts to sources that
