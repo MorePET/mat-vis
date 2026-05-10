@@ -64,9 +64,16 @@ const dir = new THREE.DirectionalLight(0xffffff, 1.1);
 dir.position.set(20, 30, 20);
 scene.add(dir);
 
+// displacementMap intentionally excluded — the shader ball is a curated
+// silhouette and per-material displacement maps (a) use UVs that weren't
+// authored for tileable surface textures and (b) at default
+// displacementScale=1 push vertices off-screen or invert the geometry,
+// producing flat-dark renders for materials with strong height data
+// (e.g. ambientcg MetalPlates006, AcousticFoam — collapsed to 7-8
+// unique colors before this exclusion).
 const TEXTURE_KEYS = [
   'map', 'normalMap', 'roughnessMap', 'metalnessMap',
-  'aoMap', 'emissiveMap', 'displacementMap', 'alphaMap',
+  'aoMap', 'emissiveMap', 'alphaMap',
 ];
 
 // Returns a Promise that resolves with a fully-decoded Texture (or null).
