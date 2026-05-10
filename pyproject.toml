@@ -63,4 +63,7 @@ line-length = 100
 target-version = "py311"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "bake/preview/tests"]
+markers = [
+    "visual: heavy Playwright + Three.js renders, opt-in via MAT_VIS_SKIP_VISUAL=0",
+]
