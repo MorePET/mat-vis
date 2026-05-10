@@ -35,6 +35,24 @@ SOURCE = "polyhaven"
 TIER = "1k"
 
 
+@pytest.fixture
+def hf_base_tst():
+    """Route the Python client at ``mat-vis-tst`` for the duration
+    of a test via ``MAT_VIS_HF_BASE`` — the public override contract
+    (see ``clients/python/src/mat_vis_client/client.py``). Restores
+    the prior value on teardown so other tests aren't polluted.
+    """
+    old = os.environ.get("MAT_VIS_HF_BASE")
+    os.environ["MAT_VIS_HF_BASE"] = f"https://huggingface.co/datasets/{REPO}/resolve"
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("MAT_VIS_HF_BASE", None)
+        else:
+            os.environ["MAT_VIS_HF_BASE"] = old
+
+
 def _hf_token() -> str:
     tok = os.environ.get("HF_TOKEN")
     if tok:
@@ -171,18 +189,14 @@ class TestPythonClientFetchTextureRoundTrip:
     plain-GET contract end-to-end (#186 / ADR-0012)."""
 
     def _client_pointed_at_tst(self, td: Path):
-        """Return a MatVisClient whose HF_BASE / HF_DATASET point at
-        ``mat-vis-tst`` for the duration of the test. The client uses
-        module-level constants for these, so monkeypatch them on the
-        loaded module."""
+        """Return a MatVisClient pointed at ``mat-vis-tst``. Routing
+        is supplied via the ``MAT_VIS_HF_BASE`` env var (see the
+        ``hf_base_tst`` fixture) — the public override contract."""
         from mat_vis_client import MatVisClient
-        from mat_vis_client import client as _mvc
 
-        _mvc.HF_DATASET = REPO  # gerchowl/mat-vis-tst
-        _mvc.HF_BASE = f"https://huggingface.co/datasets/{REPO}/resolve"
         return MatVisClient(tag=TAG, cache_dir=td, cache=False)
 
-    def test_client_fetch_returns_baker_bytes(self, baked_tag) -> None:
+    def test_client_fetch_returns_baker_bytes(self, baked_tag, hf_base_tst) -> None:
         """Python client .fetch_texture against the freshly-baked tag
         returns valid PNG bytes through the per-file resolve URL."""
         with tempfile.TemporaryDirectory() as td:
@@ -199,7 +213,7 @@ class TestPythonClientFetchTextureRoundTrip:
             assert data.startswith(b"\x89PNG\r\n\x1a\n"), "must be a real PNG"
             assert len(data) > 1024, "PNG too small to be a real texture"
 
-    def test_client_rejects_partial_tier(self, baked_tag) -> None:
+    def test_client_rejects_partial_tier(self, baked_tag, hf_base_tst) -> None:
         """Pointed at an existing-but-incomplete tier (no .tier_complete
         sentinel), .fetch_texture raises ``MatVisError``. Lock this gate
         so future regressions can't silently serve mid-batch state."""
@@ -237,10 +251,8 @@ class TestPythonClientFetchTextureRoundTrip:
 
         try:
             with tempfile.TemporaryDirectory() as td:
-                from mat_vis_client import client as _mvc
-
-                _mvc.HF_DATASET = REPO
-                _mvc.HF_BASE = f"https://huggingface.co/datasets/{REPO}/resolve"
+                # Routing is supplied by the ``hf_base_tst`` fixture
+                # via ``MAT_VIS_HF_BASE`` — the public override contract.
                 client = MatVisClient(tag=partial_tag, cache_dir=Path(td), cache=False)
                 # Pre-seed manifest + index so we get past metadata
                 # validation and into the sentinel probe.
