@@ -69,14 +69,28 @@ const TEXTURE_KEYS = [
   'aoMap', 'emissiveMap', 'displacementMap', 'alphaMap',
 ];
 
+// Returns a Promise that resolves with a fully-decoded Texture (or null).
+// Awaiting these before the warmup renders is load-bearing: TextureLoader.load
+// returns the Texture object synchronously but the image decode is async, so a
+// non-awaited path captures the canvas before any texture is on the GPU —
+// which collapsed every textured ambientcg material to the same scalar-only
+// render in #361 (#385).
 function _loadTextureFromDataURI(dataUri) {
-  if (!dataUri || typeof dataUri !== 'string' || !dataUri.startsWith('data:')) return null;
-  const tex = new THREE.TextureLoader().load(dataUri);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+  return new Promise((resolve) => {
+    if (!dataUri || typeof dataUri !== 'string' || !dataUri.startsWith('data:')) {
+      resolve(null);
+      return;
+    }
+    new THREE.TextureLoader().load(
+      dataUri,
+      (tex) => { tex.colorSpace = THREE.SRGBColorSpace; resolve(tex); },
+      undefined,
+      () => resolve(null),
+    );
+  });
 }
 
-function _buildMaterial(spec) {
+async function _buildMaterial(spec) {
   const params = {};
   if ('color' in spec && spec.color != null) params.color = spec.color;
   if ('metalness' in spec && spec.metalness != null) params.metalness = spec.metalness;
@@ -87,13 +101,16 @@ function _buildMaterial(spec) {
   if ('emissive' in spec && spec.emissive != null) {
     params.emissive = new THREE.Color(spec.emissive[0] ?? 0, spec.emissive[1] ?? 0, spec.emissive[2] ?? 0);
   }
-  for (const k of TEXTURE_KEYS) {
-    if (k in spec && spec[k]) {
-      const tex = _loadTextureFromDataURI(spec[k]);
-      if (tex) {
-        if (k !== 'map' && k !== 'emissiveMap') tex.colorSpace = THREE.NoColorSpace;
-        params[k] = tex;
-      }
+  // Load all texture maps in parallel, await before constructing the material.
+  const texEntries = await Promise.all(
+    TEXTURE_KEYS
+      .filter((k) => k in spec && spec[k])
+      .map(async (k) => [k, await _loadTextureFromDataURI(spec[k])]),
+  );
+  for (const [k, tex] of texEntries) {
+    if (tex) {
+      if (k !== 'map' && k !== 'emissiveMap') tex.colorSpace = THREE.NoColorSpace;
+      params[k] = tex;
     }
   }
   return new THREE.MeshPhysicalMaterial(params);
@@ -116,7 +133,10 @@ async function main() {
   const shaderBall = gltf.scene;
   shaderBall.scale.set(1000, 1000, 1000);
 
-  const mat = _buildMaterial(threejs);
+  // Await: textures must be GPU-resident before the warmup renders, else
+  // toDataURL captures a stale frame (root cause of byte-identical buckets
+  // diagnosed in #385).
+  const mat = await _buildMaterial(threejs);
   shaderBall.traverse((child) => {
     if (child.isMesh) child.material = mat;
   });
@@ -142,9 +162,10 @@ async function main() {
   camera.updateProjectionMatrix();
   camera.lookAt(center);
 
-  // 3 warmup renders for shader compile + PBR convergence
+  // 3 warmup renders for shader compile + PBR convergence (textures are
+  // already GPU-resident at this point — see _buildMaterial await).
   for (let i = 0; i < 3; i++) renderer.render(scene, camera);
-  console.log(`thumb render ready (geom=${size.toFixed(1)} dist=${dist.toFixed(1)})`);
+  console.log(`thumb render ready (bbRadius=${bbRadius.toFixed(1)})`);
   setTimeout(() => { window.__renderComplete = true; }, 800);
 }
 

@@ -133,6 +133,14 @@ def _bake_source(
         try:
             page.goto(f"{server_url}/thumb_render.html?spec={spec_path.name}", timeout=180_000)
             page.wait_for_function("() => window.__renderComplete === true", timeout=180_000)
+            # Surface JS-side render errors instead of silently screenshotting
+            # a stale canvas — the original byte-identical-x3 bake (#385) was
+            # caused by an undefined-var ReferenceError that was caught by
+            # `main().catch()`, set `__renderComplete=true`, and let the
+            # orchestrator screenshot a pre-texture-load frame.
+            render_error = page.evaluate("() => window.__renderError || null")
+            if render_error:
+                raise RuntimeError(f"renderer JS error: {render_error}")
             page.wait_for_timeout(800)
             data_url = page.evaluate(
                 "() => document.querySelector('canvas').toDataURL('image/png')"
