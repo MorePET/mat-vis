@@ -145,26 +145,7 @@ async function main() {
   // diagnosed in #385).
   const mat = await _buildMaterial(threejs);
   shaderBall.traverse((child) => {
-    if (!child.isMesh) return;
-    // The vendored shader_ball.glb has no TEXCOORD_0 (build123d export_gltf
-    // doesn't emit UVs by default — see follow-up to regenerate the GLB
-    // with UVs baked in). Without UVs, MeshPhysicalMaterial cannot sample
-    // any texture map: matte dielectrics collapse to scalar color=#FFFFFF
-    // (a washed warm-grey under the dim PMREM), even though all maps bind
-    // correctly. Generate spherical UVs from per-vertex world position as
-    // a workaround so texture sampling works on every fragment.
-    if (!child.geometry.attributes.uv) {
-      const pos = child.geometry.attributes.position;
-      const uv = new Float32Array(pos.count * 2);
-      for (let i = 0; i < pos.count; i++) {
-        const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
-        const r = Math.hypot(x, y, z) || 1;
-        uv[i * 2]     = 0.5 + Math.atan2(z, x) / (2 * Math.PI);
-        uv[i * 2 + 1] = 0.5 - Math.asin(y / r) / Math.PI;
-      }
-      child.geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-    }
-    child.material = mat;
+    if (child.isMesh) child.material = mat;
   });
   scene.add(shaderBall);
 
