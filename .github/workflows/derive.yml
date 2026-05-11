@@ -101,6 +101,15 @@ on:  # yamllint disable-line rule:truthy
         required: false
         default: '300'
         type: string
+      limit:
+        description: >-
+          Cap materials per source (#402). 0 = no cap. Useful for
+          smoke-testing kind=thumb (full ambientcg = 1949 materials
+          × ~25s/render ≈ 13 h, exceeds the 350-min job timeout).
+          For resize / ktx2 leave at 0.
+        required: false
+        default: '0'
+        type: string
       batch-max-bytes:
         description: 'Bytes per atomic commit (#228). 734003200 = 700 MiB; HF caps at 1 GiB/commit.'
         required: false
@@ -273,6 +282,7 @@ jobs:
             --allow-prod=${{ inputs.allow-prod }}
             --batch-size=${{ inputs.batch-size }}
             --batch-max-bytes=${{ inputs.batch-max-bytes }}
+            --limit=${{ inputs.limit }}
 
   report:
     needs: [plan, derive]
