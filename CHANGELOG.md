@@ -19,6 +19,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## mat-vis-client 0.7.0
+
+Ergonomic-tier rollout
+([#374](https://github.com/MorePET/mat-vis/issues/374)). Downstream
+consumers no longer have to learn about resolution-tier names before
+they can render — pass no `tier=` and the client picks a working tier
+automatically.
+
+**Breaking**: default `tier` flipped from `"1k"` to `"auto"` on
+`fetch_all_textures`, `fetch_texture`, `prefetch`, `materialize`,
+`mtlx`, and `client.asset(...)`. Callers passing `tier="1k"`
+explicitly are unaffected. Bumps the minor version per semver since
+the default-value change is observable.
+
+### Added
+
+- Two new tier sentinels (`tier="auto"`, `tier="best"`) that collapse
+  to a concrete tier per-material via the v3 catalog's
+  `available_tiers`. `"auto"` is REPL-friendly — walks
+  `(scalar-precheck) → 1k → 512 → 256 → 128` and returns `{}`
+  textures for scalar-only materials so `to_threejs` / `to_gltf`
+  still compose. `"best"` is the archival contract — walks
+  `8k → 4k → … → 128` with NO scalar fallback, raises
+  `MaterialNotStagedError` when nothing is staged.
+- `VisAsset.resolved_tier` — the concrete tier the auto/best resolver
+  picked. Useful for bake-pipeline manifests that need to record what
+  was actually consumed (vs the literal `"auto"` the user passed).
+- `MatVisClient._TIER_RANK` ClassVar with forward-compat tier-name
+  filtering: unknown tier names from future substrates sort to
+  nowhere and are skipped, never crash old clients.
+
+### Changed
+
+- Default `tier` is now `"auto"` on the consumer-fetch surface.
+  `tier="1k"` callers keep their exact pre-0.7.0 behavior; only
+  default-using callers see the new resolution path.
+- The bake-side preview orchestrator (`bake/preview/run.py`) replaces
+  its manual `(1k → 512 → 256 → 128)` ladder with a single
+  `fetch_all_textures(..., tier="auto")` call — one source of truth
+  for tier picking, in the client.
+
+### Notes
+
+- The `bash` and `Rust` thin clients don't backport `"auto"` /
+  `"best"`. Help text now flags them as Python-client only; bash /
+  Rust callers must pass an explicit tier name.
+
 ## mat-vis-client 0.6.4
 
 Five client-side hotfixes off bernhard-42's

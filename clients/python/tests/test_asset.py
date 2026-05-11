@@ -175,9 +175,12 @@ def test_client_asset_factory_returns_visasset():
 
 
 def test_client_asset_factory_default_tier():
+    # mat-vis#374: default tier flipped from "1k" to "auto" in 0.7.0.
+    # The auto sentinel collapses to a concrete tier lazily on first
+    # .textures access (see test_asset_resolved_tier_*).
     c = MatVisClient()
     a = c.asset("ambientcg", "Wood080")
-    assert a.tier == "1k"
+    assert a.tier == "auto"
 
 
 def test_client_asset_factory_holds_client_reference():

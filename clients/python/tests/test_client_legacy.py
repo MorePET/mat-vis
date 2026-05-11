@@ -436,7 +436,7 @@ class TestSchemaVersionStrict:
 
     def _write_manifest(self, tmp: Path, data: dict) -> Path:
         # mat-vis#384: layout includes repo slug.
-        scoped = Path(tmp) / "v0.6" / "gerchowl__mat-vis" / "v2026.04.0"
+        scoped = Path(tmp) / "v0.7" / "gerchowl__mat-vis" / "v2026.04.0"
         scoped.mkdir(parents=True, exist_ok=True)
         mf = scoped / ".manifest.json"
         mf.write_text(json.dumps(data))
