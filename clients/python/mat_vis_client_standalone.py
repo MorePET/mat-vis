@@ -1573,6 +1573,9 @@ class MatVisClient:
         "sheen",
         "sheen_color",
         "sheen_roughness",
+        # Iridescence (#408 / #405 Phase 3c) — forward-looking.
+        "iridescence_thickness",
+        "iridescence_ior",
     )
 
     def _scalars_for(self, source: str, material_id: str) -> dict:

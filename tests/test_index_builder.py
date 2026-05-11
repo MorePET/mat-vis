@@ -98,6 +98,9 @@ def test_mat_vis_block_has_stable_key_set() -> None:
         "sheen",
         "sheen_color",
         "sheen_roughness",
+        # Iridescence (#408 / #405 Phase 3c) — additive, forward-looking.
+        "iridescence_thickness",
+        "iridescence_ior",
     }
     # Nested AttributionBlock
     assert set(mv["attribution"].keys()) == {"authors", "license_spdx", "source_url"}
@@ -142,6 +145,9 @@ def test_mat_vis_block_defaults_are_null_or_empty() -> None:
     assert mv["pbr"]["sheen"] is None
     assert mv["pbr"]["sheen_color"] is None
     assert mv["pbr"]["sheen_roughness"] is None
+    # Iridescence (#408 / #405 Phase 3c) — additive, default-None.
+    assert mv["pbr"]["iridescence_thickness"] is None
+    assert mv["pbr"]["iridescence_ior"] is None
     assert mv["attribution"]["authors"] == []
     assert mv["dates"]["published"] is None
     assert mv["dates"]["updated"] is None

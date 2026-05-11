@@ -490,6 +490,25 @@ class PBRBlock:
     sheen_color: list[float] | None = None  # <standard_surface>.sheen_color, LINEAR RGB
     sheen_roughness: float | None = None  # <standard_surface>.sheen_roughness
 
+    # Iridescence (#408). The wavelength-dependent interference layer
+    # — oil-on-water, soap bubble, pearl, butterfly wing, polished
+    # optical coating. ``thin_film_*`` in MaterialX, ``iridescence_*``
+    # in the substrate (same consumer-facing rename convention #340
+    # used for coat → clearcoat).
+    #
+    # Units: ``iridescence_thickness`` is in **nanometers (nm)** end
+    # to end — MaterialX ``thin_film_thickness``, glTF
+    # ``KHR_materials_iridescence.iridescenceThicknessMaximum``, and
+    # Three.js ``iridescenceThicknessRange`` all agree on nm. No
+    # conversion at any adapter boundary.
+    #
+    # Audit (v2026.04.99 corpus, #408): 0/3160 entries author either
+    # field non-default across gpuopen / polyhaven / ambientcg. Schema
+    # ships forward-looking — once authors do, the substrate carries
+    # them without a new bump.
+    iridescence_thickness: float | None = None  # <standard_surface>.thin_film_thickness, nm
+    iridescence_ior: float | None = None  # <standard_surface>.thin_film_IOR
+
 
 def apply_pbr_neutral_multiplier_conventions(
     pbr: PBRBlock,
