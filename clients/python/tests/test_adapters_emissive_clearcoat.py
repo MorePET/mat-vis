@@ -121,6 +121,117 @@ class TestClearcoatToGltf:
         assert "KHR_materials_clearcoat" not in result.get("extensions", {})
 
 
+class TestEmissionFactorToThreejs:
+    """Emission scalar coverage (#406 / #405 Phase 3a). ``emission``
+    (factor) + ``emission_color`` (RGB tint) flow from the substrate to
+    Three.js via the HDR split: SDR cases write ``emissive`` alone;
+    HDR cases (factor > 1) add ``emissiveIntensity``. The legacy
+    ``emissive`` key (RGB triple) stays a backward-compat passthrough."""
+
+    def test_emission_sdr_writes_emissive_only(self):
+        # Factor at 0.5 + green tint → emissive = green * 0.5 (clamped to
+        # SDR range). No emissiveIntensity (Three.js default is 1.0).
+        result = to_threejs({"emission": 0.5, "emission_color": [0.0, 1.0, 0.5]})
+        assert result["emissive"] == [0.0, 0.5, 0.25]
+        assert "emissiveIntensity" not in result
+
+    def test_emission_at_unit_writes_emissive_only(self):
+        # Factor = 1.0 → emissive carries the full color; intensity stays
+        # at the Three.js default, so the adapter doesn't emit it.
+        result = to_threejs({"emission": 1.0, "emission_color": [0.8, 0.4, 0.2]})
+        assert result["emissive"] == [0.8, 0.4, 0.2]
+        assert "emissiveIntensity" not in result
+
+    def test_emission_hdr_splits_color_and_intensity(self):
+        # Factor = 3.5 → color clamped to SDR (×1), intensity carries
+        # the HDR multiplier. This is the Three.js HDR mechanism
+        # (intensity * color). Renderer math reconstructs 3.5 × color.
+        result = to_threejs({"emission": 3.5, "emission_color": [1.0, 0.5, 0.0]})
+        assert result["emissive"] == [1.0, 0.5, 0.0]
+        assert result["emissiveIntensity"] == 3.5
+
+    def test_emission_without_color_defaults_to_white(self):
+        # MTLX ``<standard_surface>`` default for emission_color is
+        # (1, 1, 1) — when only the factor is authored, emit a white
+        # emissive at the factor's SDR clamp.
+        result = to_threejs({"emission": 2.0})
+        assert result["emissive"] == [1.0, 1.0, 1.0]
+        assert result["emissiveIntensity"] == 2.0
+
+    def test_emission_zero_suppresses_output(self):
+        # 3160/3160 corpus materials author emission=0 — the SDR-zero
+        # case is a no-op, suppress to keep the Three.js dict clean.
+        result = to_threejs({"emission": 0.0, "emission_color": [1.0, 0.0, 0.0]})
+        assert "emissive" not in result
+        assert "emissiveIntensity" not in result
+
+    def test_emission_none_with_color_none_suppresses(self):
+        # Neither field authored → no emissive output.
+        result = to_threejs({"emission": None, "emission_color": None})
+        assert "emissive" not in result
+        assert "emissiveIntensity" not in result
+
+    def test_emission_factor_wins_over_legacy_emissive(self):
+        # Adapter contract: ``emission`` (HDR factor) carries information
+        # the legacy ``emissive`` key (RGB triple, no factor) cannot
+        # express. When both arrive, ``emission`` wins so HDR substrate
+        # values aren't silently downgraded.
+        result = to_threejs(
+            {
+                "emissive": (0.1, 0.1, 0.1),  # legacy
+                "emission": 5.0,
+                "emission_color": [1.0, 1.0, 1.0],
+            }
+        )
+        assert result["emissive"] == [1.0, 1.0, 1.0]
+        assert result["emissiveIntensity"] == 5.0
+
+
+class TestEmissionFactorToGltf:
+    """glTF emission output for the factor + color split (#406)."""
+
+    def test_emission_sdr_writes_factor_only(self):
+        result = to_gltf({"emission": 0.5, "emission_color": [0.0, 1.0, 0.5]})
+        assert result["emissiveFactor"] == [0.0, 0.5, 0.25]
+        assert "KHR_materials_emissive_strength" not in result.get("extensions", {})
+
+    def test_emission_at_unit_writes_factor_only(self):
+        # SDR boundary (factor = 1.0) — KHR extension omitted (default).
+        result = to_gltf({"emission": 1.0, "emission_color": [0.8, 0.4, 0.2]})
+        assert result["emissiveFactor"] == [0.8, 0.4, 0.2]
+        assert "KHR_materials_emissive_strength" not in result.get("extensions", {})
+
+    def test_emission_hdr_emits_strength_extension(self):
+        # HDR — KHR_materials_emissive_strength carries the factor;
+        # emissiveFactor stays in SDR range. Spec:
+        # https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_emissive_strength
+        result = to_gltf({"emission": 3.5, "emission_color": [1.0, 0.5, 0.0]})
+        assert result["emissiveFactor"] == [1.0, 0.5, 0.0]
+        ext = result["extensions"]["KHR_materials_emissive_strength"]
+        assert ext["emissiveStrength"] == 3.5
+
+    def test_emission_without_color_defaults_to_white(self):
+        result = to_gltf({"emission": 2.0})
+        assert result["emissiveFactor"] == [1.0, 1.0, 1.0]
+        assert result["extensions"]["KHR_materials_emissive_strength"]["emissiveStrength"] == 2.0
+
+    def test_emission_zero_suppresses_output(self):
+        result = to_gltf({"emission": 0.0, "emission_color": [1.0, 0.0, 0.0]})
+        assert "emissiveFactor" not in result
+        assert "KHR_materials_emissive_strength" not in result.get("extensions", {})
+
+    def test_emission_factor_wins_over_legacy_emissive(self):
+        result = to_gltf(
+            {
+                "emissive": (0.1, 0.1, 0.1),
+                "emission": 5.0,
+                "emission_color": [1.0, 1.0, 1.0],
+            }
+        )
+        assert result["emissiveFactor"] == [1.0, 1.0, 1.0]
+        assert result["extensions"]["KHR_materials_emissive_strength"]["emissiveStrength"] == 5.0
+
+
 class TestClearcoatMtlxSkipped:
     """UsdPreviewSurface 1.38 has no clearcoat input — adapter drops it silently
     with no error. (Future MaterialX shaders may; revisit then.)"""

@@ -98,6 +98,34 @@ EMISSIVE_INDEX = [
     ),
 ]
 
+# Emission factor + color (#406) — exercises the MTLX-derived split
+# emission scalar coverage. SDR case: factor in [0, 1].
+EMISSION_SDR_INDEX = [
+    _entry(
+        "glowing-decal",
+        name="Glowing Decal",
+        roughness=0.5,
+        metalness=0.0,
+        emission=1.0,
+        emission_color=[0.0, 1.0, 0.5],
+        color_rgb=[0.1, 0.1, 0.1],
+    ),
+]
+
+# Emission HDR — factor > 1, exercises the emissiveIntensity /
+# KHR_materials_emissive_strength split on the adapter side.
+EMISSION_HDR_INDEX = [
+    _entry(
+        "led-sign",
+        name="LED Sign",
+        roughness=0.5,
+        metalness=0.0,
+        emission=4.0,
+        emission_color=[1.0, 0.4, 0.1],
+        color_rgb=[0.1, 0.1, 0.1],
+    ),
+]
+
 
 # ── Read-side: _scalars_for forwards each new field ────────────
 
@@ -161,6 +189,17 @@ class TestScalarsForFullPbrPassthrough:
             scalars = c._scalars_for("physicallybased", "LED Strip")
         assert scalars["emissive"] == [0.0, 1.0, 0.5]
 
+    def test_emission_factor_and_color_pass_through(self):
+        """#406 — ``emission`` factor + ``emission_color`` round-trip from
+        the substrate's mat_vis.pbr block to the adapter scalars dict.
+        The adapter then splits HDR strengths > 1 into the
+        emissiveIntensity / KHR_materials_emissive_strength path."""
+        c = MatVisClient()
+        with patch.object(c, "index", return_value=EMISSION_HDR_INDEX):
+            scalars = c._scalars_for("physicallybased", "LED Sign")
+        assert scalars["emission"] == pytest.approx(4.0)
+        assert scalars["emission_color"] == [1.0, 0.4, 0.1]
+
     def test_existing_4_field_contract_preserved(self):
         """Regression guard — the original
         roughness/metalness/ior/color_hex fields still round-trip
@@ -190,6 +229,9 @@ class TestScalarsForFullPbrPassthrough:
             "specular_intensity",
             "specular_color_linear",
             "emissive",
+            # Emission scalar coverage (#406) — additive, defaults to absent.
+            "emission",
+            "emission_color",
         ):
             assert k not in scalars, f"{k!r} should not be injected when substrate is None"
 
@@ -227,6 +269,26 @@ class TestEndToEndThreejs:
             scalars = c._scalars_for("physicallybased", "LED Strip")
         result = to_threejs(scalars)
         assert result["emissive"] == [0.0, 1.0, 0.5]
+
+    def test_emission_sdr_emits_emissive_only(self):
+        # #406 SDR end-to-end: factor=1.0 with a green tint → emissive
+        # carries the color, no emissiveIntensity (Three.js default).
+        c = MatVisClient()
+        with patch.object(c, "index", return_value=EMISSION_SDR_INDEX):
+            scalars = c._scalars_for("physicallybased", "Glowing Decal")
+        result = to_threejs(scalars)
+        assert result["emissive"] == [0.0, 1.0, 0.5]
+        assert "emissiveIntensity" not in result
+
+    def test_emission_hdr_emits_emissive_plus_intensity(self):
+        # #406 HDR end-to-end: factor=4.0 → emissive clamped to SDR
+        # (×1 color), intensity carries the HDR multiplier.
+        c = MatVisClient()
+        with patch.object(c, "index", return_value=EMISSION_HDR_INDEX):
+            scalars = c._scalars_for("physicallybased", "LED Sign")
+        result = to_threejs(scalars)
+        assert result["emissive"] == [1.0, 0.4, pytest.approx(0.1)]
+        assert result["emissiveIntensity"] == pytest.approx(4.0)
 
 
 class TestEndToEndGltf:
@@ -285,3 +347,24 @@ class TestEndToEndGltf:
             scalars = c._scalars_for("physicallybased", "LED Strip")
         result = to_gltf(scalars)
         assert result["emissiveFactor"] == [0.0, 1.0, 0.5]
+
+    def test_emission_sdr_emits_factor_only(self):
+        # #406 SDR end-to-end: factor=1.0 → emissiveFactor carries the
+        # color; KHR_materials_emissive_strength omitted (default).
+        c = MatVisClient()
+        with patch.object(c, "index", return_value=EMISSION_SDR_INDEX):
+            scalars = c._scalars_for("physicallybased", "Glowing Decal")
+        result = to_gltf(scalars)
+        assert result["emissiveFactor"] == [0.0, 1.0, 0.5]
+        assert "KHR_materials_emissive_strength" not in result.get("extensions", {})
+
+    def test_emission_hdr_emits_strength_extension(self):
+        # #406 HDR end-to-end: factor=4.0 → emissiveFactor clamped to
+        # SDR; KHR_materials_emissive_strength carries the multiplier.
+        c = MatVisClient()
+        with patch.object(c, "index", return_value=EMISSION_HDR_INDEX):
+            scalars = c._scalars_for("physicallybased", "LED Sign")
+        result = to_gltf(scalars)
+        assert result["emissiveFactor"] == [1.0, 0.4, pytest.approx(0.1)]
+        ext = result["extensions"]["KHR_materials_emissive_strength"]
+        assert ext["emissiveStrength"] == pytest.approx(4.0)

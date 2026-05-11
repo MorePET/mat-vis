@@ -1452,6 +1452,11 @@ class MatVisClient:
         "subsurface",
         "subsurface_color",
         "subsurface_radius",
+        # Emission scalar coverage (#406 / #405 Phase 3a) — factor +
+        # linear-RGB tint. Adapter splits HDR strengths > 1 into
+        # emissiveIntensity / KHR_materials_emissive_strength.
+        "emission",
+        "emission_color",
     )
 
     def _scalars_for(self, source: str, material_id: str) -> dict:

@@ -62,6 +62,13 @@ _FLOAT_INPUTS: dict[str, str] = {
     # for glTF via the (draft) subsurface extension; Three.js adapter
     # is intentionally a no-op (MeshPhysicalMaterial has no SSS field).
     "subsurface": "subsurface",
+    # Emission factor (#406 / #405 Phase 3a). Without this, materials
+    # authoring ``emission > 0`` (LED signs, glowing decals, hot metals,
+    # screens) render as inert. Adapter wiring routes values ≤ 1 to
+    # Three.js ``emissive`` / glTF ``emissiveFactor``; values > 1 split
+    # into ``emissiveIntensity`` (Three.js HDR) / KHR_materials_emissive_strength
+    # (glTF HDR) with the color factor clamped to [0, 1].
+    "emission": "emission",  # KHR_materials_emissive_strength.emissiveStrength (factor)
 }
 
 # Color3 inputs. Same direct value=/1-hop graph→constant promotion as
@@ -75,6 +82,10 @@ _COLOR3_INPUTS: dict[str, str] = {
     # decides whether the SSS extension fires (only when subsurface>0).
     "subsurface_color": "subsurface_color",
     "subsurface_radius": "subsurface_radius",
+    # Emission color (#406). Sibling of ``emission`` factor — RGB tint
+    # the emission factor multiplies. Authored linear per MaterialX 1.38;
+    # glTF ``emissiveFactor`` is also linear so no colorspace boundary.
+    "emission_color": "emission_color",  # glTF emissiveFactor RGB (linear)
 }
 
 # Inputs that have no PBRBlock home today. Non-zero values are dropped
@@ -86,8 +97,6 @@ _LOSSY_INPUTS: tuple[str, ...] = (
     "sheen_roughness",
     "sheen_color",
     "thin_film_thickness",
-    "emission",
-    "emission_color",
 )
 
 

@@ -468,6 +468,20 @@ class PBRBlock:
     # transmission > 0; baker emits None for opaque materials.
     thickness: float | None = None  # <standard_surface>.transmission_depth
     dispersion: float | None = None  # <standard_surface>.transmission_dispersion
+    # Emission — Phase 3a of #405 (#406). ``emission`` is the scalar HDR
+    # factor (>= 0; values > 1 emit KHR_materials_emissive_strength on
+    # the glTF side / route through ``emissiveIntensity`` on Three.js).
+    # ``emission_color`` is the linear RGB tint that the factor
+    # multiplies. Both stay None when the material is non-emissive
+    # (the gpuopen+polyhaven+ambientcg corpus authors emission=0 for all
+    # 3160 entries today; schema is sticky pre-v0.7, hence the additive
+    # land). Adapter contract:
+    #   - Three.js: emissive = emission_color * min(emission, 1),
+    #               emissiveIntensity = max(emission, 1)
+    #   - glTF:     emissiveFactor = emission_color * min(emission, 1);
+    #               emission > 1 ⇒ KHR_materials_emissive_strength.emissiveStrength
+    emission: float | None = None  # <standard_surface>.emission
+    emission_color: list[float] | None = None  # <standard_surface>.emission_color, LINEAR RGB
 
     # Subsurface scattering (#409). 13 gpuopen entries author
     # ``subsurface > 0`` (wax, resin, semi-translucent). Three.js
