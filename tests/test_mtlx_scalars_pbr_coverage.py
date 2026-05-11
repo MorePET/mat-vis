@@ -1,4 +1,4 @@
-"""Bake-side extraction tests for #340 / #396 / #406 / #407 / #409 — full MeshPhysicalMaterial coverage.
+"""Bake-side extraction tests for #340 / #396 / #406 / #407 / #408 / #409 — full MeshPhysicalMaterial coverage.
 
 Scalar fields extracted from ``<standard_surface>``:
 - coat                   -> clearcoat (float, #396)
@@ -15,10 +15,12 @@ Scalar fields extracted from ``<standard_surface>``:
 - sheen                  -> sheen (float, #407 / #405 Phase 3b)
 - sheen_color            -> sheen_color (color3, linear, #407)
 - sheen_roughness        -> sheen_roughness (float, #407)
+- thin_film_thickness    -> iridescence_thickness (float nm, #408 / #405 Phase 3c)
+- thin_film_IOR          -> iridescence_ior (float, #408)
 
 Audit at v2026.04.99-tst-full-369: coat is 3/454 (Car Paint family);
-subsurface is 13/454 (wax, resin); emission/sheen are 0/3160 today.
-Schema-adds are forward-compatible for future authoring.
+subsurface is 13/454 (wax, resin); emission/sheen/iridescence are
+0/3160 today. Schema-adds are forward-compatible for future authoring.
 """
 
 from __future__ import annotations
@@ -586,6 +588,111 @@ class TestSheen:
         assert pbr.sheen == pytest.approx(0.6)
 
 
+class TestIridescence:
+    """``thin_film_thickness`` + ``thin_film_IOR`` extraction (#408).
+
+    MaterialX's iridescence inputs. Renamed to ``iridescence_thickness``
+    / ``iridescence_ior`` in the substrate per the consumer-facing
+    naming convention #340 used for coat → clearcoat. Audit of the
+    v2026.04.99 corpus shows 0/3160 entries author either field
+    non-default — the schema ships forward-looking so once authors
+    do (oil-on-water, pearl, butterfly wing), the substrate carries
+    them without a new bump.
+
+    Units are nanometers (nm) end to end: MaterialX
+    ``thin_film_thickness``, glTF ``KHR_materials_iridescence.
+    iridescenceThicknessMaximum``, and Three.js
+    ``iridescenceThicknessRange`` all agree on nm.
+    """
+
+    def test_thin_film_thickness_authored(self) -> None:
+        # Soap-bubble / pearl regime: ~400nm thin film.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="thin_film_thickness" type="float" value="400.0"/>')
+        )
+        assert pbr.iridescence_thickness == pytest.approx(400.0)
+
+    def test_thin_film_IOR_authored(self) -> None:
+        # Note the uppercase-IOR input name in MTLX — case-aware
+        # lookup must hit the renamed substrate field.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="thin_film_IOR" type="float" value="1.33"/>')
+        )
+        assert pbr.iridescence_ior == pytest.approx(1.33)
+
+    def test_thin_film_pair_authored(self) -> None:
+        # Both fields together, the common authoring pattern.
+        pbr = parse_standard_surface_scalars(
+            _wrap(
+                '<input name="thin_film_thickness" type="float" value="550.0"/>',
+                '<input name="thin_film_IOR" type="float" value="1.45"/>',
+            )
+        )
+        assert pbr.iridescence_thickness == pytest.approx(550.0)
+        assert pbr.iridescence_ior == pytest.approx(1.45)
+
+    def test_thin_film_default_zero_extracted(self) -> None:
+        # 424/454 gpuopen entries author thin_film_thickness=0.0 —
+        # extracting preserves provenance. Adapter suppresses the
+        # spec-default KHR extension entry.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="thin_film_thickness" type="float" value="0.0"/>')
+        )
+        assert pbr.iridescence_thickness == pytest.approx(0.0)
+
+    def test_thin_film_unset_stays_none(self) -> None:
+        pbr = parse_standard_surface_scalars(_wrap())
+        assert pbr.iridescence_thickness is None
+        assert pbr.iridescence_ior is None
+
+    def test_thin_film_thickness_graph_constant_promoted(self) -> None:
+        # 1-hop nodegraph → <constant> resolution applies to
+        # ``thin_film_thickness`` like every other _FLOAT_INPUT.
+        mtlx = """<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="NG_TF">
+    <constant name="tf_const" type="float">
+      <input name="value" type="float" value="380.0"/>
+    </constant>
+    <output name="tf_out" type="float" nodename="tf_const"/>
+  </nodegraph>
+  <standard_surface name="SR_T" type="surfaceshader">
+    <input name="thin_film_thickness" type="float" output="tf_out" nodegraph="NG_TF"/>
+  </standard_surface>
+  <surfacematerial name="T" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_T"/>
+  </surfacematerial>
+</materialx>
+"""
+        pbr = parse_standard_surface_scalars(mtlx)
+        assert pbr.iridescence_thickness == pytest.approx(380.0)
+
+    def test_thin_film_thickness_texture_bound_stays_none(self) -> None:
+        # Texture-bound (rare per #408 pitfalls) leaves the scalar
+        # field None — consistent with metalness/coat texture-bound
+        # handling. The baker carries the texture path separately;
+        # adapters wire it via iridescenceThicknessMap (Three.js)
+        # if/when supported.
+        mtlx = """<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="NG_TF">
+    <image name="tf_img" type="float">
+      <input name="file" type="filename" value="thickness.png"/>
+    </image>
+    <output name="tf_out" type="float" nodename="tf_img"/>
+  </nodegraph>
+  <standard_surface name="SR_T" type="surfaceshader">
+    <input name="thin_film_thickness" type="float" output="tf_out" nodegraph="NG_TF"/>
+  </standard_surface>
+  <surfacematerial name="T" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_T"/>
+  </surfacematerial>
+</materialx>
+"""
+        pbr = parse_standard_surface_scalars(mtlx)
+        assert pbr.iridescence_thickness is None
+
+
 class TestPBRBlockFieldsExist:
     def test_new_fields_default_to_none(self) -> None:
         from mat_vis_baker.common import PBRBlock
@@ -609,6 +716,9 @@ class TestPBRBlockFieldsExist:
             "sheen",
             "sheen_color",
             "sheen_roughness",
+            # Iridescence (#408 / #405 Phase 3c) — additive, default-None.
+            "iridescence_thickness",
+            "iridescence_ior",
         ):
             assert getattr(pbr, fname) is None, f"{fname} should default to None"
 
@@ -630,6 +740,8 @@ class TestPBRBlockFieldsExist:
         pbr.sheen = 1.0
         pbr.sheen_color = [0.3, 0.5, 1.0]
         pbr.sheen_roughness = 0.7
+        pbr.iridescence_thickness = 400.0
+        pbr.iridescence_ior = 1.3
         assert pbr.clearcoat == 1.0
         assert pbr.clearcoat_roughness == 0.2
         assert pbr.specular_intensity == 0.8
@@ -644,3 +756,5 @@ class TestPBRBlockFieldsExist:
         assert pbr.sheen == 1.0
         assert pbr.sheen_color == [0.3, 0.5, 1.0]
         assert pbr.sheen_roughness == 0.7
+        assert pbr.iridescence_thickness == 400.0
+        assert pbr.iridescence_ior == 1.3

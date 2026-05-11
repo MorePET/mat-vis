@@ -55,11 +55,11 @@ def _to_data_uri(png_bytes: bytes) -> str:
 _KHR_IOR_DEFAULT = 1.5
 _KHR_TRANSMISSION_DEFAULT = 0.0
 _KHR_CLEARCOAT_DEFAULT = 0.0
-# KHR_materials_sheen default — sheenColorFactor magnitude 0.0
-# (= no sheen). Mirrors the clearcoat suppression pattern: emitting a
-# no-op extension entry that matches the spec default just bloats glTF
-# output. #407.
+# KHR_materials_sheen default — sheenColorFactor magnitude 0.0 (#407).
 _KHR_SHEEN_DEFAULT = 0.0
+# KHR_materials_iridescence spec defaults (#408). iridescenceFactor=0.0,
+# iridescenceIor=1.3 (matches Three.js MeshPhysical iridescenceIOR default).
+_KHR_IRIDESCENCE_IOR_DEFAULT = 1.3
 
 
 def _ior_at_default(ior: float | None) -> bool:
@@ -422,14 +422,11 @@ def to_threejs(
     if scalars.get("dispersion") is not None:
         result["dispersion"] = scalars["dispersion"]
 
-    # mat-vis#409: Three.js MeshPhysicalMaterial has no native SSS field.
-    # subsurface / subsurface_color / subsurface_radius land in the
-    # substrate for glTF and future use; the Three.js adapter is
-    # intentionally a no-op here.
+    # mat-vis#409: Three.js MeshPhysicalMaterial has no native SSS field;
+    # substrate carries the fields for glTF only.
 
     # KHR_materials_sheen → MeshPhysicalMaterial.sheen / sheenColor /
-    # sheenRoughness (#407 / #405 Phase 3b). Only emit when sheen > 0 —
-    # default values would otherwise pollute every non-fabric material.
+    # sheenRoughness (#407 / #405 Phase 3b).
     sheen = scalars.get("sheen")
     if not _sheen_at_default(sheen):
         result["sheen"] = sheen
@@ -437,6 +434,18 @@ def to_threejs(
         result["sheenColor"] = list(sheen_color) if sheen_color is not None else [1.0, 1.0, 1.0]
         sheen_roughness = scalars.get("sheen_roughness")
         result["sheenRoughness"] = sheen_roughness if sheen_roughness is not None else 1.0
+
+    # Iridescence — MeshPhysicalMaterial.iridescence / iridescenceIOR /
+    # iridescenceThicknessRange (#408 / #405 Phase 3c). thickness > 0
+    # acts as the on/off switch.
+    iridescence_thickness = scalars.get("iridescence_thickness")
+    iridescence_ior = scalars.get("iridescence_ior")
+    if iridescence_thickness is not None and iridescence_thickness > 0.0:
+        result["iridescence"] = 1.0
+        result["iridescenceThicknessRange"] = [0.0, iridescence_thickness]
+        result["iridescenceIOR"] = (
+            iridescence_ior if iridescence_ior is not None else _KHR_IRIDESCENCE_IOR_DEFAULT
+        )
 
     # Textures as data URIs
     for channel, prop in _THREEJS_TEX_MAP.items():
@@ -595,8 +604,7 @@ def to_gltf(
 
     # KHR_materials_subsurface (#409). Draft / unratified Khronos
     # extension — emit MaterialX-faithful triplet under the canonical
-    # name. Consumers that don't recognize the extension fall back to
-    # opaque-dielectric.
+    # name.
     subsurface = scalars.get("subsurface")
     if subsurface is not None and subsurface > 0.0:
         sss_ext: dict = {"subsurfaceFactor": subsurface}
@@ -609,8 +617,7 @@ def to_gltf(
         material.setdefault("extensions", {})["KHR_materials_subsurface"] = sss_ext
 
     # KHR_materials_sheen — fabric/velvet/satin retroreflective edge
-    # backscatter (#407 / #405 Phase 3b). Emit only when sheen > 0.
-    # sheenColorFactor = sheen * sheen_color per spec convention.
+    # backscatter (#407 / #405 Phase 3b). sheenColorFactor = sheen * sheen_color.
     sheen = scalars.get("sheen")
     if not _sheen_at_default(sheen):
         sheen_color = scalars.get("sheen_color")
@@ -622,6 +629,21 @@ def to_gltf(
         if sheen_roughness is not None:
             sheen_ext["sheenRoughnessFactor"] = sheen_roughness
         material.setdefault("extensions", {})["KHR_materials_sheen"] = sheen_ext
+
+    # KHR_materials_iridescence (#408 / #405 Phase 3c). thickness > 0
+    # = on; ship iridescenceIor only when authored away from spec default 1.3.
+    iridescence_thickness = scalars.get("iridescence_thickness")
+    iridescence_ior = scalars.get("iridescence_ior")
+    if iridescence_thickness is not None and iridescence_thickness > 0.0:
+        ir_ext: dict = {
+            "iridescenceFactor": 1.0,
+            "iridescenceThicknessMaximum": iridescence_thickness,
+        }
+        if iridescence_ior is not None and not math.isclose(
+            iridescence_ior, _KHR_IRIDESCENCE_IOR_DEFAULT, abs_tol=1e-9
+        ):
+            ir_ext["iridescenceIor"] = iridescence_ior
+        material.setdefault("extensions", {})["KHR_materials_iridescence"] = ir_ext
 
     # Opacity texture — glTF 2.0 has no standalone alphaMap slot. Alpha
     # must live in baseColorTexture's alpha channel + alphaMode/alphaCutoff
