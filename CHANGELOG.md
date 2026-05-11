@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `bake/preview/utils/check_thumbs.py`: cross-thumb md5 duplicate-bytes
+  detector (#385). Catches scalar-collapse, orchestrator closure-mixup,
+  and texture-binding regressions where many distinct materials produce
+  byte-identical PNGs (the original #385 trigger). Ships with a YAML
+  allow-list at `bake/preview/utils/thumb_check_allow.yml`, a structured
+  JSON report (`thumb-check.json`), an exit-code taxonomy
+  (0/1/2/3/4 for ok/duplicate/fingerprint/no-sentinel/cli-error), and
+  an operator runbook (`thumb_check_runbook.md`). `bake/preview/run.py`
+  now writes a `_bake_complete.json` sentinel after a successful bake;
+  the gate refuses to validate without it.
+
 ### Changed
 
 ### Deprecated

@@ -1,0 +1,35 @@
+# DORMANT — paste into .github/workflows/derive.yml's `kind: thumb` job
+# once PR #403 (feature/402-derive-thumb-kind) lands. Until then, this
+# file is a code-review artefact / paper trail; nothing reads it.
+#
+# Position: AFTER the bake step that produces /tmp/thumbs, BEFORE the
+# HF upload step. The exit codes are deliberately distinct so the
+# workflow log surfaces the right failure mode (see check_thumbs.py
+# module docstring).
+#
+# Tracking issue: #385 (duplicate-bytes detector).
+
+- name: thumb-check (#385 duplicate-bytes + fingerprint gate)
+  if: ${{ inputs.kind == 'thumb' }}
+  shell: bash
+  run: |
+    set -e
+    # The check writes thumb-check.json under the bake out-dir. The
+    # exit code disambiguates failure modes:
+    #   1 = duplicate-bytes survived the allow-list (#385)
+    #   2 = fingerprint hit (default-grey leak / empty material spec)
+    #   3 = _bake_complete.json missing (bake didn't finish)
+    #   4 = CLI / IO error (bad allow-list, missing dir)
+    uv run python bake/preview/utils/check_thumbs.py \
+      /tmp/thumbs/ \
+      --release-tag "${{ inputs.release-tag }}" \
+      --json-out /tmp/thumb-check.json
+
+- name: upload thumb-check report
+  if: ${{ always() && inputs.kind == 'thumb' }}
+  uses: actions/upload-artifact@v4
+  with:
+    name: thumb-check-${{ matrix.source }}
+    path: /tmp/thumb-check.json
+    if-no-files-found: warn
+    retention-days: 30
