@@ -101,6 +101,35 @@ def _transmission(raw: object) -> float | None:
         return None
 
 
+def _thickness(raw: object, transmission: object) -> float | None:
+    """Map upstream ``transmissionDepth`` → ``PBRBlock.thickness``, gated on
+    ``transmission > 0`` (mat-vis#398).
+
+    Mirrors the MTLX-parse convention (``_mtlx_scalars.py:660-674``):
+    thickness/``transmission_depth`` is the KHR_materials_volume
+    absorption-distance scalar and is only meaningful when the material
+    is transmissive. For opaque entries the value is rendering dead-code
+    and we drop it so the adapter doesn't ship a no-op volume extension.
+
+    Unit: physicallybased.info publishes ``transmissionDepth`` in metres
+    (e.g. Blood=0.08, Coffee=0.1), matching the MaterialX/glTF
+    ``thicknessFactor`` convention — no conversion needed.
+    """
+    if raw is None:
+        return None
+    try:
+        t = float(transmission) if transmission is not None else 0.0
+    except (TypeError, ValueError):
+        return None
+    if t <= 0.0:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0.0 else None
+
+
 def _complex_ior(raw: object) -> list[float] | None:
     """Passthrough ``complexIor`` verbatim as a list of floats.
 
@@ -181,6 +210,7 @@ def fetch(*, session: requests.Session | None = None) -> list[MaterialRecord]:
                     ior=mat.get("ior"),
                     specular_f0=_specular_f0(mat.get("specularColor")),
                     transmission=_transmission(mat.get("transmission")),
+                    thickness=_thickness(mat.get("transmissionDepth"), mat.get("transmission")),
                     complex_ior=_complex_ior(mat.get("complexIor")),
                 ),
                 attribution=AttributionBlock(
