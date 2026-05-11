@@ -8,6 +8,9 @@
 //!   mat-vis materials ambientcg 1k               # list material IDs
 //!   mat-vis fetch ambientcg Rock064 color 1k     # fetch PNG → stdout
 //!   mat-vis fetch ambientcg Rock064 color 1k -o rock.png
+//!
+//! Note: the `auto`/`best` tier sentinels (mat-vis#374) are
+//! Python-client only. Rust callers must pass an explicit tier name.
 
 use clap::{Parser, Subcommand};
 use serde::Deserialize;

@@ -84,17 +84,18 @@ def _build_threejs_for(client, source: str, material_id: str) -> dict | None:
         log.warning("scalars lookup failed for %s/%s: %s", source, material_id, e)
         return None
 
-    # Pick the largest texture tier this material has. mat-vis#361
-    # convention: render from 1k when staged (best quality at 256²
-    # output via mipmap downsampling). Fall back to smaller; if
-    # nothing is staged, render scalar-only.
-    textures: dict[str, bytes] = {}
-    for tier in ("1k", "512", "256", "128"):
-        try:
-            textures = client.fetch_all_textures(source, material_id, tier)
-            break
-        except Exception:  # noqa: BLE001
-            continue
+    # mat-vis#374: tier="auto" replaces the manual ladder walk —
+    # the client picks the best staged tier (1k → 512 → 256 → 128)
+    # and short-circuits to {} for scalar-only materials. Bake-side
+    # convention: render at 256² output via mipmap downsampling, so
+    # any staged tier ≥ 256 is fine.
+    try:
+        textures = client.fetch_all_textures(source, material_id, tier="auto")
+    except Exception:  # noqa: BLE001
+        # Defensive: a substrate-shape regression (e.g. an entry with
+        # available_tiers=null) could still surface. Render scalar-only
+        # rather than fail the whole bake.
+        textures = {}
 
     return to_threejs(scalars, textures)
 

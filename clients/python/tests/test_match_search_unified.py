@@ -444,7 +444,11 @@ def test_asset_accepts_match_handle():
     a = c.asset(m)
     assert a.source == "ambientcg"
     assert a.material_id == "Rock064"
-    assert a.tier == "1k"  # default
+    # mat-vis#374: default tier is "auto" since 0.7.0. The Match path
+    # used to peek at Match.tiers and pick "1k" if present; now it
+    # defers to the client-level auto resolver on first .textures
+    # access (single source of truth for tier selection).
+    assert a.tier == "auto"
 
 
 def test_asset_accepts_string_ref():
