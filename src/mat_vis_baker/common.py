@@ -512,6 +512,53 @@ def apply_pbr_neutral_multiplier_conventions(
     return pbr
 
 
+# Fields that the MTLX parser may populate. Used by
+# :func:`merge_mtlx_pbr_additive` to enumerate which attributes are
+# eligible for the "fill-only-if-None" merge.
+#
+# NOTE: ``metalness_source`` rides with ``metalness`` — when we copy a
+# parser-authored metalness value over, we also copy the provenance
+# string so downstream consumers (#316 library-browser facets) see the
+# original source. Other "side-band" fields (``is_conductor``,
+# ``metalness_mean``) follow the same rule.
+_MTLX_PBR_MERGE_FIELDS: tuple[str, ...] = (
+    "color_rgb",
+    "roughness",
+    "metalness",
+    "ior",
+    "transmission",
+    "is_conductor",
+    "metalness_mean",
+    "metalness_source",
+    "clearcoat_roughness",
+    "specular_intensity",
+    "specular_color",
+    "thickness",
+    "dispersion",
+)
+
+
+def merge_mtlx_pbr_additive(target: PBRBlock, parsed: PBRBlock) -> PBRBlock:
+    """Copy MTLX-parsed fields into ``target`` ONLY where target is None.
+
+    Per-source upstream JSON fetchers (#397) may already have authored
+    base PBR fields (``color_rgb``, ``roughness``, ``metalness``, ``ior``)
+    from their JSON catalog. The MTLX scalar parser is additive: it
+    fills the Phase-2 fields (``clearcoat_roughness``, ``specular_*``,
+    ``transmission``, ``thickness``, ``dispersion``) the JSON couldn't
+    carry, and only touches the base fields if the JSON left them None.
+    Mirrors the gpuopen reference path (which has no upstream JSON PBR
+    today, but the same rule applies uniformly).
+    Modifies ``target`` in place AND returns it so callers can chain.
+    """
+    for attr in _MTLX_PBR_MERGE_FIELDS:
+        if getattr(target, attr) is None:
+            mtlx_val = getattr(parsed, attr)
+            if mtlx_val is not None:
+                setattr(target, attr, mtlx_val)
+    return target
+
+
 @dataclass
 class AttributionBlock:
     """Upstream attribution / licensing (SPDX where known)."""

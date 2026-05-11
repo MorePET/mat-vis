@@ -15,6 +15,7 @@ from pathlib import Path
 
 import requests
 
+from mat_vis_baker._mtlx_scalars import parse_standard_surface_scalars
 from mat_vis_baker.sources import _apply_filter_ids
 from mat_vis_baker.common import (
     TIER_TO_PX,
@@ -28,6 +29,7 @@ from mat_vis_baker.common import (
     _filter_upstream,
     apply_pbr_neutral_multiplier_conventions,
     check_zip_safety,
+    merge_mtlx_pbr_additive,
     normalize_category,
     normalize_channel,
     retry_request,
@@ -186,11 +188,19 @@ def _inject_mtlx_comment(mtlx_bytes: bytes, material_id: str, source_url: str) -
 
 def _extract_maps_from_zip(
     zip_bytes: bytes, material_id: str, output_dir: Path, *, mtlx_dir: Path | None = None
-) -> dict[str, Path]:
-    """Extract PNG textures and mtlx from a ZIP, normalize channel names."""
+) -> tuple[dict[str, Path], Path | None]:
+    """Extract PNG textures + mtlx from a ZIP, normalize channel names.
+
+    Returns ``(textures, mtlx_path)``. ``mtlx_path`` is the on-disk path
+    of the extracted .mtlx (when ``mtlx_dir`` was supplied AND the ZIP
+    carried one), or ``None`` otherwise. The mtlx path lets
+    :func:`_fetch_one` feed the scalar parser without re-reading the
+    ZIP — same shape as ``gpuopen._extract_from_zip`` (#397).
+    """
     mat_dir = output_dir / material_id
     mat_dir.mkdir(parents=True, exist_ok=True)
     result: dict[str, Path] = {}
+    mtlx_path: Path | None = None
 
     source_url = f"https://ambientcg.com/a/{material_id}"
 
@@ -210,6 +220,7 @@ def _extract_maps_from_zip(
                 mtlx_out.parent.mkdir(parents=True, exist_ok=True)
                 raw = zf.read(name)
                 mtlx_out.write_bytes(_inject_mtlx_comment(raw, material_id, source_url))
+                mtlx_path = mtlx_out
                 continue
 
             m = _CHANNEL_RE.search(name)
@@ -235,7 +246,7 @@ def _extract_maps_from_zip(
     # read `maps` per-entry and never assume a uniform channel set, so
     # this is fine end-to-end. Verified 2026-04-28 against ambientcg's
     # 1k+2k zips for both materials.
-    return result
+    return result, mtlx_path
 
 
 # ── curated-field extraction (Phase B, mat-vis#152) ─────────────
@@ -311,7 +322,9 @@ def _fetch_one(entry: dict, tier: str, output_dir: Path, mtlx_dir: Path | None) 
     try:
         dl_url = _extract_download_url(entry, tier)
         resp = retry_request(dl_url)
-        textures = _extract_maps_from_zip(resp.content, mid, output_dir, mtlx_dir=mtlx_dir)
+        textures, mtlx_path = _extract_maps_from_zip(
+            resp.content, mid, output_dir, mtlx_dir=mtlx_dir
+        )
 
         if not textures:
             return MaterialRecord(
@@ -337,12 +350,30 @@ def _fetch_one(entry: dict, tier: str, output_dir: Path, mtlx_dir: Path | None) 
         release_date = (entry.get("releaseDate") or "")[:10] or None
         description = entry.get("description") or None
 
-        # glTF-MR neutral-multiplier convention (mat-vis#290 follow-up):
-        # ambientcg doesn't expose scalar PBR properties upstream, so the
-        # helper is the only path that populates ``pbr.*`` fields — fills
-        # color/metalness/roughness with their glTF-MR neutral
-        # multipliers when the matching texture is in the baked set.
+        # ambientcg's upstream JSON doesn't expose scalar PBR properties
+        # today — the BASE PBR fields (color_rgb, roughness, metalness,
+        # ior) start empty and the convention helper fills the texture-
+        # bound neutrals. MTLX parse layers in the Phase-2 fields
+        # (clearcoat_roughness, specular_*, transmission, thickness,
+        # dispersion) when the ZIP shipped a .mtlx with <standard_surface>
+        # scalars (#397). Missing-MTLX path is a no-op — same shape as
+        # gpuopen's reference wiring.
         pbr = PBRBlock()
+        if mtlx_path is not None:
+            try:
+                parsed = parse_standard_surface_scalars(
+                    mtlx_path.read_text(encoding="utf-8"),
+                    material_id=mid,
+                )
+                merge_mtlx_pbr_additive(pbr, parsed)
+            except Exception:
+                # Contract: scalar parsing must NEVER break the fetch
+                # path. Catch broadly (e.g. UnicodeDecodeError on
+                # non-utf8 mtlx, or any future parser failure) and
+                # continue without the MTLX-derived fields.
+                log.exception("%s: could not read mtlx for scalar parse", mid)
+        else:
+            log.debug("%s: no mtlx in ZIP — skipping scalar parse", mid)
         apply_pbr_neutral_multiplier_conventions(pbr, textures)
 
         return MaterialRecord(
