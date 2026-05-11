@@ -2132,18 +2132,18 @@ class MatVisClient:
         "clearcoat_roughness",
         "specular_intensity",
         "emissive",
-        # Subsurface scattering (#409). The glTF adapter emits the
-        # (draft) ``KHR_materials_subsurface`` extension; the Three.js
-        # adapter is a documented no-op because MeshPhysicalMaterial
-        # has no native SSS field.
+        # Subsurface scattering (#409). glTF emits KHR_materials_subsurface;
+        # Three.js adapter is a documented no-op (no native MeshPhysical SSS).
         "subsurface",
         "subsurface_color",
         "subsurface_radius",
-        # Emission scalar coverage (#406 / #405 Phase 3a) — factor +
-        # linear-RGB tint. Adapter splits HDR strengths > 1 into
-        # emissiveIntensity / KHR_materials_emissive_strength.
+        # Emission (#406 / #405 Phase 3a) — HDR-aware factor + linear RGB.
         "emission",
         "emission_color",
+        # KHR_materials_sheen — velvet/satin/fabric (#407 / #405 Phase 3b).
+        "sheen",
+        "sheen_color",
+        "sheen_roughness",
     )
 
     def _scalars_for(self, source: str, material_id: str) -> dict:

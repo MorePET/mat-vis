@@ -468,18 +468,7 @@ class PBRBlock:
     # transmission > 0; baker emits None for opaque materials.
     thickness: float | None = None  # <standard_surface>.transmission_depth
     dispersion: float | None = None  # <standard_surface>.transmission_dispersion
-    # Emission — Phase 3a of #405 (#406). ``emission`` is the scalar HDR
-    # factor (>= 0; values > 1 emit KHR_materials_emissive_strength on
-    # the glTF side / route through ``emissiveIntensity`` on Three.js).
-    # ``emission_color`` is the linear RGB tint that the factor
-    # multiplies. Both stay None when the material is non-emissive
-    # (the gpuopen+polyhaven+ambientcg corpus authors emission=0 for all
-    # 3160 entries today; schema is sticky pre-v0.7, hence the additive
-    # land). Adapter contract:
-    #   - Three.js: emissive = emission_color * min(emission, 1),
-    #               emissiveIntensity = max(emission, 1)
-    #   - glTF:     emissiveFactor = emission_color * min(emission, 1);
-    #               emission > 1 ⇒ KHR_materials_emissive_strength.emissiveStrength
+    # Emission — Phase 3a of #405 (#406).
     emission: float | None = None  # <standard_surface>.emission
     emission_color: list[float] | None = None  # <standard_surface>.emission_color, LINEAR RGB
 
@@ -487,17 +476,19 @@ class PBRBlock:
     # ``subsurface > 0`` (wax, resin, semi-translucent). Three.js
     # MeshPhysicalMaterial has no native SSS field — adapter is a
     # documented no-op there; glTF adapter emits the draft
-    # ``KHR_materials_subsurface`` extension (vendor-prefixed because
-    # the Khronos draft is not yet ratified). Units: ``subsurface``
-    # is a unitless 0..1 mix factor; ``subsurface_color`` is linear
-    # RGB; ``subsurface_radius`` is per-channel mean-free-path in
-    # MaterialX scene units (typically mm). The glTF extension carries
-    # these values verbatim — same per-channel length semantics, no
-    # unit conversion.
-    # subsurface_radius is per-channel mean-free-path in MaterialX scene units.
+    # ``KHR_materials_subsurface`` extension. ``subsurface_radius`` is
+    # per-channel mean-free-path in MaterialX scene units (typically mm).
     subsurface: float | None = None  # <standard_surface>.subsurface
     subsurface_color: list[float] | None = None  # <standard_surface>.subsurface_color (linear RGB)
     subsurface_radius: list[float] | None = None  # <standard_surface>.subsurface_radius
+
+    # KHR_materials_sheen — velvet/satin/fabric retroreflective edge
+    # backscatter (#407 / #405 Phase 3b). Audit at v2026.04.99: polyhaven
+    # authors the defaults on all 757 entries, ambientcg never authors
+    # the inputs, gpuopen 0/454 — schema-add is forward-compatible.
+    sheen: float | None = None  # <standard_surface>.sheen
+    sheen_color: list[float] | None = None  # <standard_surface>.sheen_color, LINEAR RGB
+    sheen_roughness: float | None = None  # <standard_surface>.sheen_roughness
 
 
 def apply_pbr_neutral_multiplier_conventions(
