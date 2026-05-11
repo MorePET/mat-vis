@@ -1,0 +1,14 @@
+# Dev-only dependencies for thumb-bake utilities.
+#
+# These are NOT runtime deps of mat-vis — only needed when:
+#   - regenerating shader_ball.glb (bake_shader_ball.py)
+#   - tweaking the geometry source (e.g. tweaking the create_shader_ball
+#     parameters from ocp_vscode upstream)
+#
+# Install only when you need to bake the static GLB:
+#   uv pip install -r bake/preview/utils/requirements-dev.txt
+#
+# The bake container (production thumb generation) does NOT need these —
+# it consumes the committed shader_ball.glb directly.
+
+build123d>=0.10
