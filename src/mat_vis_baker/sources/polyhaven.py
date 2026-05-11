@@ -13,6 +13,7 @@ from pathlib import Path
 
 import requests
 
+from mat_vis_baker._mtlx_scalars import parse_standard_surface_scalars
 from mat_vis_baker.sources import _apply_filter_ids
 from mat_vis_baker.common import (
     AttributionBlock,
@@ -24,6 +25,7 @@ from mat_vis_baker.common import (
     UpstreamBlock,
     _filter_upstream,
     apply_pbr_neutral_multiplier_conventions,
+    merge_mtlx_pbr_additive,
     normalize_category,
     normalize_channel,
     retry_request,
@@ -303,8 +305,9 @@ def _fetch_one(
 
         # MTLX is best-effort and runs after textures land — mtlx_dir is
         # optional; when None we don't bother (matches the pre-#96 behavior).
+        mtlx_path: Path | None = None
         if mtlx_dir is not None:
-            _download_mtlx(file_info, tier, mtlx_dir, slug)
+            mtlx_path = _download_mtlx(file_info, tier, mtlx_dir, slug)
 
         if not textures:
             return MaterialRecord(
@@ -339,12 +342,29 @@ def _fetch_one(
         cat = normalize_category(cat_str, [*cat_list[1:], *tags])
         description = meta.get("description") or None
 
-        # glTF-MR neutral-multiplier convention (mat-vis#290 follow-up):
-        # polyhaven doesn't currently parse PBR scalars from any source,
-        # so the helper is the only path that populates ``pbr.*`` fields
-        # — fills color/metalness/roughness with their glTF-MR neutral
-        # multipliers when the matching texture is in the baked set.
+        # polyhaven's upstream JSON doesn't expose scalar PBR properties
+        # today — the BASE PBR fields (color_rgb, roughness, metalness,
+        # ior) start empty and the convention helper fills the texture-
+        # bound neutrals. MTLX parse layers in the Phase-2 fields
+        # (clearcoat_roughness, specular_*, transmission, thickness,
+        # dispersion) when the per-tier MTLX is present (#397). Missing
+        # MTLX is graceful — per ``_download_mtlx`` docstring, not every
+        # polyhaven material ships an MTLX for every tier.
         pbr = PBRBlock()
+        if mtlx_path is not None:
+            try:
+                parsed = parse_standard_surface_scalars(
+                    mtlx_path.read_text(encoding="utf-8"),
+                    material_id=slug,
+                )
+                merge_mtlx_pbr_additive(pbr, parsed)
+            except Exception:
+                # Contract: scalar parsing must NEVER break the fetch
+                # path. Catch broadly and continue without MTLX-derived
+                # fields — textures still flow through.
+                log.exception("%s: could not read mtlx for scalar parse", slug)
+        else:
+            log.debug("%s: no mtlx available for this tier — skipping scalar parse", slug)
         apply_pbr_neutral_multiplier_conventions(pbr, textures)
 
         return MaterialRecord(
