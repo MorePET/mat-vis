@@ -59,10 +59,15 @@ _FLOAT_INPUTS: dict[str, str] = {
     # Subsurface (#409) + emission (#406 / #405 Phase 3a).
     "subsurface": "subsurface",
     "emission": "emission",  # KHR_materials_emissive_strength.emissiveStrength (factor)
-    # Sheen factor + roughness (#407 / #405 Phase 3b). KHR_materials_sheen
-    # — velvet/satin/fabric backscatter.
+    # Sheen factor + roughness (#407 / #405 Phase 3b). KHR_materials_sheen.
     "sheen": "sheen",  # KHR_materials_sheen.sheenColorFactor magnitude
     "sheen_roughness": "sheen_roughness",  # KHR_materials_sheen.sheenRoughnessFactor
+    # Iridescence (#408 / #405 Phase 3c). MaterialX's ``thin_film_*``
+    # inputs renamed to ``iridescence_*`` per consumer-facing naming
+    # (same convention as coat → clearcoat). Units: nm — matches glTF
+    # KHR_materials_iridescence and Three.js iridescenceThicknessRange.
+    "thin_film_thickness": "iridescence_thickness",
+    "thin_film_IOR": "iridescence_ior",  # uppercase IOR — case-aware lookup
 }
 
 # Color3 inputs. Same direct value=/1-hop graph→constant promotion as
@@ -85,7 +90,6 @@ _COLOR3_INPUTS: dict[str, str] = {
 _LOSSY_INPUTS: tuple[str, ...] = (
     "coat_IOR",
     "coat_color",
-    "thin_film_thickness",
 )
 
 

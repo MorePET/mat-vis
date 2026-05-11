@@ -126,6 +126,22 @@ EMISSION_HDR_INDEX = [
     ),
 ]
 
+# Iridescent — exercises the iridescence_thickness / iridescence_ior
+# path (mat-vis#408). Soap-bubble regime: ~400 nm thin film with
+# IOR slightly above water.
+IRIDESCENT_INDEX = [
+    _entry(
+        "soap-bubble",
+        name="Soap Bubble",
+        roughness=0.05,
+        metalness=0.0,
+        ior=1.33,
+        iridescence_thickness=400.0,
+        iridescence_ior=1.33,
+        color_rgb=[1.0, 1.0, 1.0],
+    ),
+]
+
 
 # ── Read-side: _scalars_for forwards each new field ────────────
 
@@ -190,15 +206,21 @@ class TestScalarsForFullPbrPassthrough:
         assert scalars["emissive"] == [0.0, 1.0, 0.5]
 
     def test_emission_factor_and_color_pass_through(self):
-        """#406 — ``emission`` factor + ``emission_color`` round-trip from
-        the substrate's mat_vis.pbr block to the adapter scalars dict.
-        The adapter then splits HDR strengths > 1 into the
-        emissiveIntensity / KHR_materials_emissive_strength path."""
+        """#406 — ``emission`` factor + ``emission_color`` round-trip."""
         c = MatVisClient()
         with patch.object(c, "index", return_value=EMISSION_HDR_INDEX):
             scalars = c._scalars_for("physicallybased", "LED Sign")
         assert scalars["emission"] == pytest.approx(4.0)
         assert scalars["emission_color"] == [1.0, 0.4, 0.1]
+
+    def test_iridescence_thickness_passes_through(self):
+        # mat-vis#408 — forward-looking field; substrate carries
+        # ``iridescence_thickness`` in nm and ``iridescence_ior``.
+        c = MatVisClient()
+        with patch.object(c, "index", return_value=IRIDESCENT_INDEX):
+            scalars = c._scalars_for("physicallybased", "Soap Bubble")
+        assert scalars["iridescence_thickness"] == pytest.approx(400.0)
+        assert scalars["iridescence_ior"] == pytest.approx(1.33)
 
     def test_existing_4_field_contract_preserved(self):
         """Regression guard — the original
@@ -232,6 +254,9 @@ class TestScalarsForFullPbrPassthrough:
             # Emission scalar coverage (#406) — additive, defaults to absent.
             "emission",
             "emission_color",
+            # Iridescence (#408) — additive forward-looking fields.
+            "iridescence_thickness",
+            "iridescence_ior",
         ):
             assert k not in scalars, f"{k!r} should not be injected when substrate is None"
 
@@ -271,8 +296,7 @@ class TestEndToEndThreejs:
         assert result["emissive"] == [0.0, 1.0, 0.5]
 
     def test_emission_sdr_emits_emissive_only(self):
-        # #406 SDR end-to-end: factor=1.0 with a green tint → emissive
-        # carries the color, no emissiveIntensity (Three.js default).
+        # #406 SDR end-to-end.
         c = MatVisClient()
         with patch.object(c, "index", return_value=EMISSION_SDR_INDEX):
             scalars = c._scalars_for("physicallybased", "Glowing Decal")
@@ -281,14 +305,23 @@ class TestEndToEndThreejs:
         assert "emissiveIntensity" not in result
 
     def test_emission_hdr_emits_emissive_plus_intensity(self):
-        # #406 HDR end-to-end: factor=4.0 → emissive clamped to SDR
-        # (×1 color), intensity carries the HDR multiplier.
+        # #406 HDR end-to-end.
         c = MatVisClient()
         with patch.object(c, "index", return_value=EMISSION_HDR_INDEX):
             scalars = c._scalars_for("physicallybased", "LED Sign")
         result = to_threejs(scalars)
         assert result["emissive"] == [1.0, 0.4, pytest.approx(0.1)]
         assert result["emissiveIntensity"] == pytest.approx(4.0)
+
+    def test_iridescent_emits_iridescence_keys(self):
+        # mat-vis#408 — Three.js end-to-end.
+        c = MatVisClient()
+        with patch.object(c, "index", return_value=IRIDESCENT_INDEX):
+            scalars = c._scalars_for("physicallybased", "Soap Bubble")
+        result = to_threejs(scalars)
+        assert result["iridescence"] == 1.0
+        assert result["iridescenceThicknessRange"] == [0.0, 400.0]
+        assert result["iridescenceIOR"] == pytest.approx(1.33)
 
 
 class TestEndToEndGltf:
@@ -368,3 +401,14 @@ class TestEndToEndGltf:
         assert result["emissiveFactor"] == [1.0, 0.4, pytest.approx(0.1)]
         ext = result["extensions"]["KHR_materials_emissive_strength"]
         assert ext["emissiveStrength"] == pytest.approx(4.0)
+
+    def test_iridescent_emits_iridescence_extension(self):
+        # mat-vis#408 — glTF end-to-end.
+        c = MatVisClient()
+        with patch.object(c, "index", return_value=IRIDESCENT_INDEX):
+            scalars = c._scalars_for("physicallybased", "Soap Bubble")
+        result = to_gltf(scalars)
+        ext = result["extensions"]["KHR_materials_iridescence"]
+        assert ext["iridescenceFactor"] == 1.0
+        assert ext["iridescenceThicknessMaximum"] == 400.0
+        assert ext["iridescenceIor"] == pytest.approx(1.33)
