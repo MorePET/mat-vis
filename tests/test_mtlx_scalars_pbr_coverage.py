@@ -1,15 +1,17 @@
-"""Bake-side extraction tests for #340 — full MeshPhysicalMaterial PBR coverage.
+"""Bake-side extraction tests for #340 / #396 — full MeshPhysicalMaterial coverage.
 
-5 new scalar fields + 1 conditional + 1 color3:
-- coat_roughness         → clearcoat_roughness (float)
-- specular               → specular_intensity (float)
-- specular_color         → specular_color (color3, linear)
-- transmission_dispersion → dispersion (float)
-- transmission_depth     → thickness (float, only when transmission > 0)
+Scalar fields extracted from ``<standard_surface>``:
+- coat                   → clearcoat (float, #396)
+- coat_roughness         → clearcoat_roughness (float, #340)
+- specular               → specular_intensity (float, #340)
+- specular_color         → specular_color (color3, linear, #340)
+- transmission_dispersion → dispersion (float, #340)
+- transmission_depth     → thickness (float, only when transmission > 0, #340)
 
-All extracted from <standard_surface> direct `value=` attributes.
-Survey of 454 gpuopen materials confirms each input is authored
-~80-95% of the time; specular_color is 94% non-default.
+All extracted from <standard_surface> direct `value=` attributes or
+1-hop nodegraph→<constant> chains. Survey of 454 gpuopen materials
+confirms each input is authored ~80-95% of the time; specular_color
+is 94% non-default; coat is 3/454 (Car Paint family).
 """
 
 from __future__ import annotations
@@ -88,6 +90,77 @@ class TestClearcoatRoughness:
         assert pbr.clearcoat_roughness == pytest.approx(0.1)
 
 
+class TestClearcoat:
+    """``coat`` factor extraction (#396) — the on/off switch for
+    KHR_materials_clearcoat. Survey of 454 gpuopen materials: 451
+    author the default 0.0, 3 (Car Paint family) author > 0."""
+
+    def test_coat_authored_non_default(self) -> None:
+        # Car Paint family authors coat=1.0 — fully-clearcoated.
+        pbr = parse_standard_surface_scalars(_wrap('<input name="coat" type="float" value="1.0"/>'))
+        assert pbr.clearcoat == pytest.approx(1.0)
+
+    def test_coat_authored_partial(self) -> None:
+        pbr = parse_standard_surface_scalars(_wrap('<input name="coat" type="float" value="0.5"/>'))
+        assert pbr.clearcoat == pytest.approx(0.5)
+
+    def test_coat_default_zero_extracted(self) -> None:
+        # 451/454 corpus materials default to 0.0 — extracting it
+        # confirms provenance. Adapter suppresses the spec-default
+        # KHR extension entry.
+        pbr = parse_standard_surface_scalars(_wrap('<input name="coat" type="float" value="0.0"/>'))
+        assert pbr.clearcoat == pytest.approx(0.0)
+
+    def test_coat_unset_stays_none(self) -> None:
+        pbr = parse_standard_surface_scalars(_wrap())
+        assert pbr.clearcoat is None
+
+    def test_coat_texture_bound_stays_none(self) -> None:
+        # 1 corpus material binds ``coat`` to a texture via nodegraph.
+        # Consistent with metalness-texture-bound handling: leave the
+        # field None; the baker carries the texture path separately.
+        mtlx = """<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="NG_COAT">
+    <image name="coat_img" type="float">
+      <input name="file" type="filename" value="coat.png"/>
+    </image>
+    <output name="coat_out" type="float" nodename="coat_img"/>
+  </nodegraph>
+  <standard_surface name="SR_T" type="surfaceshader">
+    <input name="coat" type="float" output="coat_out" nodegraph="NG_COAT"/>
+  </standard_surface>
+  <surfacematerial name="T" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_T"/>
+  </surfacematerial>
+</materialx>
+"""
+        pbr = parse_standard_surface_scalars(mtlx)
+        assert pbr.clearcoat is None
+
+    def test_coat_graph_constant_promoted(self) -> None:
+        # 1-hop nodegraph → <constant> resolution applies to ``coat``
+        # the same way it does for every other _FLOAT_INPUT.
+        mtlx = """<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="NG_COAT">
+    <constant name="coat_const" type="float">
+      <input name="value" type="float" value="0.75"/>
+    </constant>
+    <output name="coat_out" type="float" nodename="coat_const"/>
+  </nodegraph>
+  <standard_surface name="SR_T" type="surfaceshader">
+    <input name="coat" type="float" output="coat_out" nodegraph="NG_COAT"/>
+  </standard_surface>
+  <surfacematerial name="T" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_T"/>
+  </surfacematerial>
+</materialx>
+"""
+        pbr = parse_standard_surface_scalars(mtlx)
+        assert pbr.clearcoat == pytest.approx(0.75)
+
+
 class TestDispersion:
     def test_dispersion_authored(self) -> None:
         pbr = parse_standard_surface_scalars(
@@ -141,6 +214,7 @@ class TestPBRBlockFieldsExist:
 
         pbr = PBRBlock()
         for fname in (
+            "clearcoat",
             "clearcoat_roughness",
             "specular_intensity",
             "specular_color",
@@ -153,11 +227,13 @@ class TestPBRBlockFieldsExist:
         from mat_vis_baker.common import PBRBlock
 
         pbr = PBRBlock()
+        pbr.clearcoat = 1.0
         pbr.clearcoat_roughness = 0.2
         pbr.specular_intensity = 0.8
         pbr.specular_color = [0.95, 0.5, 0.3]
         pbr.thickness = 5.0
         pbr.dispersion = 0.1
+        assert pbr.clearcoat == 1.0
         assert pbr.clearcoat_roughness == 0.2
         assert pbr.specular_intensity == 0.8
         assert pbr.specular_color == [0.95, 0.5, 0.3]
