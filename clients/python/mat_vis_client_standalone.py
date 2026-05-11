@@ -116,7 +116,7 @@ DEFAULT_CACHE_DIR = Path(os.environ.get("MAT_VIS_CACHE", Path.home() / ".cache" 
 # Version is kept in sync with clients/python/pyproject.toml by
 # scripts/sync-standalone-version.py (run via pre-commit). Do not
 # hand-edit — a drift test in tests/ fails CI if it disagrees.
-__version__ = "0.6.4"
+__version__ = "0.7.0"
 # Same User-Agent as the installable package (issue #70). Standalone vs
 # pip-installed is an internal packaging detail; servers receiving the
 # request can't act on it and splitting UA populations fragments
@@ -554,6 +554,33 @@ class MatVisClient:
         client = MatVisClient(manifest_url="https://mirror/manifest.json")
         client = MatVisClient(cache_dir=Path("/scratch/mat-vis"))
     """
+
+    # mat-vis#374: tier-rank dict for forward-compat ``auto``/``best``
+    # resolution. Mirrors the packaged client; see its docstring for
+    # the full rationale (KTX2 ties, ``thumb=0``, ``scalar=-1``,
+    # unknown tiers filtered out).
+    _TIER_RANK: ClassVar[dict[str, int]] = {
+        "scalar": -1,
+        "thumb": 0,
+        "128": 128,
+        "256": 256,
+        "512": 512,
+        "1k": 1024,
+        "ktx2-1k": 1024,
+        "2k": 2048,
+        "4k": 4096,
+        "8k": 8192,
+    }
+    _AUTO_TIER_LADDER: ClassVar[tuple[str, ...]] = ("1k", "512", "256", "128")
+    _BEST_TIER_LADDER: ClassVar[tuple[str, ...]] = (
+        "8k",
+        "4k",
+        "2k",
+        "1k",
+        "512",
+        "256",
+        "128",
+    )
 
     def __init__(
         self,
@@ -1207,6 +1234,67 @@ class MatVisClient:
             or (name and MatVisClient._normalize_name(name) == nq)
         )
 
+    def _lookup_available_tiers(self, source: str, material_id: str) -> list:
+        """Return ``available_tiers`` for ``material_id`` in ``source``'s index.
+
+        Standalone counterpart of the packaged client's helper
+        (mat-vis#374). Best-effort: any failure returns ``[]``.
+        """
+        try:
+            idx = self._load_index_raw(source)
+        except Exception:
+            return []
+        if not isinstance(idx, list):
+            return []
+        for entry in idx:
+            if self._entry_matches_id_or_name(entry, material_id):
+                tiers = entry.get("available_tiers") or []
+                return [t for t in tiers if isinstance(t, str)]
+        return []
+
+    def _resolve_tier(self, source: str, material_id: str, tier: str) -> str:
+        """Collapse ``"auto"``/``"best"`` to a concrete tier (mat-vis#374).
+
+        See `mat_vis_client.client.MatVisClient._resolve_tier` for the
+        full contract. Standalone keeps the same semantics: ``"auto"``
+        walks ``scalar-precheck → 1k → 512 → 256 → 128`` (scalar
+        fallback for REPL friendliness); ``"best"`` walks ``8k → 4k →
+        2k → 1k → 512 → 256 → 128`` with NO scalar fallback (raises
+        :class:`MaterialNotStagedError` when no textures are staged).
+        Must be called *before* cache-key composition or the cache
+        accumulates ``…/auto/…`` paths and double-downloads.
+        """
+        if tier not in ("auto", "best"):
+            return tier
+        staged = self._lookup_available_tiers(source, material_id)
+        known = [t for t in staged if t in self._TIER_RANK]
+
+        if tier == "auto":
+            if known and all(t == "scalar" for t in known):
+                return "scalar"
+            for candidate in self._AUTO_TIER_LADDER:
+                if candidate in known:
+                    return candidate
+            if "scalar" in known:
+                return "scalar"
+            raise MaterialNotStagedError(
+                source=source,
+                material_id=material_id,
+                tier="auto",
+                available=list(staged),
+            )
+
+        # tier == "best"
+        for candidate in self._BEST_TIER_LADDER:
+            if candidate in known:
+                return candidate
+        raise MaterialNotStagedError(
+            source=source,
+            material_id=material_id,
+            tier="best",
+            available=[t for t in staged if t != "scalar"],
+        )
+
     def _resolve_material_id(self, source: str, material_id: str, tier: str) -> str:
         """Resolve ``material_id`` to its canonical catalog id.
 
@@ -1310,19 +1398,28 @@ class MatVisClient:
         self,
         source: str,
         material_id: str,
-        tier: str = "1k",
+        tier: str = "auto",
     ) -> dict[str, bytes]:
         """Fetch all texture channels for a material.
 
+        ``tier`` defaults to ``"auto"`` since 0.7.0 (mat-vis#374) — the
+        client picks the best-quality staged texture tier, or returns
+        ``{}`` for scalar-only materials. Pass ``tier="best"`` for the
+        highest-quality tier (raises if no textures are staged).
+
         Returns a dict mapping channel name to PNG bytes.
         """
+        # mat-vis#374: collapse auto/best before cache-key composition.
+        tier = self._resolve_tier(source, material_id, tier)
+        if tier == "scalar":
+            return {}
         chs = self.channels(source, material_id, tier)
         return {ch: self.fetch_texture(source, material_id, ch, tier) for ch in chs}
 
     def prefetch(
         self,
         source: str,
-        tier: str = "1k",
+        tier: str = "auto",
         *,
         on_progress: callable | None = None,
     ) -> int:
@@ -1330,12 +1427,19 @@ class MatVisClient:
 
         Args:
             source: Source name (e.g. "ambientcg").
-            tier: Resolution tier (default "1k").
+            tier: Resolution tier (default ``"auto"`` since 0.7.0;
+                pre-0.7.0 default was ``"1k"`` per mat-vis#374).
             on_progress: Optional callback(material_id, index, total).
 
         Returns the number of materials fetched.
         """
-        mat_ids = self.materials(source, tier)
+        # mat-vis#374: with auto/best the per-material listing must come
+        # from the full index (any material we can fetch is in scope),
+        # not the explicit-tier ``materials(tier)`` filter.
+        if tier in ("auto", "best"):
+            mat_ids = [e["id"] for e in self.index(source) if isinstance(e, dict) and e.get("id")]
+        else:
+            mat_ids = self.materials(source, tier)
         total = len(mat_ids)
 
         for i, mid in enumerate(mat_ids):
@@ -1349,16 +1453,24 @@ class MatVisClient:
         self,
         source: str,
         material_id: str,
-        tier: str = "1k",
+        tier: str = "auto",
         output_dir: str | Path = ".",
     ) -> Path:
         """Write all texture PNGs for a material to disk.
+
+        ``tier`` defaults to ``"auto"`` since 0.7.0 (mat-vis#374).
+        Scalar-only materials produce an empty output directory.
 
         Returns the directory containing the PNG files, named by channel
         (e.g. color.png, normal.png, roughness.png).
         """
         out = Path(output_dir) / material_id
         out.mkdir(parents=True, exist_ok=True)
+
+        # mat-vis#374: collapse auto/best up front.
+        tier = self._resolve_tier(source, material_id, tier)
+        if tier == "scalar":
+            return out
 
         chs = self.channels(source, material_id, tier)
         for ch in chs:
@@ -1371,12 +1483,15 @@ class MatVisClient:
 
     # ── MaterialX API (dotted) ─────────────────────────────────
 
-    def mtlx(self, source: str, material_id: str, tier: str = "1k") -> MtlxSource:
+    def mtlx(self, source: str, material_id: str, tier: str = "auto") -> MtlxSource:
         """Get a lazy :class:`MtlxSource` for a material.
 
         Use ``.xml`` for the document string, ``.export(path)`` to write
         files, and ``.original`` for the upstream-author variant (None
         if not available for this source).
+
+        ``tier`` defaults to ``"auto"`` since 0.7.0 (mat-vis#374);
+        resolution happens lazily on first ``.xml``/``.export``.
 
         Creation is free — no network IO happens until ``.xml`` or
         ``.export(...)`` is called.
@@ -1422,11 +1537,11 @@ class MatVisClient:
             if "/" not in ref:
                 raise ValueError(f"asset() string ref must be 'source/id', got {ref!r}")
             s, mid = ref.split("/", 1)
-            return s, mid, positional_tier or "1k"
+            return s, mid, positional_tier or "auto"
         if isinstance(ref, str) and positional_mid is not None:
-            return ref, positional_mid, positional_tier or "1k"
+            return ref, positional_mid, positional_tier or "auto"
         if kw_source is not None and kw_id is not None:
-            return kw_source, kw_id, positional_tier or "1k"
+            return kw_source, kw_id, positional_tier or "auto"
         raise TypeError(
             "asset() requires a 'source/id' string, (source, id, tier) "
             "positionals, or source=, id=, tier= kwargs"
@@ -1568,15 +1683,23 @@ class MatVisClient:
         source: str,
         material_id: str,
         channel: str,
-        tier: str = "1k",
+        tier: str = "auto",
     ) -> bytes:
         """Fetch a single texture via plain HTTPS GET (#186 / ADR-0012).
 
         URL: ``<HF_BASE>/<tag>/<source>/<tier>/<material_id>/<channel>.{png,ktx2}``.
         PNG is tried first; on 404 falls back to KTX2 for derived ktx2 tiers.
 
+        ``tier`` defaults to ``"auto"`` since 0.7.0 (mat-vis#374); for
+        scalar-only materials raises :class:`NoPreviewError`.
+
         Returns raw bytes. Caches locally.
         """
+        # mat-vis#374: collapse auto/best before cache-key composition.
+        tier = self._resolve_tier(source, material_id, tier)
+        if tier == "scalar":
+            raise NoPreviewError(source, material_id)
+
         sources_block = self.manifest.get("sources", {})
         src_entry = _lookup(sources_block, source, kind="source")
         _lookup(
@@ -1960,7 +2083,12 @@ class MtlxSource:
         # Synthesized: build XML from scalars + channel list, referencing
         # PNGs by <material_id>/<channel>.png (relative paths that line up
         # with what .export() writes). No PNG bytes fetched.
-        chs = self._client.channels(self._source, self._material_id, self._tier)
+        # mat-vis#374: collapse auto/best so channels() sees a concrete tier.
+        resolved_tier = self._client._resolve_tier(self._source, self._material_id, self._tier)
+        if resolved_tier == "scalar":
+            chs: list = []
+        else:
+            chs = self._client.channels(self._source, self._material_id, resolved_tier)
         scalars = self._client._scalars_for(self._source, self._material_id)
         # Reference PNGs relative to the mtlx file — matches the layout
         # .export() produces (.mtlx alongside channel PNGs in one dir).
@@ -1984,8 +2112,16 @@ class MtlxSource:
         """
         from mat_vis_client.adapters import export_mtlx
 
-        tex_dir = self._client.materialize(self._source, self._material_id, self._tier, output_dir)
-        chs = self._client.channels(self._source, self._material_id, self._tier)
+        # mat-vis#374: resolve auto/best up front so materialize() and
+        # channels() agree on the concrete tier.
+        resolved_tier = self._client._resolve_tier(self._source, self._material_id, self._tier)
+        tex_dir = self._client.materialize(
+            self._source, self._material_id, resolved_tier, output_dir
+        )
+        if resolved_tier == "scalar":
+            chs: list = []
+        else:
+            chs = self._client.channels(self._source, self._material_id, resolved_tier)
 
         if not self._is_original:
             scalars = self._client._scalars_for(self._source, self._material_id)
@@ -2055,6 +2191,7 @@ class VisAsset:
         "_tier",
         "_scalars_cache",
         "_textures_cache",
+        "_resolved_tier_cache",
         "_initialized",
     )
 
@@ -2071,6 +2208,9 @@ class VisAsset:
         object.__setattr__(self, "_tier", tier)
         object.__setattr__(self, "_scalars_cache", None)
         object.__setattr__(self, "_textures_cache", None)
+        # mat-vis#374: holds the concrete tier the auto/best resolver
+        # picked. ``None`` means "not resolved yet". Mirrors packaged.
+        object.__setattr__(self, "_resolved_tier_cache", None)
         object.__setattr__(self, "_initialized", True)
 
     @classmethod
@@ -2079,7 +2219,7 @@ class VisAsset:
         client: MatVisClient,
         source: str,
         material_id: str,
-        tier: str = "1k",
+        tier: str = "auto",
     ) -> "VisAsset":
         return cls(client, source, material_id, tier)
 
@@ -2124,16 +2264,43 @@ class VisAsset:
         ``to_gltf`` produce a valid scalars-only material instead of
         raising :class:`MaterialNotStagedError` from the texture-fetch
         path (mat-vis#288).
+
+        mat-vis#374: when ``tier`` is ``"auto"``/``"best"`` we collapse
+        to a concrete tier here and cache the choice on
+        :attr:`resolved_tier`.
         """
         if self._textures_cache is None:
             if self._is_scalar_only_entry():
                 fetched: dict[str, bytes] = {}
+                object.__setattr__(self, "_resolved_tier_cache", "scalar")
             else:
-                fetched = self._client.fetch_all_textures(
+                resolved_tier = self._client._resolve_tier(
                     self._source, self._material_id, self._tier
                 )
+                object.__setattr__(self, "_resolved_tier_cache", resolved_tier)
+                if resolved_tier == "scalar":
+                    fetched = {}
+                else:
+                    fetched = self._client.fetch_all_textures(
+                        self._source, self._material_id, resolved_tier
+                    )
             object.__setattr__(self, "_textures_cache", fetched)
         return self._textures_cache
+
+    @property
+    def resolved_tier(self) -> str:
+        """The concrete tier the auto/best resolver picked (mat-vis#374).
+
+        See `mat_vis_client.client.VisAsset.resolved_tier` for the full
+        contract. Standalone counterpart with the same lazy resolution.
+        """
+        if self._resolved_tier_cache is None:
+            if self._is_scalar_only_entry():
+                object.__setattr__(self, "_resolved_tier_cache", "scalar")
+            else:
+                resolved = self._client._resolve_tier(self._source, self._material_id, self._tier)
+                object.__setattr__(self, "_resolved_tier_cache", resolved)
+        return self._resolved_tier_cache
 
     def _is_scalar_only_entry(self) -> bool:
         """True if this asset's index entry advertises no texture tiers.
@@ -2298,7 +2465,13 @@ class VisAsset:
         """Resolve a tier name to the ordered candidate list to try.
 
         See `mat_vis_client.client.VisAsset._resolve_tier_candidates`.
+        ``"auto"``/``"best"`` collapse to a single resolved tier via
+        the client-level resolver (mat-vis#374); ``"best"`` may raise
+        :class:`MaterialNotStagedError` here.
         """
+        if tier in ("auto", "best"):
+            resolved = self._client._resolve_tier(self._source, self._material_id, tier)
+            return (resolved,)
         if tier != "thumb":
             return (tier,)
         staged = self._available_tiers()

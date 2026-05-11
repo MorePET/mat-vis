@@ -454,7 +454,7 @@ provides-extras = ["baker", "materialx", "observability", "dev"]
 
 [[package]]
 name = "mat-vis-client"
-version = "0.6.4"
+version = "0.7.0"
 source = { editable = "clients/python" }
 
 [package.metadata]

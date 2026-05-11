@@ -31,7 +31,7 @@ client = MatVisClient()  # latest release
 
 # Ergonomic path — VisAsset binds (source, material_id, tier) and
 # exposes lazy scalars/textures + format adapters.
-asset = client.asset("ambientcg", "Rock064", tier="1k")
+asset = client.asset("ambientcg", "Rock064")          # tier="auto" by default
 three  = asset.to_threejs()   # MeshPhysicalMaterial dict
 gltf   = asset.to_gltf()      # glTF 2.0 material dict
 mtlx   = asset.to_mtlx()      # MtlxSource (.xml() / .export(dir))
@@ -41,6 +41,22 @@ png = client.fetch_texture("ambientcg", "Rock064", "color", tier="1k")
 with open("rock.png", "wb") as f:
     f.write(png)
 ```
+
+### Tier sentinels (since 0.7.0, [#374](https://github.com/MorePET/mat-vis/issues/374))
+
+`tier` defaults to `"auto"` — the client picks a working tier per
+material. Two ladders, picked by name:
+
+- `tier="auto"` — `(scalar-precheck) → 1k → 512 → 256 → 128`.
+  REPL-friendly: scalar-only materials (e.g. `physicallybased/*`)
+  return `{}` textures instead of raising, so `to_threejs` /
+  `to_gltf` still produce a valid scalars-only material.
+- `tier="best"` — `8k → 4k → 2k → 1k → 512 → 256 → 128`.
+  Archival contract: no scalar fallback. Raises
+  `MaterialNotStagedError` when nothing is staged.
+
+Use `asset.resolved_tier` (post first `.textures` access) to see what
+the resolver actually picked.
 
 ## Search
 
