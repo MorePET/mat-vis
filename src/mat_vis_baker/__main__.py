@@ -345,6 +345,29 @@ def cmd_hf_derive_ktx2(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hf_thumb_publish(args: argparse.Namespace) -> int:
+    """Publish locally-baked thumb PNGs to HF as the ``thumb`` tier (#402)."""
+    from mat_vis_baker.hf_thumb_publish import publish_thumb_tier
+
+    token = _resolve_hf_token(args.hf_token)
+    result = publish_thumb_tier(
+        source=args.source,
+        release_tag=args.release_tag,
+        thumbs_dir=Path(args.thumbs_dir),
+        repo_id=args.repo_id,
+        hf_token=token,
+        dry_run=args.dry_run,
+        allow_prod=args.allow_prod,
+        limit=args.limit,
+        batch_size=args.batch_size,
+        batch_max_bytes=args.batch_max_bytes,
+    )
+    log.info("hf-thumb-publish result: %s", result)
+    if "error" in result:
+        return 1
+    return 0
+
+
 def cmd_hf_bake(args: argparse.Namespace) -> int:
     """Bake (source, tier) → HF commit. Per-file substrate (ADR-0012)."""
     from mat_vis_baker.hf_bake import bake_one
@@ -718,6 +741,51 @@ def main() -> int:
         help="Per-file metrics parquet path (#263). See `hf-bake --help` for shape.",
     )
 
+    # ── per-material thumb publish (#402) ────────────────────────
+    p_hft = sub.add_parser(
+        "hf-thumb-publish",
+        help=(
+            "Publish locally-baked thumb PNGs (from bake/preview/run.py) "
+            "to HF as the per-material 'thumb' tier. ADR-0012 / #402."
+        ),
+    )
+    p_hft.add_argument("--source", required=True, choices=SOURCES)
+    p_hft.add_argument(
+        "--thumbs-dir",
+        required=True,
+        help="Local dir with <source>/<material_id>/thumb.png files.",
+    )
+    p_hft.add_argument("--release-tag", required=True)
+    p_hft.add_argument(
+        "--repo-id",
+        default="gerchowl/mat-vis",
+        help="HF dataset repo (default: gerchowl/mat-vis).",
+    )
+    p_hft.add_argument(
+        "--hf-token",
+        default=None,
+        help="HfApi token; raw or 'env:VAR'. Falls back to cached HF login.",
+    )
+    p_hft.add_argument("--limit", type=int, default=None)
+    p_hft.add_argument(
+        "--batch-size",
+        type=int,
+        default=300,
+        help="Materials per atomic commit (count ceiling, #228).",
+    )
+    p_hft.add_argument(
+        "--batch-max-bytes",
+        type=int,
+        default=700 * 1024 * 1024,
+        help="Max bytes per atomic commit (default 700 MiB; HF caps at 1 GiB).",
+    )
+    p_hft.add_argument("--dry-run", action="store_true")
+    p_hft.add_argument(
+        "--allow-prod",
+        action="store_true",
+        help="Required to target any non-*-tst HF dataset repo.",
+    )
+
     p_mtlx = sub.add_parser(
         "pack-mtlx",
         help="Pack original upstream .mtlx files into JSON map for release",
@@ -793,6 +861,8 @@ def main() -> int:
         return cmd_hf_derive(args)
     if args.command == "hf-derive-ktx2":
         return cmd_hf_derive_ktx2(args)
+    if args.command == "hf-thumb-publish":
+        return cmd_hf_thumb_publish(args)
     if args.command == "audit-orphans":
         return cmd_audit_orphans(args)
 

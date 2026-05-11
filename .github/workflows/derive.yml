@@ -42,6 +42,7 @@ on:  # yamllint disable-line rule:truthy
         options:
           - resize
           - ktx2
+          - thumb
       sources:
         description: >-
           Comma-separated sources, or "all". "all" expands to
@@ -61,7 +62,7 @@ on:  # yamllint disable-line rule:truthy
         default: ''
         type: string
       source-tier:
-        description: 'Source tier to derive from (existing per-file tier on HF)'
+        description: 'Source tier to derive from (existing per-file tier on HF). Ignored for kind=thumb.'
         required: true
         default: '4k'
         type: choice
@@ -74,7 +75,9 @@ on:  # yamllint disable-line rule:truthy
           - 4k
           - 8k
       target-tier:
-        description: 'Target tier (resize only; e.g. 1k). Ignored for ktx2.'
+        description: >-
+          Target tier (resize only; e.g. 1k). Ignored for ktx2 and
+          thumb (thumb resolves to literal 'thumb').
         required: false
         default: '1k'
         type: string
@@ -195,6 +198,11 @@ jobs:
               echo "::error::resize requires target-tier"
               exit 1
             fi
+          elif [ "$kind" = "thumb" ]; then
+            # #402: thumb is a literal tier label; no source-tier
+            # interpolation. The bake reads the highest staged texture
+            # tier per material via bake/preview/run.py's fallback.
+            tier="thumb"
           else
             tier="ktx2-${{ inputs.source-tier }}"
           fi
@@ -231,6 +239,7 @@ jobs:
         run: python3 scripts/check-dagger-shell-safety.py
 
       - name: Derive (per-file substrate, ADR-0012)
+        if: inputs.kind != 'thumb'
         uses: dagger/dagger-for-github@v8.4.1
         with:
           verb: call
@@ -241,6 +250,23 @@ jobs:
             --source=${{ matrix.source }}
             ${{ inputs.kind == 'resize' && format('--target-tier={0}', inputs.target-tier) || '' }}
             --source-tier=${{ inputs.source-tier }}
+            --release-tag=${{ inputs.release-tag }}
+            --repo-id=${{ inputs.repo-id }}
+            --hf-token=env:HF_TOKEN
+            --allow-prod=${{ inputs.allow-prod }}
+            --batch-size=${{ inputs.batch-size }}
+            --batch-max-bytes=${{ inputs.batch-max-bytes }}
+
+      - name: Thumb per-material tier (#402)
+        if: inputs.kind == 'thumb'
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          verb: call
+          module: .dagger
+          args: >-
+            thumb
+            --context=.
+            --source=${{ matrix.source }}
             --release-tag=${{ inputs.release-tag }}
             --repo-id=${{ inputs.repo-id }}
             --hf-token=env:HF_TOKEN
