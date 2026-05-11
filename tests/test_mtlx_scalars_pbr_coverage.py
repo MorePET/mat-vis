@@ -1,4 +1,4 @@
-"""Bake-side extraction tests for #340 / #396 — full MeshPhysicalMaterial coverage.
+"""Bake-side extraction tests for #340 / #396 / #409 — full MeshPhysicalMaterial coverage.
 
 Scalar fields extracted from ``<standard_surface>``:
 - coat                   → clearcoat (float, #396)
@@ -7,11 +7,15 @@ Scalar fields extracted from ``<standard_surface>``:
 - specular_color         → specular_color (color3, linear, #340)
 - transmission_dispersion → dispersion (float, #340)
 - transmission_depth     → thickness (float, only when transmission > 0, #340)
+- subsurface             → subsurface (float, #409)
+- subsurface_color       → subsurface_color (color3, linear, #409)
+- subsurface_radius      → subsurface_radius (color3, per-channel mfp, #409)
 
 All extracted from <standard_surface> direct `value=` attributes or
 1-hop nodegraph→<constant> chains. Survey of 454 gpuopen materials
 confirms each input is authored ~80-95% of the time; specular_color
-is 94% non-default; coat is 3/454 (Car Paint family).
+is 94% non-default; coat is 3/454 (Car Paint family); subsurface
+is 13/454 with ``subsurface > 0`` (wax, resin, semi-translucent).
 """
 
 from __future__ import annotations
@@ -161,6 +165,122 @@ class TestClearcoat:
         assert pbr.clearcoat == pytest.approx(0.75)
 
 
+class TestSubsurface:
+    """``subsurface`` factor + ``subsurface_color`` + ``subsurface_radius``
+    extraction (#409). Survey of 454 gpuopen materials: 13 author
+    ``subsurface > 0`` (wax-like, resin, semi-translucent); the rest
+    default to 0.0 with sometimes non-default color/radius scaffolding
+    that has no rendering effect when the factor is zero. The baker
+    still extracts color/radius unconditionally so the adapter can
+    decide whether to ship the extension."""
+
+    def test_subsurface_authored_non_default(self) -> None:
+        # gpuopen 'Wax (White)' and 'Skin' families author subsurface=1.0.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="subsurface" type="float" value="1.0"/>')
+        )
+        assert pbr.subsurface == pytest.approx(1.0)
+
+    def test_subsurface_authored_partial(self) -> None:
+        # Real corpus: values like 0.1, 0.15, 0.178, 0.2, 0.25, 0.3, 0.5.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="subsurface" type="float" value="0.25"/>')
+        )
+        assert pbr.subsurface == pytest.approx(0.25)
+
+    def test_subsurface_default_zero_extracted(self) -> None:
+        # 441/454 corpus materials default to 0.0 — extracting it
+        # confirms provenance. Adapter suppresses the no-op extension.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="subsurface" type="float" value="0.0"/>')
+        )
+        assert pbr.subsurface == pytest.approx(0.0)
+
+    def test_subsurface_unset_stays_none(self) -> None:
+        pbr = parse_standard_surface_scalars(_wrap())
+        assert pbr.subsurface is None
+
+    def test_subsurface_color_authored_tinted(self) -> None:
+        # Linear RGB per MaterialX 1.38 — extracted verbatim.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="subsurface_color" type="color3" value="0.8, 0.4, 0.3"/>')
+        )
+        assert pbr.subsurface_color == pytest.approx([0.8, 0.4, 0.3])
+
+    def test_subsurface_color_unset_stays_none(self) -> None:
+        pbr = parse_standard_surface_scalars(_wrap())
+        assert pbr.subsurface_color is None
+
+    def test_subsurface_radius_per_channel_mfp(self) -> None:
+        # MaterialX subsurface_radius is color3 carrying per-wavelength
+        # mean-free-path (typically mm). Skin-like values: ~[1, 0.2, 0.1].
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="subsurface_radius" type="color3" value="1.0, 0.2, 0.1"/>')
+        )
+        assert pbr.subsurface_radius == pytest.approx([1.0, 0.2, 0.1])
+
+    def test_subsurface_radius_unset_stays_none(self) -> None:
+        pbr = parse_standard_surface_scalars(_wrap())
+        assert pbr.subsurface_radius is None
+
+    def test_subsurface_full_triplet_authored(self) -> None:
+        # Real-corpus shape: all three authored together (wax white).
+        pbr = parse_standard_surface_scalars(
+            _wrap(
+                '<input name="subsurface" type="float" value="1.0"/>',
+                '<input name="subsurface_color" type="color3" value="0.9, 0.85, 0.7"/>',
+                '<input name="subsurface_radius" type="color3" value="11.6, 9.4, 7.4"/>',
+            )
+        )
+        assert pbr.subsurface == pytest.approx(1.0)
+        assert pbr.subsurface_color == pytest.approx([0.9, 0.85, 0.7])
+        assert pbr.subsurface_radius == pytest.approx([11.6, 9.4, 7.4])
+
+    def test_subsurface_graph_constant_promoted(self) -> None:
+        # 1-hop nodegraph → <constant> resolution applies to ``subsurface``
+        # the same way it does for every other _FLOAT_INPUT.
+        mtlx = """<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="NG_SSS">
+    <constant name="sss_const" type="float">
+      <input name="value" type="float" value="0.42"/>
+    </constant>
+    <output name="sss_out" type="float" nodename="sss_const"/>
+  </nodegraph>
+  <standard_surface name="SR_T" type="surfaceshader">
+    <input name="subsurface" type="float" output="sss_out" nodegraph="NG_SSS"/>
+  </standard_surface>
+  <surfacematerial name="T" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_T"/>
+  </surfacematerial>
+</materialx>
+"""
+        pbr = parse_standard_surface_scalars(mtlx)
+        assert pbr.subsurface == pytest.approx(0.42)
+
+    def test_subsurface_texture_bound_stays_none(self) -> None:
+        # texture-bound subsurface leaves the field None — consistent
+        # with metalness-texture-bound handling.
+        mtlx = """<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="NG_SSS">
+    <image name="sss_img" type="float">
+      <input name="file" type="filename" value="sss.png"/>
+    </image>
+    <output name="sss_out" type="float" nodename="sss_img"/>
+  </nodegraph>
+  <standard_surface name="SR_T" type="surfaceshader">
+    <input name="subsurface" type="float" output="sss_out" nodegraph="NG_SSS"/>
+  </standard_surface>
+  <surfacematerial name="T" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_T"/>
+  </surfacematerial>
+</materialx>
+"""
+        pbr = parse_standard_surface_scalars(mtlx)
+        assert pbr.subsurface is None
+
+
 class TestDispersion:
     def test_dispersion_authored(self) -> None:
         pbr = parse_standard_surface_scalars(
@@ -220,6 +340,10 @@ class TestPBRBlockFieldsExist:
             "specular_color",
             "thickness",
             "dispersion",
+            # Subsurface scattering (#409) — additive triplet.
+            "subsurface",
+            "subsurface_color",
+            "subsurface_radius",
         ):
             assert getattr(pbr, fname) is None, f"{fname} should default to None"
 
@@ -233,9 +357,15 @@ class TestPBRBlockFieldsExist:
         pbr.specular_color = [0.95, 0.5, 0.3]
         pbr.thickness = 5.0
         pbr.dispersion = 0.1
+        pbr.subsurface = 0.5
+        pbr.subsurface_color = [0.9, 0.6, 0.5]
+        pbr.subsurface_radius = [1.0, 0.2, 0.1]
         assert pbr.clearcoat == 1.0
         assert pbr.clearcoat_roughness == 0.2
         assert pbr.specular_intensity == 0.8
         assert pbr.specular_color == [0.95, 0.5, 0.3]
         assert pbr.thickness == 5.0
         assert pbr.dispersion == 0.1
+        assert pbr.subsurface == 0.5
+        assert pbr.subsurface_color == [0.9, 0.6, 0.5]
+        assert pbr.subsurface_radius == [1.0, 0.2, 0.1]

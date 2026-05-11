@@ -286,9 +286,13 @@ FIXTURE_LOSSY_ZERO_COLOR3 = """<?xml version="1.0"?>
 
 def test_lossy_subsurface_and_sheen_logged_at_debug(caplog):
     with caplog.at_level(logging.DEBUG, logger="mat-vis-baker.gpuopen-scalars"):
-        parse_standard_surface_scalars(FIXTURE_LOSSY_SUBSURFACE_SHEEN, material_id="m-sss")
+        pbr = parse_standard_surface_scalars(FIXTURE_LOSSY_SUBSURFACE_SHEEN, material_id="m-sss")
     msgs = [rec.message for rec in caplog.records]
-    assert any("subsurface=0.5" in m for m in msgs)
+    # subsurface is now extracted into pbr.subsurface (#409) — wired
+    # via the draft glTF subsurface extension. No longer lossy.
+    assert pbr.subsurface == 0.5
+    assert not any("subsurface=0.5" in m for m in msgs)
+    # sheen still has no PBRBlock home — logged as lossy.
     assert any("sheen=0.3" in m for m in msgs)
 
 

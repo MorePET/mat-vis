@@ -87,6 +87,10 @@ def test_mat_vis_block_has_stable_key_set() -> None:
         "dispersion",
         # Clearcoat on/off switch (#396) — additive.
         "clearcoat",
+        # Subsurface scattering (#409) — additive.
+        "subsurface",
+        "subsurface_color",
+        "subsurface_radius",
     }
     # Nested AttributionBlock
     assert set(mv["attribution"].keys()) == {"authors", "license_spdx", "source_url"}
@@ -120,6 +124,10 @@ def test_mat_vis_block_defaults_are_null_or_empty() -> None:
     assert mv["pbr"]["dispersion"] is None
     # Clearcoat on/off switch (#396) — additive, default-None.
     assert mv["pbr"]["clearcoat"] is None
+    # Subsurface scattering (#409) — additive, default-None.
+    assert mv["pbr"]["subsurface"] is None
+    assert mv["pbr"]["subsurface_color"] is None
+    assert mv["pbr"]["subsurface_radius"] is None
     assert mv["attribution"]["authors"] == []
     assert mv["dates"]["published"] is None
     assert mv["dates"]["updated"] is None

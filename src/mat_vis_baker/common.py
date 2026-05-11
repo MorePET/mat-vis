@@ -469,6 +469,22 @@ class PBRBlock:
     thickness: float | None = None  # <standard_surface>.transmission_depth
     dispersion: float | None = None  # <standard_surface>.transmission_dispersion
 
+    # Subsurface scattering (#409). 13 gpuopen entries author
+    # ``subsurface > 0`` (wax, resin, semi-translucent). Three.js
+    # MeshPhysicalMaterial has no native SSS field — adapter is a
+    # documented no-op there; glTF adapter emits the draft
+    # ``KHR_materials_subsurface`` extension (vendor-prefixed because
+    # the Khronos draft is not yet ratified). Units: ``subsurface``
+    # is a unitless 0..1 mix factor; ``subsurface_color`` is linear
+    # RGB; ``subsurface_radius`` is per-channel mean-free-path in
+    # MaterialX scene units (typically mm). The glTF extension carries
+    # these values verbatim — same per-channel length semantics, no
+    # unit conversion.
+    # subsurface_radius is per-channel mean-free-path in MaterialX scene units.
+    subsurface: float | None = None  # <standard_surface>.subsurface
+    subsurface_color: list[float] | None = None  # <standard_surface>.subsurface_color (linear RGB)
+    subsurface_radius: list[float] | None = None  # <standard_surface>.subsurface_radius
+
 
 def apply_pbr_neutral_multiplier_conventions(
     pbr: PBRBlock,
