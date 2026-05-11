@@ -77,6 +77,55 @@ def _clearcoat_at_default(c: float | None) -> bool:
     return c is None or math.isclose(c, _KHR_CLEARCOAT_DEFAULT, abs_tol=1e-9)
 
 
+def _resolve_emission_split(
+    scalars: dict,
+) -> tuple[list[float], float] | None:
+    """Resolve ``emission`` factor + ``emission_color`` into the
+    (color, strength) pair Three.js/glTF HDR emission needs (#406).
+
+    Returns ``None`` when the material is non-emissive — neither
+    ``emission`` nor ``emission_color`` is authored, OR ``emission``
+    is authored at the spec default 0.0. The caller suppresses the
+    output field entirely in that case.
+
+    Otherwise returns ``(emissive_color, strength)`` where:
+
+    - ``emissive_color`` is ``emission_color * min(emission, 1)``, clamped
+      to [0, 1]. Falls back to white (``[1, 1, 1]``) when emission_color
+      is unauthored — matches MaterialX 1.38 ``<standard_surface>``
+      defaults. Goes into Three.js ``emissive`` / glTF ``emissiveFactor``.
+    - ``strength`` is ``max(emission, 1.0)`` — the HDR multiplier. Equal
+      to 1.0 for SDR cases (caller suppresses), > 1 for HDR (caller
+      emits Three.js ``emissiveIntensity`` / glTF
+      KHR_materials_emissive_strength).
+
+    Adapter contract: ``emission`` is the canonical scalar HDR factor
+    on the substrate (PBRBlock.emission, #406). The legacy ``emissive``
+    key (RGB triple, no factor) is read elsewhere — when both arrive
+    in the scalars dict, ``emission`` wins because it carries the HDR
+    information the legacy key cannot express.
+    """
+    emission = scalars.get("emission")
+    emission_color = scalars.get("emission_color")
+    if emission is None and emission_color is None:
+        return None
+    # Treat a None factor with an authored color as "factor=1.0" — the
+    # color was authored intentionally; ignoring it because the factor
+    # is None would silently drop authored intent.
+    factor = 1.0 if emission is None else float(emission)
+    if factor <= 0.0:
+        return None
+    color = list(emission_color) if emission_color is not None else [1.0, 1.0, 1.0]
+    if len(color) < 3:
+        return None
+    # Clamp color to [0,1]; multiply by min(factor, 1) so the SDR
+    # component lives inside Three.js Color / glTF emissiveFactor.
+    sdr = min(factor, 1.0)
+    emissive_color = [max(0.0, min(1.0, float(c) * sdr)) for c in color[:3]]
+    strength = max(factor, 1.0)
+    return emissive_color, strength
+
+
 def _color_hex_to_int(hex_str: str) -> int:
     """Convert '#RRGGBB' hex string to an integer (Three.js color format).
 
@@ -345,6 +394,19 @@ def to_threejs(
         result["transmission"] = scalars["transmission"]
     if scalars.get("emissive") is not None:
         result["emissive"] = list(scalars["emissive"])
+    # Emission factor + color split (#406). When ``emission`` (scalar
+    # HDR factor) is authored, route it through Three.js's HDR
+    # mechanism: ``emissive`` carries the SDR-clamped color factor;
+    # ``emissiveIntensity`` carries the HDR multiplier. ``emission``
+    # wins over the legacy ``emissive`` key when both arrive.
+    emission_split = _resolve_emission_split(scalars)
+    if emission_split is not None:
+        emissive_color, strength = emission_split
+        result["emissive"] = emissive_color
+        # Three.js's default emissiveIntensity is 1.0; emit it only for
+        # HDR cases so the SDR path stays a single-key write.
+        if strength > 1.0:
+            result["emissiveIntensity"] = strength
     if scalars.get("clearcoat") is not None:
         result["clearcoat"] = scalars["clearcoat"]
     if scalars.get("clearcoat_roughness") is not None:
@@ -459,6 +521,25 @@ def to_gltf(
     emissive = scalars.get("emissive")
     if emissive is not None:
         material["emissiveFactor"] = list(emissive)
+    # Emission factor + color split (#406). When ``emission`` (scalar
+    # HDR factor) is authored, route it through glTF's HDR mechanism:
+    # ``emissiveFactor`` (core) carries the SDR-clamped color factor;
+    # KHR_materials_emissive_strength carries the HDR multiplier > 1.
+    # ``emission`` wins over the legacy ``emissive`` key when both
+    # arrive in the scalars dict (it carries HDR info the legacy key
+    # cannot express).
+    emission_split = _resolve_emission_split(scalars)
+    if emission_split is not None:
+        emissive_color, strength = emission_split
+        material["emissiveFactor"] = emissive_color
+        # The KHR_materials_emissive_strength extension defaults to 1.0;
+        # emit only for HDR cases so SDR materials don't ship a no-op
+        # extension entry (mirrors the IOR/transmission suppression
+        # pattern). Spec: https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_materials_emissive_strength
+        if strength > 1.0:
+            material.setdefault("extensions", {})["KHR_materials_emissive_strength"] = {
+                "emissiveStrength": strength
+            }
 
     # Clearcoat extension — omit when zero/None (spec default), mirrors
     # the KHR_materials_ior / _transmission suppression pattern. The
