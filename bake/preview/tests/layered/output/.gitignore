@@ -1,0 +1,5 @@
+# Per-test rendered PNGs + diff artifacts. Regenerated each run; never
+# committed. The directory itself stays in git via this .gitignore so
+# the suite has a stable output root without a `mkdir -p` wrapper.
+*
+!.gitignore
