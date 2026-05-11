@@ -51,6 +51,11 @@ _FLOAT_INPUTS: dict[str, str] = {
     "specular": "specular_intensity",  # KHR_materials_specular.specularFactor
     "transmission_dispersion": "dispersion",  # KHR_materials_dispersion.dispersion
     "coat_roughness": "clearcoat_roughness",  # KHR_materials_clearcoat.clearcoatRoughnessFactor
+    # Clearcoat enabled/disabled switch (#396). Without this, the
+    # ``coat_roughness`` parameter ships but the on/off ``coat``
+    # factor is silently dropped — every entry looks the same to
+    # consumers reading the scalar block.
+    "coat": "clearcoat",  # KHR_materials_clearcoat.clearcoatFactor
 }
 
 # Color3 inputs. Same direct value=/1-hop graph→constant promotion as
@@ -64,7 +69,6 @@ _COLOR3_INPUTS: dict[str, str] = {
 # Inputs that have no PBRBlock home today. Non-zero values are dropped
 # with a structured warning so a future schema add knows where to look.
 _LOSSY_INPUTS: tuple[str, ...] = (
-    "coat",
     "coat_IOR",
     "coat_color",
     "sheen",
