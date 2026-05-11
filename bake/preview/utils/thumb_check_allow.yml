@@ -1,0 +1,24 @@
+# Duplicate-bytes allow-list for `check_thumbs.py` (#385).
+#
+# When the duplicate-bytes detector flags an md5 bucket that is genuinely
+# legitimate (two upstream entries that ARE the same material, deduped
+# post-bake; or a known scalar-only collapse that ops have triaged and
+# decided to ship), add the digest here so CI can stay green.
+#
+# Each entry MUST have all four fields:
+#
+#   md5     — the exact 32-char lowercase hex digest from the failing CI run
+#   reason  — short prose explaining WHY this dedup is legitimate
+#   ticket  — issue / PR ref where the substrate-side dedup is tracked
+#   until   — release tag at which this entry expires; once `release_tag` ≥
+#             `until`, the gate logs a warning (non-fatal) so ops know to
+#             drop or bump the entry
+#
+# `python check_thumbs.py --dump-stale-allowlist --release-tag v2026.05.0`
+# audits which entries have aged out.
+#
+# Schema is parsed by a constrained YAML subset (see check_thumbs.py
+# ``_parse_simple_yaml``): top-level mapping → sequence → flat mapping of
+# scalar string values. No nesting, no anchors, no flow style.
+
+allowed: []
