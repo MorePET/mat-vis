@@ -1,4 +1,4 @@
-"""Bake-side extraction tests for #340 / #396 / #409 — full MeshPhysicalMaterial coverage.
+"""Bake-side extraction tests for #340 / #396 / #406 / #409 — full MeshPhysicalMaterial coverage.
 
 Scalar fields extracted from ``<standard_surface>``:
 - coat                   → clearcoat (float, #396)
@@ -10,6 +10,8 @@ Scalar fields extracted from ``<standard_surface>``:
 - subsurface             → subsurface (float, #409)
 - subsurface_color       → subsurface_color (color3, linear, #409)
 - subsurface_radius      → subsurface_radius (color3, per-channel mfp, #409)
+- emission               → emission (float, #406 / #405 Phase 3a)
+- emission_color         → emission_color (color3, linear, #406 / #405 Phase 3a)
 
 All extracted from <standard_surface> direct `value=` attributes or
 1-hop nodegraph→<constant> chains. Survey of 454 gpuopen materials
@@ -328,6 +330,141 @@ class TestThickness:
         assert pbr.thickness is None
 
 
+class TestEmission:
+    """``emission`` factor + ``emission_color`` extraction (#406 / #405
+    Phase 3a). P0 audit of the v2026.04.99 corpus: 0/454 gpuopen,
+    0/757 polyhaven, 0/1949 ambientcg materials author ``emission > 0``.
+    Landing additively pre-v0.7 prod cut keeps the schema clean so
+    future emissive sources (signage/screens/decals) flow through
+    without a major-version bump."""
+
+    def test_emission_authored_non_default(self) -> None:
+        # Typical authored case — emission factor in [0, 1] range.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="emission" type="float" value="0.8"/>')
+        )
+        assert pbr.emission == pytest.approx(0.8)
+        # emission_color absent → stays None even when emission is set.
+        assert pbr.emission_color is None
+
+    def test_emission_hdr_strength(self) -> None:
+        # HDR strength > 1 — adapter side splits this into intensity +
+        # KHR_materials_emissive_strength. The baker passes the raw
+        # factor through unchanged; the split is an adapter concern.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="emission" type="float" value="3.5"/>')
+        )
+        assert pbr.emission == pytest.approx(3.5)
+
+    def test_emission_color_authored(self) -> None:
+        # MaterialX 1.38 emission_color is authored linear; round-trips
+        # to glTF emissiveFactor (also linear) without colorspace work.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="emission_color" type="color3" value="1.0, 0.5, 0.0"/>')
+        )
+        assert pbr.emission_color == pytest.approx([1.0, 0.5, 0.0])
+
+    def test_emission_and_color_authored_together(self) -> None:
+        # Real-world emissive case: glowing decal authors both — the
+        # factor and the tint together describe the emission output.
+        pbr = parse_standard_surface_scalars(
+            _wrap(
+                '<input name="emission" type="float" value="1.0"/>',
+                '<input name="emission_color" type="color3" value="0.0, 1.0, 0.5"/>',
+            )
+        )
+        assert pbr.emission == pytest.approx(1.0)
+        assert pbr.emission_color == pytest.approx([0.0, 1.0, 0.5])
+
+    def test_emission_default_zero_extracted(self) -> None:
+        # 3160/3160 corpus materials default to 0.0 — extracting it
+        # confirms provenance. Adapter suppresses the spec-default
+        # KHR extension entry; Three.js emissive at black is a no-op.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="emission" type="float" value="0.0"/>')
+        )
+        assert pbr.emission == pytest.approx(0.0)
+
+    def test_emission_unset_stays_none(self) -> None:
+        # Neither emission nor emission_color authored → both None, the
+        # PBRBlock default. Stable-key-set test pins this contract.
+        pbr = parse_standard_surface_scalars(_wrap())
+        assert pbr.emission is None
+        assert pbr.emission_color is None
+
+    def test_emission_texture_bound_stays_none(self) -> None:
+        # Texture-bound emission (rare — typical is scalar + per-pixel
+        # emissive map combined). Consistent with metalness-texture-bound
+        # handling: field stays None; the baker carries the texture path
+        # separately. No neutral-multiplier convention for emission
+        # (an emissiveMap with emissiveFactor=0 silently kills emission;
+        # callers must author the factor explicitly).
+        mtlx = """<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="NG_EM">
+    <image name="em_img" type="float">
+      <input name="file" type="filename" value="emission.png"/>
+    </image>
+    <output name="em_out" type="float" nodename="em_img"/>
+  </nodegraph>
+  <standard_surface name="SR_T" type="surfaceshader">
+    <input name="emission" type="float" output="em_out" nodegraph="NG_EM"/>
+  </standard_surface>
+  <surfacematerial name="T" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_T"/>
+  </surfacematerial>
+</materialx>
+"""
+        pbr = parse_standard_surface_scalars(mtlx)
+        assert pbr.emission is None
+        assert pbr.emission_color is None
+
+    def test_emission_graph_constant_promoted(self) -> None:
+        # 1-hop nodegraph → <constant> resolution applies to ``emission``
+        # the same way it does for every other _FLOAT_INPUT.
+        mtlx = """<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="NG_EM">
+    <constant name="em_const" type="float">
+      <input name="value" type="float" value="2.5"/>
+    </constant>
+    <output name="em_out" type="float" nodename="em_const"/>
+  </nodegraph>
+  <standard_surface name="SR_T" type="surfaceshader">
+    <input name="emission" type="float" output="em_out" nodegraph="NG_EM"/>
+  </standard_surface>
+  <surfacematerial name="T" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_T"/>
+  </surfacematerial>
+</materialx>
+"""
+        pbr = parse_standard_surface_scalars(mtlx)
+        assert pbr.emission == pytest.approx(2.5)
+
+    def test_emission_color_graph_constant_promoted(self) -> None:
+        # 1-hop graph→<constant> resolution applies to emission_color
+        # the same way it does for specular_color (the only other
+        # _COLOR3_INPUT today).
+        mtlx = """<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="NG_EMC">
+    <constant name="emc_const" type="color3">
+      <input name="value" type="color3" value="0.8, 0.4, 0.2"/>
+    </constant>
+    <output name="emc_out" type="color3" nodename="emc_const"/>
+  </nodegraph>
+  <standard_surface name="SR_T" type="surfaceshader">
+    <input name="emission_color" type="color3" output="emc_out" nodegraph="NG_EMC"/>
+  </standard_surface>
+  <surfacematerial name="T" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_T"/>
+  </surfacematerial>
+</materialx>
+"""
+        pbr = parse_standard_surface_scalars(mtlx)
+        assert pbr.emission_color == pytest.approx([0.8, 0.4, 0.2])
+
+
 class TestPBRBlockFieldsExist:
     def test_new_fields_default_to_none(self) -> None:
         from mat_vis_baker.common import PBRBlock
@@ -344,6 +481,9 @@ class TestPBRBlockFieldsExist:
             "subsurface",
             "subsurface_color",
             "subsurface_radius",
+            # Emission (#406) — additive, default-None.
+            "emission",
+            "emission_color",
         ):
             assert getattr(pbr, fname) is None, f"{fname} should default to None"
 
@@ -360,6 +500,8 @@ class TestPBRBlockFieldsExist:
         pbr.subsurface = 0.5
         pbr.subsurface_color = [0.9, 0.6, 0.5]
         pbr.subsurface_radius = [1.0, 0.2, 0.1]
+        pbr.emission = 2.5
+        pbr.emission_color = [1.0, 0.5, 0.0]
         assert pbr.clearcoat == 1.0
         assert pbr.clearcoat_roughness == 0.2
         assert pbr.specular_intensity == 0.8
@@ -369,3 +511,5 @@ class TestPBRBlockFieldsExist:
         assert pbr.subsurface == 0.5
         assert pbr.subsurface_color == [0.9, 0.6, 0.5]
         assert pbr.subsurface_radius == [1.0, 0.2, 0.1]
+        assert pbr.emission == 2.5
+        assert pbr.emission_color == [1.0, 0.5, 0.0]

@@ -91,6 +91,9 @@ def test_mat_vis_block_has_stable_key_set() -> None:
         "subsurface",
         "subsurface_color",
         "subsurface_radius",
+        # Emission scalar coverage (#406 / #405 Phase 3a) — additive.
+        "emission",
+        "emission_color",
     }
     # Nested AttributionBlock
     assert set(mv["attribution"].keys()) == {"authors", "license_spdx", "source_url"}
@@ -128,6 +131,9 @@ def test_mat_vis_block_defaults_are_null_or_empty() -> None:
     assert mv["pbr"]["subsurface"] is None
     assert mv["pbr"]["subsurface_color"] is None
     assert mv["pbr"]["subsurface_radius"] is None
+    # Emission scalar coverage (#406 / #405 Phase 3a) — additive, default-None.
+    assert mv["pbr"]["emission"] is None
+    assert mv["pbr"]["emission_color"] is None
     assert mv["attribution"]["authors"] == []
     assert mv["dates"]["published"] is None
     assert mv["dates"]["updated"] is None
