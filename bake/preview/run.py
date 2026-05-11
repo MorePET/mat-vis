@@ -5,9 +5,13 @@ material via mat-vis-client, drives Playwright + headless Chromium
 through `thumb_render.html`, writes one PNG per material under
 ``<out_dir>/<source>/<material_id>/thumb.png``.
 
-After the loop, runs ``check_thumbs.py`` against ``<out_dir>`` as a
-CI gate to catch silently-broken bakes (default-grey fingerprints,
-empty material specs).
+After the loop, writes a ``_bake_complete.json`` sentinel under
+``<out_dir>`` and runs ``check_thumbs.py`` as a CI gate to catch
+silently-broken bakes (default-grey fingerprints, empty material specs,
+byte-identical cross-material renders #385). The sentinel is what tells
+the gate the directory represents a *completed* bake — without it the
+gate refuses to validate (#385 exit code 3) so a crashed-mid-bake
+directory can't pass for a clean one.
 
 Usage:
     uv run python bake/preview/run.py --out /tmp/thumbs
@@ -209,6 +213,7 @@ def main():
             browser = pw.chromium.launch(headless=True, args=["--use-gl=swiftshader"])
             try:
                 totals = {"ok": 0, "skipped": 0, "errors": 0}
+                source_results: dict[str, dict[str, int]] = {}
                 for source in sources:
                     log.info("baking source: %s", source)
                     t0 = time.monotonic()
@@ -224,6 +229,7 @@ def main():
                         counters["skipped"],
                         counters["errors"],
                     )
+                    source_results[source] = counters
                     for k, v in counters.items():
                         totals[k] += v
             finally:
@@ -236,13 +242,39 @@ def main():
             totals["errors"],
         )
 
+        # #385: drop the sentinel so check_thumbs.py knows this directory
+        # represents a completed bake. Written here (inside the tmpdir
+        # context but after the bake loop) so a crashed bake never lands one.
+        from datetime import datetime, timezone
+
+        sentinel = args.out / "_bake_complete.json"
+        sentinel.write_text(
+            json.dumps(
+                {
+                    "totals": totals,
+                    "source_results": source_results,
+                    "release_tag": client._tag,
+                    "baked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+
     if not args.skip_check:
-        log.info("running fingerprint check against %s", args.out)
+        log.info("running thumb-check (#385 + fingerprint) against %s", args.out)
         rc = subprocess.run(
-            [sys.executable, str(CHECK_THUMBS), str(args.out)], check=False
+            [
+                sys.executable,
+                str(CHECK_THUMBS),
+                str(args.out),
+                "--release-tag",
+                client._tag,
+            ],
+            check=False,
         ).returncode
         if rc != 0:
-            log.error("fingerprint check failed (rc=%d) — see above", rc)
+            log.error("thumb-check failed (rc=%d) — see above + thumb-check.json", rc)
             return rc
 
     return 0 if totals["errors"] == 0 else 1
