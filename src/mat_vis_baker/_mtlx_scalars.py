@@ -56,6 +56,12 @@ _FLOAT_INPUTS: dict[str, str] = {
     # factor is silently dropped — every entry looks the same to
     # consumers reading the scalar block.
     "coat": "clearcoat",  # KHR_materials_clearcoat.clearcoatFactor
+    # Subsurface scattering factor (#409). 13 gpuopen entries author
+    # ``subsurface > 0`` (wax-like, resin, semi-transparent); dropping
+    # this made wax / jade / skin render as opaque dielectric. Wired
+    # for glTF via the (draft) subsurface extension; Three.js adapter
+    # is intentionally a no-op (MeshPhysicalMaterial has no SSS field).
+    "subsurface": "subsurface",
 }
 
 # Color3 inputs. Same direct value=/1-hop graph→constant promotion as
@@ -64,6 +70,11 @@ _FLOAT_INPUTS: dict[str, str] = {
 _COLOR3_INPUTS: dict[str, str] = {
     # mtlx input name -> PBRBlock attribute
     "specular_color": "specular_color",  # KHR_materials_specular.specularColorFactor
+    # Subsurface scattering color + per-channel mean-free-path (#409).
+    # Both are emitted unconditionally when authored; the adapter
+    # decides whether the SSS extension fires (only when subsurface>0).
+    "subsurface_color": "subsurface_color",
+    "subsurface_radius": "subsurface_radius",
 }
 
 # Inputs that have no PBRBlock home today. Non-zero values are dropped
@@ -74,9 +85,6 @@ _LOSSY_INPUTS: tuple[str, ...] = (
     "sheen",
     "sheen_roughness",
     "sheen_color",
-    "subsurface",
-    "subsurface_color",
-    "subsurface_radius",
     "thin_film_thickness",
     "emission",
     "emission_color",
