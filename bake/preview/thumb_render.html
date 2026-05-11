@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>html,body{margin:0;padding:0;overflow:hidden;background:#1a1a2e}canvas{display:block}</style>
+</head>
+<body>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+
+// Single-material thumb renderer (mat-vis#361). Matches bernhard's
+// reference scene from mat-vis#285 ("should look like" image):
+//   geometry  = create_shader_ball (vendored shader_ball.glb)
+//   bg        = 0x1a1a2e (dark navy)
+//   IBL       = RoomEnvironment via PMREM
+//   tone-map  = ACES Filmic, exposure 1.0
+//   layout    = single shader ball, framed tight for 256² output
+//
+// Spec: ?spec=spec.json with one of:
+//   {threejs: {...}}      single material
+//   {items: [{label, threejs}]}  first item only (compat with grid spec)
+
+const params = new URLSearchParams(window.location.search);
+const specUrl = params.get('spec') || 'spec.json';
+
+// Render at 1024² and let the bench downsample to 256² with Lanczos
+// (per PBR specialist recommendation — kills specular aliasing +
+// roughness banding at thumbnail size).
+const W = parseInt(params.get('w') || '1024');
+const H = parseInt(params.get('h') || '1024');
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+
+// Scene + lighting derived from bernhard-42/vscode-ocp-cad-viewer
+// (mat-vis#285 reference). Their viewer uses FOV=22 + Z-up camera
+// because they load build123d shapes natively (preserving build123d's
+// Z-up). OUR pipeline goes through glTF, where `export_gltf`
+// auto-converts to Y-up per spec. So FOV=22 + Y-up camera here.
+const camera = new THREE.PerspectiveCamera(22, W / H, 0.1, 1000);
+// camera.up defaults to (0, 1, 0) — Y-up, correct for the converted GLB.
+
+const renderer = new THREE.WebGLRenderer({antialias: true, preserveDrawingBuffer: true});
+renderer.setSize(W, H);
+// Three-cad-viewer uses postprocessing NEUTRAL tone-mapping
+// (renderer.toneMapping=NoToneMapping + ToneMappingEffect). Without
+// postprocessing in this static-thumb pipeline, the closest built-in
+// match is ACES Filmic — keep that as a deliberate small deviation.
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+// Lighting: copied from three-cad-viewer's RENDER_DEFAULTS.
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+const dir = new THREE.DirectionalLight(0xffffff, 1.1);
+dir.position.set(20, 30, 20);
+scene.add(dir);
+
+// displacementMap intentionally excluded — the shader ball is a curated
+// silhouette and per-material displacement maps (a) use UVs that weren't
+// authored for tileable surface textures and (b) at default
+// displacementScale=1 push vertices off-screen or invert the geometry,
+// producing flat-dark renders for materials with strong height data
+// (e.g. ambientcg MetalPlates006, AcousticFoam — collapsed to 7-8
+// unique colors before this exclusion).
+const TEXTURE_KEYS = [
+  'map', 'normalMap', 'roughnessMap', 'metalnessMap',
+  'aoMap', 'emissiveMap', 'alphaMap',
+];
+
+// Returns a Promise that resolves with a fully-decoded Texture (or null).
+// Awaiting these before the warmup renders is load-bearing: TextureLoader.load
+// returns the Texture object synchronously but the image decode is async, so a
+// non-awaited path captures the canvas before any texture is on the GPU —
+// which collapsed every textured ambientcg material to the same scalar-only
+// render in #361 (#385).
+function _loadTextureFromDataURI(dataUri) {
+  return new Promise((resolve) => {
+    if (!dataUri || typeof dataUri !== 'string' || !dataUri.startsWith('data:')) {
+      resolve(null);
+      return;
+    }
+    new THREE.TextureLoader().load(
+      dataUri,
+      (tex) => { tex.colorSpace = THREE.SRGBColorSpace; resolve(tex); },
+      undefined,
+      () => resolve(null),
+    );
+  });
+}
+
+async function _buildMaterial(spec) {
+  const params = {};
+  if ('color' in spec && spec.color != null) params.color = spec.color;
+  if ('metalness' in spec && spec.metalness != null) params.metalness = spec.metalness;
+  if ('roughness' in spec && spec.roughness != null) params.roughness = spec.roughness;
+  if ('ior' in spec && spec.ior != null) params.ior = spec.ior;
+  if ('transmission' in spec && spec.transmission != null) params.transmission = spec.transmission;
+  if ('clearcoat' in spec && spec.clearcoat != null) params.clearcoat = spec.clearcoat;
+  if ('emissive' in spec && spec.emissive != null) {
+    params.emissive = new THREE.Color(spec.emissive[0] ?? 0, spec.emissive[1] ?? 0, spec.emissive[2] ?? 0);
+  }
+  // Load all texture maps in parallel, await before constructing the material.
+  const texEntries = await Promise.all(
+    TEXTURE_KEYS
+      .filter((k) => k in spec && spec[k])
+      .map(async (k) => [k, await _loadTextureFromDataURI(spec[k])]),
+  );
+  for (const [k, tex] of texEntries) {
+    if (tex) {
+      if (k !== 'map' && k !== 'emissiveMap') tex.colorSpace = THREE.NoColorSpace;
+      params[k] = tex;
+    }
+  }
+  return new THREE.MeshPhysicalMaterial(params);
+}
+
+async function main() {
+  const resp = await fetch(specUrl);
+  const raw = await resp.json();
+  // Accept either {threejs: {...}} or {items: [{threejs: {...}, ...}]}
+  const threejs = raw.threejs || (raw.items && raw.items[0] && raw.items[0].threejs);
+  if (!threejs) throw new Error('spec missing threejs material dict');
+
+  // Load shader ball GLB once. build123d uses meters; scale m→mm.
+  // build123d's export_gltf already converts its Z-up to glTF/Three.js
+  // Y-up convention — DO NOT add a manual rotation (was a bug; matches
+  // pymat's visual_render.html which also only scales without rotating).
+  const gltf = await new Promise((resolve, reject) => {
+    new GLTFLoader().load('shader_ball.glb', resolve, undefined, reject);
+  });
+  const shaderBall = gltf.scene;
+  shaderBall.scale.set(1000, 1000, 1000);
+
+  // Await: textures must be GPU-resident before the warmup renders, else
+  // toDataURL captures a stale frame (root cause of byte-identical buckets
+  // diagnosed in #385).
+  const mat = await _buildMaterial(threejs);
+  shaderBall.traverse((child) => {
+    if (child.isMesh) child.material = mat;
+  });
+  scene.add(shaderBall);
+
+  // Camera positioning — bernhard's three-cad-viewer formula adapted
+  // for our Y-up post-glTF coords:
+  //   bb_radius = max(boundingSphere.radius, |bbox.center|)
+  //   distance = 5 * bb_radius, lookAt = bbox.center
+  //   direction = (0.3, 0.4, 1) normalized — ~20° elevation, slight
+  //   3/4 horizontal, looking from +Z (front) at the ball. Matches
+  //   bernhard's mat-vis#285 screenshot view (less elevated than the
+  //   viewer's "iso" default).
+  const bbox = new THREE.Box3().setFromObject(shaderBall);
+  const center = bbox.getCenter(new THREE.Vector3());
+  const sphere = new THREE.Sphere();
+  bbox.getBoundingSphere(sphere);
+  const bbRadius = Math.max(sphere.radius, center.length());
+  const viewDir = new THREE.Vector3(0.7, 0.55, 0.45).normalize();
+  camera.position.copy(center).addScaledVector(viewDir, 5 * bbRadius);
+  camera.near = Math.max(0.1, 0.01 * bbRadius);
+  camera.far = 100 * bbRadius;
+  camera.updateProjectionMatrix();
+  camera.lookAt(center);
+
+  // 3 warmup renders for shader compile + PBR convergence (textures are
+  // already GPU-resident at this point — see _buildMaterial await).
+  for (let i = 0; i < 3; i++) renderer.render(scene, camera);
+  console.log(`thumb render ready (bbRadius=${bbRadius.toFixed(1)})`);
+  setTimeout(() => { window.__renderComplete = true; }, 800);
+}
+
+main().catch((err) => {
+  console.error('thumb render failed:', err);
+  window.__renderComplete = true;
+  window.__renderError = String(err);
+});
+</script>
+</body>
+</html>
