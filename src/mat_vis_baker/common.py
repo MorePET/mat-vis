@@ -456,6 +456,11 @@ class PBRBlock:
     # routes these to KHR_materials_specular / _volume / _dispersion /
     # _clearcoat extensions for glTF and to MeshPhysicalMaterial native
     # properties for Three.js. py-mat #100.
+    # Clearcoat enabled/disabled switch (#396). Sibling of
+    # ``clearcoat_roughness`` — without this, consumers can't tell when
+    # clearcoat is intended (the roughness defaults to 0.1 for the whole
+    # gpuopen corpus regardless of whether ``coat`` is authored).
+    clearcoat: float | None = None  # <standard_surface>.coat
     clearcoat_roughness: float | None = None  # <standard_surface>.coat_roughness
     specular_intensity: float | None = None  # <standard_surface>.specular
     specular_color: list[float] | None = None  # <standard_surface>.specular_color, LINEAR RGB

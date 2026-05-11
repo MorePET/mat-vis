@@ -245,11 +245,13 @@ def test_lossy_coat_inputs_logged_and_dropped(caplog):
     # noise, not signal. Capture at DEBUG so the test still observes.
     with caplog.at_level(logging.DEBUG, logger="mat-vis-baker.gpuopen-scalars"):
         pbr = parse_standard_surface_scalars(FIXTURE_LOSSY_COAT, material_id="m-coat")
-    # Coat amount has no PBRBlock home — verify NOT smuggled into any field.
     assert pbr.color_rgb == [0.5, 0.5, 0.5]
     msgs = [rec.message for rec in caplog.records]
-    assert any("coat=0.8" in m for m in msgs)
-    # coat_roughness is now extracted into pbr.clearcoat_roughness (#340).
+    # coat is now extracted into pbr.clearcoat (#396) — it's the on/off
+    # switch for KHR_materials_clearcoat. No longer logged as lossy.
+    assert pbr.clearcoat == 0.8
+    assert not any("coat=0.8" in m for m in msgs)
+    # coat_roughness is also extracted into pbr.clearcoat_roughness (#340).
     assert pbr.clearcoat_roughness == 0.1
     # sheen=0.0 should NOT be logged (zero is not lossy).
     assert not any("sheen=" in m for m in msgs)
