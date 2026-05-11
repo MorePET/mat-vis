@@ -1,23 +1,24 @@
-"""Bake-side extraction tests for #340 / #396 / #406 / #409 — full MeshPhysicalMaterial coverage.
+"""Bake-side extraction tests for #340 / #396 / #406 / #407 / #409 — full MeshPhysicalMaterial coverage.
 
 Scalar fields extracted from ``<standard_surface>``:
-- coat                   → clearcoat (float, #396)
-- coat_roughness         → clearcoat_roughness (float, #340)
-- specular               → specular_intensity (float, #340)
-- specular_color         → specular_color (color3, linear, #340)
-- transmission_dispersion → dispersion (float, #340)
-- transmission_depth     → thickness (float, only when transmission > 0, #340)
-- subsurface             → subsurface (float, #409)
-- subsurface_color       → subsurface_color (color3, linear, #409)
-- subsurface_radius      → subsurface_radius (color3, per-channel mfp, #409)
-- emission               → emission (float, #406 / #405 Phase 3a)
-- emission_color         → emission_color (color3, linear, #406 / #405 Phase 3a)
+- coat                   -> clearcoat (float, #396)
+- coat_roughness         -> clearcoat_roughness (float, #340)
+- specular               -> specular_intensity (float, #340)
+- specular_color         -> specular_color (color3, linear, #340)
+- transmission_dispersion -> dispersion (float, #340)
+- transmission_depth     -> thickness (float, only when transmission > 0, #340)
+- subsurface             -> subsurface (float, #409)
+- subsurface_color       -> subsurface_color (color3, linear, #409)
+- subsurface_radius      -> subsurface_radius (color3, per-channel mfp, #409)
+- emission               -> emission (float, #406 / #405 Phase 3a)
+- emission_color         -> emission_color (color3, linear, #406)
+- sheen                  -> sheen (float, #407 / #405 Phase 3b)
+- sheen_color            -> sheen_color (color3, linear, #407)
+- sheen_roughness        -> sheen_roughness (float, #407)
 
-All extracted from <standard_surface> direct `value=` attributes or
-1-hop nodegraph→<constant> chains. Survey of 454 gpuopen materials
-confirms each input is authored ~80-95% of the time; specular_color
-is 94% non-default; coat is 3/454 (Car Paint family); subsurface
-is 13/454 with ``subsurface > 0`` (wax, resin, semi-translucent).
+Audit at v2026.04.99-tst-full-369: coat is 3/454 (Car Paint family);
+subsurface is 13/454 (wax, resin); emission/sheen are 0/3160 today.
+Schema-adds are forward-compatible for future authoring.
 """
 
 from __future__ import annotations
@@ -465,6 +466,126 @@ class TestEmission:
         assert pbr.emission_color == pytest.approx([0.8, 0.4, 0.2])
 
 
+class TestSheen:
+    """``sheen`` factor + ``sheen_color`` + ``sheen_roughness`` extraction
+    (#407) — KHR_materials_sheen for velvet/satin/fabric retroreflective
+    edge backscatter. Audit at v2026.04.99: polyhaven authors the
+    defaults (0/(1,1,1)/0.3) on all 757 entries, ambientcg never authors
+    the inputs, gpuopen 0/454 entries with sheen>0. The schema-add is
+    forward-compatible for fabric collections at higher poly_count and
+    for future MaterialX/standard_surface corpora."""
+
+    def test_sheen_authored_non_default(self) -> None:
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="sheen" type="float" value="0.8"/>')
+        )
+        assert pbr.sheen == pytest.approx(0.8)
+
+    def test_sheen_default_zero_extracted(self) -> None:
+        # 757/757 polyhaven entries author sheen=0.0 — extracting it
+        # confirms provenance. Adapter suppresses the spec-default
+        # KHR_materials_sheen entry.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="sheen" type="float" value="0.0"/>')
+        )
+        assert pbr.sheen == pytest.approx(0.0)
+
+    def test_sheen_unset_stays_none(self) -> None:
+        pbr = parse_standard_surface_scalars(_wrap())
+        assert pbr.sheen is None
+        assert pbr.sheen_color is None
+        assert pbr.sheen_roughness is None
+
+    def test_sheen_color_authored_tinted(self) -> None:
+        # Author-tinted velvet — e.g. blue velvet with full-magnitude
+        # sheen but a colored sheenColorFactor.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="sheen_color" type="color3" value="0.2, 0.4, 0.9"/>')
+        )
+        assert pbr.sheen_color == pytest.approx([0.2, 0.4, 0.9])
+
+    def test_sheen_color_default_white(self) -> None:
+        # Polyhaven defaults: sheen_color=(1,1,1). Adapter passes
+        # through (Three.js sheenColor defaults to white anyway).
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="sheen_color" type="color3" value="1, 1, 1"/>')
+        )
+        assert pbr.sheen_color == pytest.approx([1.0, 1.0, 1.0])
+
+    def test_sheen_roughness_authored(self) -> None:
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="sheen_roughness" type="float" value="0.5"/>')
+        )
+        assert pbr.sheen_roughness == pytest.approx(0.5)
+
+    def test_sheen_roughness_default_extracted(self) -> None:
+        # MaterialX default for sheen_roughness is 0.3 (polyhaven ships
+        # this value on all 757 entries). Extracted as authored.
+        pbr = parse_standard_surface_scalars(
+            _wrap('<input name="sheen_roughness" type="float" value="0.3"/>')
+        )
+        assert pbr.sheen_roughness == pytest.approx(0.3)
+
+    def test_all_three_sheen_fields_together(self) -> None:
+        # Fabric-class author: sheen=1.0, blue tint, soft halo.
+        pbr = parse_standard_surface_scalars(
+            _wrap(
+                '<input name="sheen" type="float" value="1.0"/>',
+                '<input name="sheen_color" type="color3" value="0.3, 0.5, 1.0"/>',
+                '<input name="sheen_roughness" type="float" value="0.7"/>',
+            )
+        )
+        assert pbr.sheen == pytest.approx(1.0)
+        assert pbr.sheen_color == pytest.approx([0.3, 0.5, 1.0])
+        assert pbr.sheen_roughness == pytest.approx(0.7)
+
+    def test_sheen_texture_bound_stays_none(self) -> None:
+        # When ``sheen`` is graph-bound to an <image> (procedural mask),
+        # the rigorous scalar is None — consistent with metalness/coat
+        # texture-bound handling. The baker carries texture paths
+        # separately; the field stays None.
+        mtlx = """<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="NG_SHEEN">
+    <image name="sheen_img" type="float">
+      <input name="file" type="filename" value="sheen.png"/>
+    </image>
+    <output name="sheen_out" type="float" nodename="sheen_img"/>
+  </nodegraph>
+  <standard_surface name="SR_T" type="surfaceshader">
+    <input name="sheen" type="float" output="sheen_out" nodegraph="NG_SHEEN"/>
+  </standard_surface>
+  <surfacematerial name="T" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_T"/>
+  </surfacematerial>
+</materialx>
+"""
+        pbr = parse_standard_surface_scalars(mtlx)
+        assert pbr.sheen is None
+
+    def test_sheen_graph_constant_promoted(self) -> None:
+        # 1-hop nodegraph → <constant> resolution applies to ``sheen``
+        # the same way it does for every other _FLOAT_INPUT.
+        mtlx = """<?xml version="1.0"?>
+<materialx version="1.38">
+  <nodegraph name="NG_SHEEN">
+    <constant name="sheen_const" type="float">
+      <input name="value" type="float" value="0.6"/>
+    </constant>
+    <output name="sheen_out" type="float" nodename="sheen_const"/>
+  </nodegraph>
+  <standard_surface name="SR_T" type="surfaceshader">
+    <input name="sheen" type="float" output="sheen_out" nodegraph="NG_SHEEN"/>
+  </standard_surface>
+  <surfacematerial name="T" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SR_T"/>
+  </surfacematerial>
+</materialx>
+"""
+        pbr = parse_standard_surface_scalars(mtlx)
+        assert pbr.sheen == pytest.approx(0.6)
+
+
 class TestPBRBlockFieldsExist:
     def test_new_fields_default_to_none(self) -> None:
         from mat_vis_baker.common import PBRBlock
@@ -484,6 +605,10 @@ class TestPBRBlockFieldsExist:
             # Emission (#406) — additive, default-None.
             "emission",
             "emission_color",
+            # KHR_materials_sheen — velvet/satin/fabric (#407 / #405 Phase 3b).
+            "sheen",
+            "sheen_color",
+            "sheen_roughness",
         ):
             assert getattr(pbr, fname) is None, f"{fname} should default to None"
 
@@ -502,6 +627,9 @@ class TestPBRBlockFieldsExist:
         pbr.subsurface_radius = [1.0, 0.2, 0.1]
         pbr.emission = 2.5
         pbr.emission_color = [1.0, 0.5, 0.0]
+        pbr.sheen = 1.0
+        pbr.sheen_color = [0.3, 0.5, 1.0]
+        pbr.sheen_roughness = 0.7
         assert pbr.clearcoat == 1.0
         assert pbr.clearcoat_roughness == 0.2
         assert pbr.specular_intensity == 0.8
@@ -513,3 +641,6 @@ class TestPBRBlockFieldsExist:
         assert pbr.subsurface_radius == [1.0, 0.2, 0.1]
         assert pbr.emission == 2.5
         assert pbr.emission_color == [1.0, 0.5, 0.0]
+        assert pbr.sheen == 1.0
+        assert pbr.sheen_color == [0.3, 0.5, 1.0]
+        assert pbr.sheen_roughness == 0.7

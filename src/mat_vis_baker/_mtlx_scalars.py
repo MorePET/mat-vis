@@ -56,19 +56,13 @@ _FLOAT_INPUTS: dict[str, str] = {
     # factor is silently dropped — every entry looks the same to
     # consumers reading the scalar block.
     "coat": "clearcoat",  # KHR_materials_clearcoat.clearcoatFactor
-    # Subsurface scattering factor (#409). 13 gpuopen entries author
-    # ``subsurface > 0`` (wax-like, resin, semi-transparent); dropping
-    # this made wax / jade / skin render as opaque dielectric. Wired
-    # for glTF via the (draft) subsurface extension; Three.js adapter
-    # is intentionally a no-op (MeshPhysicalMaterial has no SSS field).
+    # Subsurface (#409) + emission (#406 / #405 Phase 3a).
     "subsurface": "subsurface",
-    # Emission factor (#406 / #405 Phase 3a). Without this, materials
-    # authoring ``emission > 0`` (LED signs, glowing decals, hot metals,
-    # screens) render as inert. Adapter wiring routes values ≤ 1 to
-    # Three.js ``emissive`` / glTF ``emissiveFactor``; values > 1 split
-    # into ``emissiveIntensity`` (Three.js HDR) / KHR_materials_emissive_strength
-    # (glTF HDR) with the color factor clamped to [0, 1].
     "emission": "emission",  # KHR_materials_emissive_strength.emissiveStrength (factor)
+    # Sheen factor + roughness (#407 / #405 Phase 3b). KHR_materials_sheen
+    # — velvet/satin/fabric backscatter.
+    "sheen": "sheen",  # KHR_materials_sheen.sheenColorFactor magnitude
+    "sheen_roughness": "sheen_roughness",  # KHR_materials_sheen.sheenRoughnessFactor
 }
 
 # Color3 inputs. Same direct value=/1-hop graph→constant promotion as
@@ -78,14 +72,12 @@ _COLOR3_INPUTS: dict[str, str] = {
     # mtlx input name -> PBRBlock attribute
     "specular_color": "specular_color",  # KHR_materials_specular.specularColorFactor
     # Subsurface scattering color + per-channel mean-free-path (#409).
-    # Both are emitted unconditionally when authored; the adapter
-    # decides whether the SSS extension fires (only when subsurface>0).
     "subsurface_color": "subsurface_color",
     "subsurface_radius": "subsurface_radius",
-    # Emission color (#406). Sibling of ``emission`` factor — RGB tint
-    # the emission factor multiplies. Authored linear per MaterialX 1.38;
-    # glTF ``emissiveFactor`` is also linear so no colorspace boundary.
-    "emission_color": "emission_color",  # glTF emissiveFactor RGB (linear)
+    # Emission color (#406) — linear RGB.
+    "emission_color": "emission_color",
+    # Sheen tint (#407) — KHR_materials_sheen.sheenColorFactor.
+    "sheen_color": "sheen_color",
 }
 
 # Inputs that have no PBRBlock home today. Non-zero values are dropped
@@ -93,9 +85,6 @@ _COLOR3_INPUTS: dict[str, str] = {
 _LOSSY_INPUTS: tuple[str, ...] = (
     "coat_IOR",
     "coat_color",
-    "sheen",
-    "sheen_roughness",
-    "sheen_color",
     "thin_film_thickness",
 )
 

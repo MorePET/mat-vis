@@ -55,6 +55,11 @@ def _to_data_uri(png_bytes: bytes) -> str:
 _KHR_IOR_DEFAULT = 1.5
 _KHR_TRANSMISSION_DEFAULT = 0.0
 _KHR_CLEARCOAT_DEFAULT = 0.0
+# KHR_materials_sheen default — sheenColorFactor magnitude 0.0
+# (= no sheen). Mirrors the clearcoat suppression pattern: emitting a
+# no-op extension entry that matches the spec default just bloats glTF
+# output. #407.
+_KHR_SHEEN_DEFAULT = 0.0
 
 
 def _ior_at_default(ior: float | None) -> bool:
@@ -83,47 +88,35 @@ def _resolve_emission_split(
     """Resolve ``emission`` factor + ``emission_color`` into the
     (color, strength) pair Three.js/glTF HDR emission needs (#406).
 
-    Returns ``None`` when the material is non-emissive — neither
-    ``emission`` nor ``emission_color`` is authored, OR ``emission``
-    is authored at the spec default 0.0. The caller suppresses the
-    output field entirely in that case.
-
-    Otherwise returns ``(emissive_color, strength)`` where:
-
-    - ``emissive_color`` is ``emission_color * min(emission, 1)``, clamped
-      to [0, 1]. Falls back to white (``[1, 1, 1]``) when emission_color
-      is unauthored — matches MaterialX 1.38 ``<standard_surface>``
-      defaults. Goes into Three.js ``emissive`` / glTF ``emissiveFactor``.
-    - ``strength`` is ``max(emission, 1.0)`` — the HDR multiplier. Equal
-      to 1.0 for SDR cases (caller suppresses), > 1 for HDR (caller
-      emits Three.js ``emissiveIntensity`` / glTF
-      KHR_materials_emissive_strength).
-
-    Adapter contract: ``emission`` is the canonical scalar HDR factor
-    on the substrate (PBRBlock.emission, #406). The legacy ``emissive``
-    key (RGB triple, no factor) is read elsewhere — when both arrive
-    in the scalars dict, ``emission`` wins because it carries the HDR
-    information the legacy key cannot express.
+    Returns ``None`` when the material is non-emissive. Otherwise
+    returns ``(emissive_color, strength)`` where emissive_color =
+    ``emission_color * min(emission, 1)`` clamped to [0,1], and
+    strength = ``max(emission, 1.0)`` (caller emits HDR strength
+    extension when > 1).
     """
     emission = scalars.get("emission")
     emission_color = scalars.get("emission_color")
     if emission is None and emission_color is None:
         return None
-    # Treat a None factor with an authored color as "factor=1.0" — the
-    # color was authored intentionally; ignoring it because the factor
-    # is None would silently drop authored intent.
     factor = 1.0 if emission is None else float(emission)
     if factor <= 0.0:
         return None
     color = list(emission_color) if emission_color is not None else [1.0, 1.0, 1.0]
     if len(color) < 3:
         return None
-    # Clamp color to [0,1]; multiply by min(factor, 1) so the SDR
-    # component lives inside Three.js Color / glTF emissiveFactor.
     sdr = min(factor, 1.0)
     emissive_color = [max(0.0, min(1.0, float(c) * sdr)) for c in color[:3]]
     strength = max(factor, 1.0)
     return emissive_color, strength
+
+
+def _sheen_at_default(s: float | None) -> bool:
+    """True if ``s`` is None or matches the KHR_materials_sheen default (0.0).
+
+    Polyhaven authors sheen=0 on 757/757 entries — without this
+    suppression every entry would ship the extension. #407.
+    """
+    return s is None or math.isclose(s, _KHR_SHEEN_DEFAULT, abs_tol=1e-9)
 
 
 def _color_hex_to_int(hex_str: str) -> int:
@@ -432,9 +425,18 @@ def to_threejs(
     # mat-vis#409: Three.js MeshPhysicalMaterial has no native SSS field.
     # subsurface / subsurface_color / subsurface_radius land in the
     # substrate for glTF and future use; the Three.js adapter is
-    # intentionally a no-op here. Future workaround if a consumer asks:
-    # approximate via ``transmission`` + ``thickness`` (dense scattering
-    # cue), but that lies about the per-channel mean-free-path. See #409.
+    # intentionally a no-op here.
+
+    # KHR_materials_sheen → MeshPhysicalMaterial.sheen / sheenColor /
+    # sheenRoughness (#407 / #405 Phase 3b). Only emit when sheen > 0 —
+    # default values would otherwise pollute every non-fabric material.
+    sheen = scalars.get("sheen")
+    if not _sheen_at_default(sheen):
+        result["sheen"] = sheen
+        sheen_color = scalars.get("sheen_color")
+        result["sheenColor"] = list(sheen_color) if sheen_color is not None else [1.0, 1.0, 1.0]
+        sheen_roughness = scalars.get("sheen_roughness")
+        result["sheenRoughness"] = sheen_roughness if sheen_roughness is not None else 1.0
 
     # Textures as data URIs
     for channel, prop in _THREEJS_TEX_MAP.items():
@@ -592,21 +594,9 @@ def to_gltf(
         }
 
     # KHR_materials_subsurface (#409). Draft / unratified Khronos
-    # extension — the original proposal (PR KhronosGroup/glTF#1928,
-    # closed) used ``scatterColor`` + ``scatterDistance``; the current
-    # successor draft (PR #2453, ``KHR_materials_volume_scatter``) uses
-    # ``scatterAlbedo`` + a different parameterization. Neither shape
-    # round-trips MaterialX's ``subsurface`` / ``subsurface_color`` /
-    # ``subsurface_radius`` triplet faithfully, so we emit the
-    # MaterialX-faithful triplet under the canonical-but-unratified
-    # ``KHR_materials_subsurface`` name with the issue-specified
-    # ``subsurfaceFactor`` / ``subsurfaceColorFactor`` /
-    # ``subsurfaceRadiusFactor`` keys. Consumers that don't recognize
-    # the extension fall back to opaque-dielectric — exactly the
-    # status quo. Three.js consumers see nothing (no MeshPhysical
-    # SSS field; see adapter no-op above). Suppressed when the factor
-    # is 0 or None, mirroring the clearcoat / transmission /
-    # dispersion suppression pattern.
+    # extension — emit MaterialX-faithful triplet under the canonical
+    # name. Consumers that don't recognize the extension fall back to
+    # opaque-dielectric.
     subsurface = scalars.get("subsurface")
     if subsurface is not None and subsurface > 0.0:
         sss_ext: dict = {"subsurfaceFactor": subsurface}
@@ -615,11 +605,23 @@ def to_gltf(
             sss_ext["subsurfaceColorFactor"] = list(subsurface_color)
         subsurface_radius = scalars.get("subsurface_radius")
         if subsurface_radius is not None:
-            # MaterialX subsurface_radius is per-channel mean-free-path
-            # (length per RGB channel, typically mm). glTF radius factor
-            # carries identical semantics — emit verbatim, no conversion.
             sss_ext["subsurfaceRadiusFactor"] = list(subsurface_radius)
         material.setdefault("extensions", {})["KHR_materials_subsurface"] = sss_ext
+
+    # KHR_materials_sheen — fabric/velvet/satin retroreflective edge
+    # backscatter (#407 / #405 Phase 3b). Emit only when sheen > 0.
+    # sheenColorFactor = sheen * sheen_color per spec convention.
+    sheen = scalars.get("sheen")
+    if not _sheen_at_default(sheen):
+        sheen_color = scalars.get("sheen_color")
+        if sheen_color is None:
+            sheen_color = [1.0, 1.0, 1.0]
+        scf = [float(sheen) * float(c) for c in list(sheen_color)[:3]]
+        sheen_ext: dict = {"sheenColorFactor": scf}
+        sheen_roughness = scalars.get("sheen_roughness")
+        if sheen_roughness is not None:
+            sheen_ext["sheenRoughnessFactor"] = sheen_roughness
+        material.setdefault("extensions", {})["KHR_materials_sheen"] = sheen_ext
 
     # Opacity texture — glTF 2.0 has no standalone alphaMap slot. Alpha
     # must live in baseColorTexture's alpha channel + alphaMode/alphaCutoff
