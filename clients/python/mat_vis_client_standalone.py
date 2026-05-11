@@ -1446,6 +1446,12 @@ class MatVisClient:
         "clearcoat_roughness",
         "specular_intensity",
         "emissive",
+        # Subsurface scattering (#409). glTF adapter emits the (draft)
+        # ``KHR_materials_subsurface`` extension; Three.js adapter is a
+        # documented no-op (no native MeshPhysical SSS field).
+        "subsurface",
+        "subsurface_color",
+        "subsurface_radius",
     )
 
     def _scalars_for(self, source: str, material_id: str) -> dict:

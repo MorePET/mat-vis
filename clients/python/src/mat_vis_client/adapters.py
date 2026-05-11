@@ -367,6 +367,13 @@ def to_threejs(
     if scalars.get("dispersion") is not None:
         result["dispersion"] = scalars["dispersion"]
 
+    # mat-vis#409: Three.js MeshPhysicalMaterial has no native SSS field.
+    # subsurface / subsurface_color / subsurface_radius land in the
+    # substrate for glTF and future use; the Three.js adapter is
+    # intentionally a no-op here. Future workaround if a consumer asks:
+    # approximate via ``transmission`` + ``thickness`` (dense scattering
+    # cue), but that lies about the per-channel mean-free-path. See #409.
+
     # Textures as data URIs
     for channel, prop in _THREEJS_TEX_MAP.items():
         if channel in textures:
@@ -502,6 +509,36 @@ def to_gltf(
         material.setdefault("extensions", {})["KHR_materials_dispersion"] = {
             "dispersion": dispersion
         }
+
+    # KHR_materials_subsurface (#409). Draft / unratified Khronos
+    # extension — the original proposal (PR KhronosGroup/glTF#1928,
+    # closed) used ``scatterColor`` + ``scatterDistance``; the current
+    # successor draft (PR #2453, ``KHR_materials_volume_scatter``) uses
+    # ``scatterAlbedo`` + a different parameterization. Neither shape
+    # round-trips MaterialX's ``subsurface`` / ``subsurface_color`` /
+    # ``subsurface_radius`` triplet faithfully, so we emit the
+    # MaterialX-faithful triplet under the canonical-but-unratified
+    # ``KHR_materials_subsurface`` name with the issue-specified
+    # ``subsurfaceFactor`` / ``subsurfaceColorFactor`` /
+    # ``subsurfaceRadiusFactor`` keys. Consumers that don't recognize
+    # the extension fall back to opaque-dielectric — exactly the
+    # status quo. Three.js consumers see nothing (no MeshPhysical
+    # SSS field; see adapter no-op above). Suppressed when the factor
+    # is 0 or None, mirroring the clearcoat / transmission /
+    # dispersion suppression pattern.
+    subsurface = scalars.get("subsurface")
+    if subsurface is not None and subsurface > 0.0:
+        sss_ext: dict = {"subsurfaceFactor": subsurface}
+        subsurface_color = scalars.get("subsurface_color")
+        if subsurface_color is not None:
+            sss_ext["subsurfaceColorFactor"] = list(subsurface_color)
+        subsurface_radius = scalars.get("subsurface_radius")
+        if subsurface_radius is not None:
+            # MaterialX subsurface_radius is per-channel mean-free-path
+            # (length per RGB channel, typically mm). glTF radius factor
+            # carries identical semantics — emit verbatim, no conversion.
+            sss_ext["subsurfaceRadiusFactor"] = list(subsurface_radius)
+        material.setdefault("extensions", {})["KHR_materials_subsurface"] = sss_ext
 
     # Opacity texture — glTF 2.0 has no standalone alphaMap slot. Alpha
     # must live in baseColorTexture's alpha channel + alphaMode/alphaCutoff
