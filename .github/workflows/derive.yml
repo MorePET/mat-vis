@@ -243,6 +243,14 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # kind=thumb needs ``bake/preview/assets/shader_ball.glb`` resolved
+          # from git-lfs (5.5MB GLB). Default checkout fetches only the LFS
+          # pointer file; renderer chokes inside GLTFLoader on the
+          # ``version https://git-lfs...`` text (live run 25670744187:
+          # 0/50 baked, all materials failed with the same JSON parse
+          # error). LFS pull adds <1s; cheap for resize/ktx2 too.
+          lfs: true
 
       - name: Dagger shell-safety lint (#61)
         run: python3 scripts/check-dagger-shell-safety.py
