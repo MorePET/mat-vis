@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -25,6 +26,7 @@ import pytest
 from PIL import Image
 
 from mat_vis_baker.hf_derive_per_file import (
+    _derive_one_material,
     _extend_available_tiers,
     _resize_png,
     derive_ktx2_tier,
@@ -783,4 +785,130 @@ class TestDeriveBytesAwareBatching:
         # 3 unskipped → batch_size=2 → 2+1 → 2 texture commits.
         assert len(texture_calls) == 2, (
             f"expected 2 texture commits across 3 unskipped materials; got {len(texture_calls)}"
+        )
+
+
+# ── #418: parallel per-channel transcoding ─────────────────────────
+
+
+class TestDeriveOneMaterialParallel:
+    """#418 — :func:`_derive_one_material` runs channels concurrently
+    via :class:`concurrent.futures.ThreadPoolExecutor` and sorts ops by
+    ``path_in_repo`` before returning. Threads collect ops or ``None``;
+    a per-channel failure does not propagate to siblings."""
+
+    _COMMON_KW = dict(
+        repo_id="gerchowl/mat-vis-tst",
+        release_tag="v0.0.0-test",
+        source="polyhaven",
+        source_tier="1k",
+        target_tier="512",
+        material_id="mat_0",
+        target_ext="png",
+        token=None,
+    )
+
+    def test_derive_one_material_parallel_ordering(self) -> None:
+        """Channels with randomised per-channel sleep finish in arbitrary
+        order, but the returned ops MUST be sorted by ``path_in_repo``
+        for deterministic batch shape downstream."""
+        import random
+        import threading
+
+        channels = ["color", "normal", "roughness", "metalness", "ao"]
+
+        # Distinct PNG bytes per channel — magic-byte verify expects PNG;
+        # we let transform return KTX2-bytes-shaped output isn't needed
+        # because target_ext='png' triggers the PNG re-verify path.
+        png_per_channel = {ch: _make_png(8 + i) for i, ch in enumerate(channels)}
+
+        def _get(url, *, token=None, timeout=120):  # noqa: ARG001
+            # URL ends in /<channel>.png — extract.
+            ch = url.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            return png_per_channel[ch]
+
+        finish_order: list[str] = []
+        finish_lock = threading.Lock()
+
+        def _transform(raw: bytes) -> bytes:
+            # Random per-channel sleep guarantees non-deterministic
+            # finish order. Bounded so the suite stays fast.
+            time.sleep(random.uniform(0.01, 0.05))
+            # Return PNG-magic bytes so the post-transform verify passes.
+            with finish_lock:
+                finish_order.append(raw[:1].hex())
+            return PNG_MAGIC + raw[:8]
+
+        with patch("mat_vis_baker.hf_derive_per_file._http_get", side_effect=_get):
+            ops = _derive_one_material(channels=channels, transform=_transform, **self._COMMON_KW)
+
+        # All 5 channels produced an op.
+        assert len(ops) == 5
+        # Path order: sorted by path_in_repo regardless of worker finish order.
+        paths = [op.path_in_repo for op in ops]
+        assert paths == sorted(paths), (paths, finish_order)
+        # And specifically these are the canonical sorted paths.
+        expected = sorted(f"polyhaven/512/mat_0/{ch}.png" for ch in channels)
+        assert paths == expected
+
+    def test_derive_one_material_per_channel_failure_isolated(self) -> None:
+        """One channel's GET raises → that op is dropped, the other
+        N-1 channels still produce ops. Exception must NOT propagate."""
+        import time as _time
+
+        channels = ["color", "normal", "roughness", "metalness", "ao"]
+        png = _make_png(16)
+
+        def _get(url, *, token=None, timeout=120):  # noqa: ARG001
+            if url.endswith("/normal.png"):
+                raise RuntimeError("simulated source GET failure for normal")
+            return png
+
+        def _transform(raw: bytes) -> bytes:
+            _time.sleep(0.005)
+            return PNG_MAGIC + raw[:8]
+
+        with patch("mat_vis_baker.hf_derive_per_file._http_get", side_effect=_get):
+            ops = _derive_one_material(channels=channels, transform=_transform, **self._COMMON_KW)
+
+        # 5 channels, 1 failed → 4 ops.
+        assert len(ops) == 4
+        paths = {op.path_in_repo for op in ops}
+        assert "polyhaven/512/mat_0/normal.png" not in paths
+        # Siblings landed.
+        assert "polyhaven/512/mat_0/color.png" in paths
+        assert "polyhaven/512/mat_0/roughness.png" in paths
+
+    def test_derive_one_material_parallel_wall_time(self) -> None:
+        """Sanity bench (P1 from #418): N=5 channels × 0.3s per channel
+        runs in sub-linear wall time. With 4 workers we expect ~2 waves
+        (4 + 1) ≈ 0.6s + overhead — comfortably under the 5 × 0.3 = 1.5s
+        serial baseline. Asserts wall < N×t/2 with generous margin."""
+        import time as _time
+
+        channels = ["color", "normal", "roughness", "metalness", "ao"]
+        png = _make_png(16)
+        per_channel_sleep = 0.3
+
+        def _get(url, *, token=None, timeout=120):  # noqa: ARG001
+            return png
+
+        def _transform(raw: bytes) -> bytes:
+            _time.sleep(per_channel_sleep)
+            return PNG_MAGIC + raw[:8]
+
+        with patch("mat_vis_baker.hf_derive_per_file._http_get", side_effect=_get):
+            t0 = _time.monotonic()
+            ops = _derive_one_material(channels=channels, transform=_transform, **self._COMMON_KW)
+            wall = _time.monotonic() - t0
+
+        assert len(ops) == 5
+        serial_baseline = len(channels) * per_channel_sleep  # 1.5s
+        # Sub-linear bar: parallel run must be strictly under half the
+        # serial baseline. On a typical >=2-core machine this clears
+        # easily (~0.6-0.7s). If CI runs on a single-core container the
+        # margin may bite — bump max_workers logic, not this assertion.
+        assert wall < serial_baseline / 2, (
+            f"wall={wall:.3f}s, serial baseline={serial_baseline:.3f}s — "
+            f"expected sub-linear (<{serial_baseline / 2:.3f}s)"
         )

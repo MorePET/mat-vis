@@ -37,9 +37,11 @@ and ``shard_utils`` entirely, and ADR-0012 forbids reintroducing them.
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import json
 import logging
+import os
 import subprocess
 import tempfile
 import time
@@ -325,6 +327,70 @@ def _all_target_files_present(
     return True
 
 
+def _derive_one_channel(
+    *,
+    repo_id: str,
+    release_tag: str,
+    source: str,
+    source_tier: str,
+    target_tier: str,
+    material_id: str,
+    channel: str,
+    transform: Callable[[bytes], bytes],
+    target_ext: str,
+    token: str | None,
+) -> CommitOperationAdd | None:
+    """Fetch + verify + transform + verify a single channel. Returns the
+    ``CommitOperationAdd`` op on success, or ``None`` on any per-channel
+    failure (the caller treats ``None`` as "skip this channel"). Errors
+    are logged at WARNING — preserving the contract that one bad channel
+    never kills its siblings.
+
+    Extracted from :func:`_derive_one_material` in #418 so the
+    ``ThreadPoolExecutor`` worker has a clean per-channel unit of work.
+    Threads are safe here: ``toktx`` runs as a 1-core subprocess (no GIL
+    contention during the wait) and PIL releases the GIL inside the C
+    extension for resize / encode."""
+    src_url = _resolve_url(
+        repo_id, release_tag, f"{source}/{source_tier}/{material_id}/{channel}.png"
+    )
+    try:
+        raw = _http_get(src_url, token=token)
+    except Exception as e:  # noqa: BLE001
+        log.warning("%s/%s/%s: source GET failed: %s", source, material_id, channel, e)
+        return None
+
+    # Magic-byte verify the source bytes — catches HTML 404 pages
+    # served as 200 on misconfigured tags.
+    try:
+        _verify_png(raw, where=f"source {source}/{source_tier}/{material_id}/{channel}.png")
+    except RuntimeError as e:
+        log.warning("%s", e)
+        return None
+
+    try:
+        out = transform(raw)
+    except Exception as e:  # noqa: BLE001
+        log.warning("%s/%s/%s: transform failed: %s", source, material_id, channel, e)
+        return None
+
+    # Magic-byte verify the produced bytes (PNG for resize, KTX2 for
+    # transcode). Refuses to commit malformed output.
+    try:
+        if target_ext == "png":
+            _verify_png(out, where=f"derived {source}/{target_tier}/{material_id}/{channel}.png")
+        elif target_ext == "ktx2":
+            _verify_ktx2(out, where=f"derived {source}/{target_tier}/{material_id}/{channel}.ktx2")
+    except RuntimeError as e:
+        log.warning("%s", e)
+        return None
+
+    return CommitOperationAdd(
+        path_in_repo=f"{source}/{target_tier}/{material_id}/{channel}.{target_ext}",
+        path_or_fileobj=out,
+    )
+
+
 def _derive_one_material(
     *,
     repo_id: str,
@@ -338,51 +404,58 @@ def _derive_one_material(
     target_ext: str,
     token: str | None,
 ) -> list[CommitOperationAdd]:
-    """Fetch + transform every channel. Returns the list of
+    """Fetch + transform every channel in parallel. Returns the list of
     ``CommitOperationAdd`` ops for this material; empty if every channel
-    fetch or transform failed (caller treats as material-level failure)."""
+    fetch or transform failed (caller treats as material-level failure).
+
+    #418: channels are processed concurrently via
+    :class:`concurrent.futures.ThreadPoolExecutor` — each worker does
+    the full per-channel fetch → verify → transform → verify sequence.
+    ``toktx`` is a 1-core subprocess so threads (rather than processes)
+    suffice: while one channel waits on ``toktx``/HTTP the others can
+    make progress. ``max_workers`` is capped at ``os.cpu_count()`` so
+    we don't fork-bomb a 4-core GHA runner with 7 simultaneous
+    ``toktx`` invocations.
+
+    Ops are sorted by ``path_in_repo`` before return — finish order is
+    non-deterministic under parallelism, but downstream content-drift
+    and ordering tests benefit from a stable commit shape."""
+    if not channels:
+        return []
+
+    max_workers = min(os.cpu_count() or 4, len(channels))
     ops: list[CommitOperationAdd] = []
-    for ch in channels:
-        src_url = _resolve_url(
-            repo_id, release_tag, f"{source}/{source_tier}/{material_id}/{ch}.png"
-        )
-        try:
-            raw = _http_get(src_url, token=token)
-        except Exception as e:  # noqa: BLE001
-            log.warning("%s/%s/%s: source GET failed: %s", source, material_id, ch, e)
-            continue
-
-        # Magic-byte verify the source bytes — catches HTML 404 pages
-        # served as 200 on misconfigured tags.
-        try:
-            _verify_png(raw, where=f"source {source}/{source_tier}/{material_id}/{ch}.png")
-        except RuntimeError as e:
-            log.warning("%s", e)
-            continue
-
-        try:
-            out = transform(raw)
-        except Exception as e:  # noqa: BLE001
-            log.warning("%s/%s/%s: transform failed: %s", source, material_id, ch, e)
-            continue
-
-        # Magic-byte verify the produced bytes (PNG for resize, KTX2 for
-        # transcode). Refuses to commit malformed output.
-        try:
-            if target_ext == "png":
-                _verify_png(out, where=f"derived {source}/{target_tier}/{material_id}/{ch}.png")
-            elif target_ext == "ktx2":
-                _verify_ktx2(out, where=f"derived {source}/{target_tier}/{material_id}/{ch}.ktx2")
-        except RuntimeError as e:
-            log.warning("%s", e)
-            continue
-
-        ops.append(
-            CommitOperationAdd(
-                path_in_repo=f"{source}/{target_tier}/{material_id}/{ch}.{target_ext}",
-                path_or_fileobj=out,
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [
+            pool.submit(
+                _derive_one_channel,
+                repo_id=repo_id,
+                release_tag=release_tag,
+                source=source,
+                source_tier=source_tier,
+                target_tier=target_tier,
+                material_id=material_id,
+                channel=ch,
+                transform=transform,
+                target_ext=target_ext,
+                token=token,
             )
-        )
+            for ch in channels
+        ]
+        for fut in concurrent.futures.as_completed(futures):
+            # Per-channel errors are swallowed inside _derive_one_channel
+            # (logged + return None). Any exception bubbling here would
+            # be a programmer error, not a per-channel failure — let it
+            # propagate so we don't silently commit partial materials.
+            op = fut.result()
+            if op is not None:
+                ops.append(op)
+
+    # Deterministic ordering: sort by path_in_repo so the committed
+    # batch is independent of which worker finished first. Downstream
+    # content-drift tests pin path order; the sort costs O(k log k)
+    # for k≤7 channels — negligible vs. a single toktx invocation.
+    ops.sort(key=lambda op: op.path_in_repo)
     return ops
 
 
