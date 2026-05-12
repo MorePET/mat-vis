@@ -264,3 +264,11 @@ scripts/bootstrap.sh
 # Per-language client lockfiles — generated fresh by their own dev workflows
 clients/python/uv.lock
 clients/rust/Cargo.lock
+
+# GitHub Pages catalog site (#423) — build outputs and JS deps stay local.
+docs/site/node_modules/
+docs/site/build/
+docs/site/dist/
+docs/site/.astro/
+docs/site/public/catalog.json
+docs/site/public/catalog.meta.json

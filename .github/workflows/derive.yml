@@ -170,27 +170,32 @@ jobs:
           #   - `sources` wins when both are set.
           #   - bare legacy `source` (with default `sources=all`) is
           #     promoted to a 1-element matrix for back-compat.
-          #   - "all" expands to the textured trio. physicallybased is
-          #     bake-scalar-only and is never expanded for derive.
+          #   - "all" expands to the textured trio for resize/ktx2 (which
+          #     can't apply to a scalar-only source). For kind=thumb,
+          #     physicallybased renders scalar-only PBR on the shader ball,
+          #     so it IS valid — "all" includes it and explicit selection
+          #     is allowed (#402 + #426 fix).
           sources="$SOURCES_INPUT"
           if [ -n "$SOURCE_LEGACY" ] && [ "$sources" = "all" ]; then
             sources="$SOURCE_LEGACY"
           fi
 
-          python3 - "$sources" <<'PY' >>"$GITHUB_OUTPUT"
+          python3 - "$sources" "${{ inputs.kind }}" <<'PY' >>"$GITHUB_OUTPUT"
           import json, sys
-          raw = sys.argv[1]
+          raw, kind = sys.argv[1], sys.argv[2]
+          textured_trio = ["ambientcg", "polyhaven", "gpuopen"]
           if raw == "all":
-              expanded = ["ambientcg", "polyhaven", "gpuopen"]
+              # thumb can render scalar-only sources; resize/ktx2 cannot.
+              expanded = textured_trio + (["physicallybased"] if kind == "thumb" else [])
           else:
               expanded = [s.strip() for s in raw.split(",") if s.strip()]
           if not expanded:
               raise SystemExit("error: empty sources list after expansion")
           for s in expanded:
-              if s == "physicallybased":
+              if s == "physicallybased" and kind != "thumb":
                   raise SystemExit(
                       "error: physicallybased is bake-only (scalar tier); "
-                      "remove it from `sources` for derive dispatches"
+                      "valid only for kind=thumb in derive dispatches"
                   )
           print(f"sources={json.dumps(expanded)}")
           PY
