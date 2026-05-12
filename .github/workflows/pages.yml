@@ -1,0 +1,128 @@
+# GitHub Pages publisher for the material catalog gallery (#423).
+#
+# Two slots, both deployed to the same `gh-pages` branch via
+# `JamesIves/github-pages-deploy-action@v4`:
+#
+#   - prod: served at `/mat-vis/` from the root of `gh-pages`. Triggered
+#           by `release` events and `workflow_dispatch` (kind=prod).
+#           Fetches data from `gerchowl/mat-vis` at the chosen release tag.
+#   - tst:  served at `/mat-vis/tst/` from the `tst/` subfolder. Only
+#           triggered by `workflow_dispatch` (kind=tst), so operators
+#           can preview a re-bake from `gerchowl/mat-vis-tst` before
+#           promoting it.
+#
+# Coexistence on a single branch:
+#   prod deploy uses `clean-exclude: tst` so the tst preview survives a
+#     prod publish.
+#   tst deploy uses `target-folder: tst` + `clean: true` so it scrubs and
+#     republishes only its own subtree.
+#
+# Concurrency:
+#   per-slot group so prod and tst writers don't race each other on the
+#   shared branch.
+#
+# Permissions:
+#   `contents: write` is sufficient — the deploy action pushes via the
+#   default `GITHUB_TOKEN`, no PAT/secret needed.
+
+name: Pages
+
+on:  # yamllint disable-line rule:truthy
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "Slot to deploy: prod (release tag) or tst (preview)"
+        required: true
+        type: choice
+        options: [prod, tst]
+        default: prod
+      release_tag:
+        description: "HF dataset revision to bake against. Defaults: prod=latest release tag, tst=DEFAULT_TAG."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-deploy:
+    name: Build + deploy (${{ inputs.kind || 'prod' }})
+    runs-on: ubuntu-latest
+    # Per-slot concurrency: the two slots write to the same gh-pages
+    # branch but to disjoint paths, so they must serialize within a
+    # slot but can interleave across slots.
+    concurrency:
+      group: pages-${{ inputs.kind || 'prod' }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve slot config
+        id: slot
+        run: |
+          set -euo pipefail
+          KIND="${{ inputs.kind || 'prod' }}"
+          if [ "$KIND" = "tst" ]; then
+            echo "site_base=/mat-vis/tst/" >> "$GITHUB_OUTPUT"
+            echo "target_folder=tst" >> "$GITHUB_OUTPUT"
+            echo "clean_arg=true" >> "$GITHUB_OUTPUT"
+            echo "clean_exclude=" >> "$GITHUB_OUTPUT"
+            echo "repo_id=gerchowl/mat-vis-tst" >> "$GITHUB_OUTPUT"
+          else
+            echo "site_base=/mat-vis/" >> "$GITHUB_OUTPUT"
+            echo "target_folder=" >> "$GITHUB_OUTPUT"
+            echo "clean_arg=true" >> "$GITHUB_OUTPUT"
+            echo "clean_exclude=tst" >> "$GITHUB_OUTPUT"
+            echo "repo_id=gerchowl/mat-vis" >> "$GITHUB_OUTPUT"
+          fi
+          # Release tag precedence: workflow_dispatch input > release event tag > empty (fetch script picks DEFAULT_TAG).
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ] && [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python (fetch-catalog uses stdlib only)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch catalog from HF substrate
+        run: |
+          set -euo pipefail
+          ARGS=(--repo-id "${{ steps.slot.outputs.repo_id }}")
+          if [ -n "${{ steps.slot.outputs.release_tag }}" ]; then
+            ARGS+=(--release-tag "${{ steps.slot.outputs.release_tag }}")
+          fi
+          python scripts/fetch_catalog.py "${ARGS[@]}"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: docs/site/package-lock.json
+
+      - name: Install site deps
+        working-directory: docs/site
+        run: npm ci || npm install
+
+      - name: Build site
+        working-directory: docs/site
+        env:
+          SITE_BASE: ${{ steps.slot.outputs.site_base }}
+        run: npm run build
+
+      - name: Deploy to gh-pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          branch: gh-pages
+          folder: docs/site/dist
+          target-folder: ${{ steps.slot.outputs.target_folder }}
+          clean: ${{ steps.slot.outputs.clean_arg }}
+          clean-exclude: ${{ steps.slot.outputs.clean_exclude }}
+          single-commit: false
+          commit-message: |
+            chore(pages): publish ${{ steps.slot.outputs.repo_id }} @ ${{ steps.slot.outputs.release_tag || 'default' }} [${{ inputs.kind || 'prod' }}]
