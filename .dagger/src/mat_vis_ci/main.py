@@ -1245,6 +1245,116 @@ class MatVisCi:
         return await ctr.with_exec(cmd).stdout()
 
     @function
+    async def thumb(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        source: Annotated[str, Doc("Upstream (ambientcg/polyhaven/gpuopen/physicallybased)")],
+        release_tag: Annotated[str, Doc("Calver release tag, e.g. v2026.05.0")],
+        hf_token: Annotated[dagger.Secret, Doc("HF API token for atomic commits")],
+        repo_id: Annotated[str, Doc("HF dataset repo id")] = "gerchowl/mat-vis-tst",
+        allow_prod: Annotated[
+            bool, Doc("Opt-in flag required to target any non-*-tst repo")
+        ] = False,
+        limit: Annotated[int, Doc("Max materials (0 = no limit)")] = 0,
+        batch_size: Annotated[int, Doc("Materials per atomic commit (count ceiling, #228)")] = 300,
+        batch_max_bytes: Annotated[
+            int,
+            Doc(
+                "Bytes per atomic commit (default 700 MiB). Flush trips on "
+                "first-of-N-or-bytes. HF caps at 1 GiB/commit."
+            ),
+        ] = 700 * 1024 * 1024,
+        dry_run: Annotated[bool, Doc("Skip the HF push; bake locally")] = False,
+    ) -> str:
+        """Per-material thumb tier publish (#402 / mat-vis#361).
+
+        Two phases inside one Dagger cell:
+
+        1. **Render** — install Playwright + Chromium in the baker
+           container, drive ``bake/preview/run.py`` with
+           ``MAT_VIS_DATASET=<repo>@<tag>`` so the renderer reads the
+           same release the publisher will write to. Output:
+           ``/tmp/thumbs/<source>/<material_id>/thumb.png``.
+
+        2. **Publish** — invoke ``mat-vis-baker hf-thumb-publish`` to
+           upload every PNG as ``<source>/thumb/<mid>/thumb.png`` on HF,
+           extend the catalog (``available_tiers`` += "thumb"; ``maps``
+           += "thumb"), CAS-update ``release-manifest.json`` and write
+           the ``<source>/thumb/.tier_complete`` sentinel last.
+
+        Cross-kind safety: the publish phase reuses the bake/derive
+        manifest-merge logic (parent-commit CAS) so concurrent resize /
+        ktx2 dispatches that touch ``release-manifest.json`` don't
+        clobber each other.
+
+        Playwright + Chromium add ~300 MB to the per-job container —
+        installed inline rather than baked into the image. Acceptable
+        cost while #402 is the only consumer; revisit if a second cell
+        needs the same toolchain.
+        """
+        self._guard_prod_target(repo_id, allow_prod)
+
+        ctr = self._baker_container(context, with_ktx2=False, hf_token=hf_token)
+
+        # Pin Playwright into the uv-managed venv. ``playwright install
+        # --with-deps chromium`` then drops the browser binary + Linux
+        # libs (~300 MB; the per-job add we accept until a baked image
+        # is justified — see #402 pitfalls).
+        ctr = ctr.with_exec(["uv", "pip", "install", "playwright>=1.45"]).with_exec(
+            ["uv", "run", "playwright", "install", "--with-deps", "chromium"]
+        )
+
+        # mat-vis-client reads MAT_VIS_DATASET=<repo>@<tag> (#391).
+        ctr = ctr.with_env_variable("MAT_VIS_DATASET", f"{repo_id}@{release_tag}")
+
+        # Phase 1 — render thumbs into /tmp/thumbs.
+        render_cmd = [
+            "uv",
+            "run",
+            "python",
+            "bake/preview/run.py",
+            "--out",
+            "/tmp/thumbs",
+            "--source",
+            source,
+            "--skip-check",
+            "--tag",
+            release_tag,
+        ]
+        if limit > 0:
+            render_cmd += ["--limit", str(limit)]
+        ctr = ctr.with_exec(render_cmd)
+
+        # Phase 2 — publish to HF.
+        publish_cmd = [
+            "uv",
+            "run",
+            "mat-vis-baker",
+            "hf-thumb-publish",
+            "--source",
+            source,
+            "--thumbs-dir",
+            "/tmp/thumbs",
+            "--release-tag",
+            release_tag,
+            "--repo-id",
+            repo_id,
+            "--hf-token",
+            "env:HF_TOKEN",
+            "--batch-size",
+            str(batch_size),
+            "--batch-max-bytes",
+            str(batch_max_bytes),
+        ]
+        if limit > 0:
+            publish_cmd += ["--limit", str(limit)]
+        if dry_run:
+            publish_cmd.append("--dry-run")
+        if allow_prod:
+            publish_cmd.append("--allow-prod")
+        return await ctr.with_exec(publish_cmd).stdout()
+
+    @function
     async def probe_sources(
         self,
         src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
