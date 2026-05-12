@@ -1,0 +1,120 @@
+---
+// Shared shell: <head>, top nav, dark-mode default. Pages opt in to
+// their own body content via the default slot.
+interface Props {
+  title: string;
+  description?: string;
+}
+const { title, description } = Astro.props;
+const base = import.meta.env.BASE_URL;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href={`${base}favicon.svg`} />
+    <title>{title}</title>
+    {description && <meta name="description" content={description} />}
+    <style is:global>
+      :root {
+        --bg: #0d1117;
+        --bg-2: #161b22;
+        --bg-3: #21262d;
+        --fg: #e6edf3;
+        --fg-mute: #8b949e;
+        --accent: #58a6ff;
+        --border: #30363d;
+        --badge: #1f6feb;
+        --ok: #3fb950;
+        --warn: #d29922;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #ffffff;
+          --bg-2: #f6f8fa;
+          --bg-3: #eaeef2;
+          --fg: #1f2328;
+          --fg-mute: #59636e;
+          --accent: #0969da;
+          --border: #d1d9e0;
+          --badge: #0969da;
+          --ok: #1a7f37;
+          --warn: #9a6700;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        line-height: 1.5;
+      }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      header.site {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        background: var(--bg-2);
+        border-bottom: 1px solid var(--border);
+        padding: 0.75rem 1rem;
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+      }
+      header.site .brand {
+        font-weight: 700;
+        font-size: 1.1rem;
+        color: var(--fg);
+      }
+      header.site nav { display: flex; gap: 1rem; font-size: 0.9rem; }
+      main { padding: 1rem; max-width: 1400px; margin: 0 auto; }
+      .badge {
+        display: inline-block;
+        padding: 0.1rem 0.5rem;
+        border-radius: 0.5rem;
+        background: var(--bg-3);
+        color: var(--fg-mute);
+        font-size: 0.75rem;
+        font-family: ui-monospace, monospace;
+      }
+      .badge.source { background: var(--badge); color: white; }
+      .badge.license { background: var(--bg-3); color: var(--fg); }
+      code, pre {
+        font-family: ui-monospace, "SF Mono", monospace;
+        background: var(--bg-2);
+        border: 1px solid var(--border);
+        border-radius: 0.25rem;
+      }
+      code { padding: 0.05rem 0.3rem; font-size: 0.85em; }
+      pre { padding: 0.75rem; overflow-x: auto; }
+      pre code { background: none; border: none; padding: 0; }
+      footer.site {
+        margin-top: 4rem;
+        padding: 1.5rem 1rem;
+        text-align: center;
+        color: var(--fg-mute);
+        font-size: 0.85rem;
+        border-top: 1px solid var(--border);
+      }
+    </style>
+  </head>
+  <body>
+    <header class="site">
+      <span class="brand"><a href={base}>mat-vis</a></span>
+      <nav>
+        <a href={base}>Catalog</a>
+        <a href="https://github.com/MorePET/mat-vis" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://huggingface.co/datasets/gerchowl/mat-vis" target="_blank" rel="noopener">HF Dataset</a>
+      </nav>
+    </header>
+    <main>
+      <slot />
+    </main>
+    <footer class="site">
+      Built statically from the HF substrate. Data CC-BY/CC0 per source — see each material for attribution.
+    </footer>
+  </body>
+</html>
