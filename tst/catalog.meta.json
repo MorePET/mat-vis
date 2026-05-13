@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "release_tag": "v2026.04.99-tst-full-369",
+  "repo_id": "gerchowl/mat-vis-tst",
+  "generated_at": "2026-05-13T01:13:22.226958+00:00",
+  "sources": [
+    "ambientcg",
+    "gpuopen",
+    "physicallybased",
+    "polyhaven"
+  ],
+  "categories": [
+    "ceramic",
+    "concrete",
+    "fabric",
+    "glass",
+    "metal",
+    "organic",
+    "other",
+    "plastic",
+    "stone",
+    "wood"
+  ],
+  "licenses": [
+    "CC0-1.0",
+    "MIT"
+  ],
+  "total": 3246
+}
