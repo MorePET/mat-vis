@@ -144,7 +144,7 @@ for _cat, _keywords in {
         "terrazzo",
     ],
     "ceramic": ["ceramic", "porcelain", "tile", "terracotta", "clay", "brick", "pottery"],
-    "glass": ["glass", "mirror", "crystal", "window", "translucent", "transparent"],
+    "glass": ["glass", "mirror", "crystal", "window"],
     "organic": [
         "organic",
         "soil",
