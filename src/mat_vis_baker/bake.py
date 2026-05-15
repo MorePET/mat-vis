@@ -88,7 +88,8 @@ def _bake_mtlx(mtlx_path: Path, output_dir: Path, resolution_px: int) -> dict[st
     # creation succeeds. SwiftShader's EGL alone is NOT sufficient —
     # MaterialXRenderGlsl hardcodes glXChooseVisual/XOpenDisplay.
     # See /falsify review on #438.
-    baker = mx_render.TextureBaker.create(resolution_px, resolution_px)
+    # Third arg is BaseType — UINT8 for 8-bit PNG output (LDR).
+    baker = mx_render.TextureBaker.create(resolution_px, resolution_px, mx.BaseType.UINT8)
 
     # bakeAllMaterials third arg is an output FILENAME (not a dir).
     # TextureBaker derives the image output path from the filename's
