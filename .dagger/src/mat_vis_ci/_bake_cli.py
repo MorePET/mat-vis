@@ -22,6 +22,7 @@ def bake_argv(
     filter_ids: str = "",
     batch_max_bytes: int = 700 * 1024 * 1024,
     metrics_path: str | None = None,
+    force_rebake: bool = False,
 ) -> list[str]:
     """Build the ``mat-vis-baker hf-bake`` argv list.
 
@@ -71,4 +72,6 @@ def bake_argv(
         argv.append("--allow-prod")
     if metrics_path:
         argv += ["--metrics-path", metrics_path]
+    if force_rebake:
+        argv.append("--force-rebake")
     return argv

@@ -85,6 +85,11 @@ on:  # yamllint disable-line rule:truthy
         required: false
         default: false
         type: boolean
+      force-rebake:
+        description: 'Skip preflight tree scan — re-bake even if files already exist on HF. Does NOT bypass allow-prod.'
+        required: false
+        default: false
+        type: boolean
       repo-id:
         description: 'HF dataset repo'
         required: false
@@ -319,6 +324,7 @@ jobs:
             --batch-size=${{ inputs.batch-size }}
             --batch-max-bytes=${{ inputs.batch-max-bytes }}
             ${{ inputs.dry-run == true && '--dry-run=true' || '' }}
+            ${{ inputs.force-rebake == true && '--force-rebake=true' || '' }}
 
       # ADR-0011 / mat-vis#152 phase-c: lock the Layer-2 upstream mirror
       # against silent schema drift. The baker just pushed the candidate

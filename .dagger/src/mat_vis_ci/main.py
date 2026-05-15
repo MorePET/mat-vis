@@ -678,6 +678,9 @@ class MatVisCi:
             ),
         ] = 700 * 1024 * 1024,
         dry_run: Annotated[bool, Doc("Build locally; skip HF push")] = False,
+        force_rebake: Annotated[
+            bool, Doc("Skip preflight tree scan — re-bake even if files exist on HF")
+        ] = False,
     ) -> str:
         """Bake one (source, tier) into an HF commit (#136 / ADR-0012).
 
@@ -718,6 +721,7 @@ class MatVisCi:
             filter_ids=filter_ids,
             dry_run=dry_run,
             allow_prod=allow_prod,
+            force_rebake=force_rebake,
         )
         return await ctr.with_exec(argv).stdout()
 

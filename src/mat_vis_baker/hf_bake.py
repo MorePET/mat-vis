@@ -207,6 +207,7 @@ def bake_one(
     allow_prod: bool = False,
     storage_tier: str | None = None,
     metrics_path: Path | None = None,
+    force_rebake: bool = False,
     _pre_manifest_hook=None,
 ) -> dict:
     """Bake one ``(source, tier)`` and commit to HF.
@@ -273,5 +274,6 @@ def bake_one(
         dry_run=dry_run,
         storage_tier=storage_tier,
         metrics_path=metrics_path,
+        force_rebake=force_rebake,
         _pre_manifest_hook=_pre_manifest_hook,
     )
