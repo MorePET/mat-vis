@@ -10,13 +10,13 @@
 <script type="module">
 import * as THREE from 'three';
 import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
-import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+import {RGBELoader} from 'three/addons/loaders/RGBELoader.js';
 
 // Single-material thumb renderer (mat-vis#361). Matches bernhard's
 // reference scene from mat-vis#285 ("should look like" image):
 //   geometry  = create_shader_ball (vendored shader_ball.glb)
-//   bg        = 0x1a1a2e (dark navy)
-//   IBL       = RoomEnvironment via PMREM
+//   bg        = 0x1a1a2e (dark navy); env bg for transmissive materials
+//   IBL       = studio_small_09_2k.hdr (Poly Haven CC0) via PMREM
 //   tone-map  = ACES Filmic, exposure 1.0
 //   layout    = single shader ball, framed tight for 256² output
 //
@@ -55,10 +55,8 @@ renderer.toneMappingExposure = 1.0;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.appendChild(renderer.domElement);
 
-const pmrem = new THREE.PMREMGenerator(renderer);
-scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-
 // Lighting: copied from three-cad-viewer's RENDER_DEFAULTS.
+// Kept alongside the HDRI IBL for fill + specular highlight.
 scene.add(new THREE.AmbientLight(0xffffff, 1.0));
 const dir = new THREE.DirectionalLight(0xffffff, 1.1);
 dir.position.set(20, 30, 20);
@@ -145,13 +143,29 @@ async function main() {
   const threejs = raw.threejs || (raw.items && raw.items[0] && raw.items[0].threejs);
   if (!threejs) throw new Error('spec missing threejs material dict');
 
-  // Load shader ball GLB once. build123d uses meters; scale m→mm.
-  // build123d's export_gltf already converts its Z-up to glTF/Three.js
-  // Y-up convention — DO NOT add a manual rotation (was a bug; matches
-  // pymat's visual_render.html which also only scales without rotating).
-  const gltf = await new Promise((resolve, reject) => {
-    new GLTFLoader().load('shader_ball.glb', resolve, undefined, reject);
-  });
+  // Load HDRI + shader ball GLB in parallel. The HDRI provides
+  // higher-frequency specular content than the procedural RoomEnvironment
+  // (ADR-0014 P1) and is essential for transmissive materials where
+  // the environment is visible through the glass.
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const [hdrTexture, gltf] = await Promise.all([
+    new Promise((resolve, reject) => {
+      new RGBELoader().load('studio_small_09_2k.hdr', resolve, undefined, reject);
+    }),
+    new Promise((resolve, reject) => {
+      new GLTFLoader().load('shader_ball.glb', resolve, undefined, reject);
+    }),
+  ]);
+
+  const envMap = pmrem.fromEquirectangular(hdrTexture).texture;
+  hdrTexture.dispose();
+  pmrem.dispose();
+  scene.environment = envMap;
+
+  // build123d uses meters; scale m→mm. build123d's export_gltf already
+  // converts its Z-up to glTF/Three.js Y-up convention — DO NOT add a
+  // manual rotation (was a bug; matches pymat's visual_render.html
+  // which also only scales without rotating).
   const shaderBall = gltf.scene;
   shaderBall.scale.set(1000, 1000, 1000);
 
@@ -167,9 +181,9 @@ async function main() {
   // Transmissive materials (glass, water, diamond, etc.) refract what's
   // behind them. With a solid-color background the refraction captures a
   // flat navy square — glass looks opaque. Swap the background to the
-  // PMREM environment texture so there's a room to see through.
+  // HDRI environment so there's a studio to see through.
   if (threejs.transmission != null && threejs.transmission > 0) {
-    scene.background = scene.environment;
+    scene.background = envMap;
   }
 
   // Camera positioning — bernhard's three-cad-viewer formula adapted

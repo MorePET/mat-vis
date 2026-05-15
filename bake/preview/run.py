@@ -45,6 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ASSETS = REPO_ROOT / "bake" / "preview" / "assets"
 THUMB_HTML = REPO_ROOT / "bake" / "preview" / "thumb_render.html"
 SHADER_BALL = ASSETS / "shader_ball.glb"
+STUDIO_HDRI = ASSETS / "studio_small_09_2k.hdr"
 CHECK_THUMBS = REPO_ROOT / "bake" / "preview" / "utils" / "check_thumbs.py"
 
 # Default sources to bake. Order matters only for log readability.
@@ -209,6 +210,7 @@ def main():
         # Serve the renderer + GLB + per-spec JSONs from a single dir.
         shutil.copy(THUMB_HTML, tmpdir / "thumb_render.html")
         shutil.copy(SHADER_BALL, tmpdir / "shader_ball.glb")
+        shutil.copy(STUDIO_HDRI, tmpdir / "studio_small_09_2k.hdr")
 
         with _file_server(tmpdir) as server_url, sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True, args=["--use-gl=swiftshader"])
