@@ -361,7 +361,14 @@ def _renderer_scalars_from_lookup(raw: dict) -> dict:
     spec: dict = {}
     if "color_hex" in raw and raw["color_hex"]:
         spec["color"] = raw["color_hex"]
-    for key in ("metalness", "roughness", "ior", "transmission", "clearcoat"):
+    for key in (
+        "metalness", "roughness", "ior", "transmission", "thickness",
+        "dispersion", "clearcoat", "clearcoat_roughness",
+        "specularIntensity", "specularColor",
+        "sheen", "sheenColor", "sheenRoughness",
+        "iridescence", "iridescenceIOR", "iridescenceThicknessRange",
+        "emissiveIntensity",
+    ):
         if raw.get(key) is not None:
             spec[key] = raw[key]
     if raw.get("emissive") is not None:
