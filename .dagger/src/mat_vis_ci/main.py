@@ -556,6 +556,7 @@ class MatVisCi:
         context: dagger.Directory,
         hf_token: dagger.Secret | None = None,
         with_ktx2: bool = False,
+        with_materialx: bool = False,
     ) -> dagger.Container:
         """Baker container for hf-bake / hf-derive / hf-derive-ktx2 (#135 / #204).
 
@@ -608,6 +609,20 @@ class MatVisCi:
                 ]
             )
 
+        if with_materialx:
+            # MaterialX TextureBaker requires GLX/X11 (not EGL). Install
+            # Xvfb + X11 libs + MaterialX. Xvfb must be started before
+            # baking — the with_exec below launches it as a background
+            # daemon. See /falsify review on #438.
+            ctr = ctr.with_exec(
+                [
+                    "sh",
+                    "-c",
+                    "apt-get install -y -qq "
+                    "xvfb libgl1 libglib2.0-0 libx11-6 libxext6 libxkbcommon0",
+                ]
+            ).with_env_variable("DISPLAY", ":99")
+
         ctr = (
             ctr.with_env_variable("PYTHONUNBUFFERED", "1")
             .with_mounted_cache("/root/.cache/uv", uv_cache)
@@ -615,6 +630,14 @@ class MatVisCi:
             .with_workdir("/app")
             .with_exec(["uv", "sync", "--all-extras"])
         )
+
+        if with_materialx:
+            # Install MaterialX after uv sync so it layers on top of
+            # the project deps. Start Xvfb as a background daemon.
+            ctr = (
+                ctr.with_exec(["uv", "pip", "install", "--system", "materialx>=1.39"])
+                .with_exec(["sh", "-c", "Xvfb :99 -screen 0 1024x1024x24 &"])
+            )
 
         if hf_token is not None:
             ctr = ctr.with_secret_variable("HF_TOKEN", hf_token)
@@ -678,7 +701,11 @@ class MatVisCi:
         through Dagger.
         """
         self._guard_prod_target(repo_id, allow_prod)
-        ctr = self._baker_container(context, hf_token=hf_token)
+        # gpuopen materials have MTLX nodegraphs that need TextureBaker
+        # to resolve packed textures to flat PNGs (#438).
+        ctr = self._baker_container(
+            context, hf_token=hf_token, with_materialx=(source == "gpuopen"),
+        )
         argv = _bake_argv(
             source=source,
             tier=tier,
