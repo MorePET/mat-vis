@@ -30,6 +30,38 @@ const tierLinks = mat.tiers.map((tier) => ({
 const thumb = thumbUrl(meta, mat);
 const pbrEntries = Object.entries(mat.p).filter(([, v]) => v !== null && v !== undefined);
 
+// Human-readable PBR key labels
+const pbrLabels: Record<string, string> = {
+  color_rgb: "Color RGB",
+  roughness: "Roughness",
+  metalness: "Metalness",
+  ior: "IOR",
+  specular_f0: "Specular F0",
+  transmission: "Transmission",
+  thickness: "Thickness",
+  clearcoat_roughness: "Clearcoat roughness",
+  specular_intensity: "Specular intensity",
+  specular_color: "Specular color",
+  dispersion: "Dispersion",
+  is_conductor: "Conductor",
+  metalness_mean: "Metalness (mean)",
+  metalness_source: "Metalness source",
+  complex_ior: "Complex IOR",
+};
+
+// Check if a value is an RGB triplet (array of 3 numbers, 0–1 range)
+function isRgbTriplet(k: string, v: unknown): v is [number, number, number] {
+  return (k === "color_rgb" || k === "specular_color") &&
+    Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === "number");
+}
+
+function rgbToCss(rgb: [number, number, number]): string {
+  return `rgb(${Math.round(rgb[0] * 255)}, ${Math.round(rgb[1] * 255)}, ${Math.round(rgb[2] * 255)})`;
+}
+
+// OG image: use thumb if available
+const ogImage = thumb ?? undefined;
+
 const snippet = `from mat_vis_client import MatVisClient
 
 client = MatVisClient(tag="${meta.release_tag}")
@@ -38,7 +70,7 @@ scalars = asset.scalars
 textures = asset.fetch_all_textures(tier="auto")  # post-#374
 `;
 ---
-<Base title={`${mat.n} — mat-vis`} description={`PBR material ${mat.n} from ${mat.s} (${mat.l ?? 'unlicensed'}).`}>
+<Base title={`${mat.n} — mat-vis`} description={`PBR material ${mat.n} from ${mat.s} (${mat.l ?? 'unlicensed'}).`} ogImage={ogImage}>
   <p class="back"><a href={base}>&larr; Catalog</a></p>
 
   <header class="detail-hero">
@@ -83,8 +115,17 @@ textures = asset.fetch_all_textures(tier="auto")  # post-#374
         <tbody>
           {pbrEntries.map(([k, v]) => (
             <tr>
-              <th>{k}</th>
-              <td><code>{typeof v === "object" ? JSON.stringify(v) : String(v)}</code></td>
+              <th>{pbrLabels[k] ?? k}</th>
+              <td>
+                {isRgbTriplet(k, v) ? (
+                  <span class="color-cell">
+                    <span class="color-swatch" style={`background:${rgbToCss(v)}`} title={rgbToCss(v)}></span>
+                    <code>{JSON.stringify(v)}</code>
+                  </span>
+                ) : (
+                  <code>{typeof v === "object" ? JSON.stringify(v) : String(v)}</code>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -180,6 +221,16 @@ textures = asset.fetch_all_textures(tier="auto")  # post-#374
     font-size: 0.9rem;
   }
   table.pbr th { color: var(--fg-mute); font-weight: 500; width: 12rem; }
+  .color-cell { display: inline-flex; align-items: center; gap: 0.5rem; }
+  .color-swatch {
+    display: inline-block;
+    width: 1.4rem;
+    height: 1.4rem;
+    border-radius: 0.25rem;
+    border: 1px solid var(--border);
+    vertical-align: middle;
+    flex-shrink: 0;
+  }
   ul.tiers { list-style: none; padding: 0; display: flex; gap: 0.5rem; flex-wrap: wrap; }
   ul.tiers li a {
     display: inline-block;
