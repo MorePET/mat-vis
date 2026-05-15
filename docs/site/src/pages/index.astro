@@ -229,6 +229,7 @@ const base = import.meta.env.BASE_URL;
     gap: 1rem;
   }
   .grid :global(.card[hidden]) { display: none !important; }
+  .grid.search-pending :global(.card) { visibility: hidden; }
   .empty-state {
     text-align: center;
     padding: 3rem 1rem;
@@ -333,6 +334,7 @@ const base = import.meta.env.BASE_URL;
         },
       });
       mini.addAll(data.map((m) => ({ ...m, _key: `${m.s}/${m.id}` })));
+      grid.classList.remove("search-pending");
       apply();
     })
     .catch((err) => {
@@ -495,7 +497,11 @@ const base = import.meta.env.BASE_URL;
 
   // Init: restore state from URL on load. If there's a search query,
   // defer the first apply until catalog.json loads (otherwise we'd
-  // flash all cards then re-filter).
+  // flash all cards then re-filter). Hide cards while waiting.
   readUrl();
-  if (!filters.q) apply();
+  if (filters.q) {
+    grid.classList.add("search-pending");
+  } else {
+    apply();
+  }
 </script>
