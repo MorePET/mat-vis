@@ -42,6 +42,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 PREVIEW_DIR = REPO_ROOT / "bake" / "preview"
 THUMB_HTML = PREVIEW_DIR / "thumb_render.html"
 SHADER_BALL = PREVIEW_DIR / "assets" / "shader_ball.glb"
+STUDIO_HDRI = PREVIEW_DIR / "assets" / "studio_small_09_2k.hdr"
 OUTPUT_DIR = Path(__file__).parent / "output"
 
 # Test substrate (CalVer test release, full 4-source coverage). The
@@ -97,6 +98,7 @@ def layered_tmpdir():
         # and ``http://server/shader_ball.glb`` resolve.
         shutil.copy(THUMB_HTML, tmpdir / "thumb_render.html")
         shutil.copy(SHADER_BALL, tmpdir / "shader_ball.glb")
+        shutil.copy(STUDIO_HDRI, tmpdir / "studio_small_09_2k.hdr")
         yield tmpdir
 
 

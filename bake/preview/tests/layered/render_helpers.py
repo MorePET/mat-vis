@@ -361,9 +361,29 @@ def _renderer_scalars_from_lookup(raw: dict) -> dict:
     spec: dict = {}
     if "color_hex" in raw and raw["color_hex"]:
         spec["color"] = raw["color_hex"]
-    for key in ("metalness", "roughness", "ior", "transmission", "clearcoat"):
-        if raw.get(key) is not None:
-            spec[key] = raw[key]
+    # Raw scalar keys are snake_case from the substrate; the Three.js
+    # renderer expects camelCase. Map the keys that differ.
+    _RAW_TO_THREEJS = {
+        "clearcoat_roughness": "clearcoatRoughness",
+        "specular_intensity": "specularIntensity",
+        "specular_color": "specularColor",
+        "sheen_color": "sheenColor",
+        "sheen_roughness": "sheenRoughness",
+        "iridescence_ior": "iridescenceIOR",
+        "iridescence_thickness": "iridescenceThicknessRange",
+        "emissive_intensity": "emissiveIntensity",
+    }
+    for key in (
+        "metalness", "roughness", "ior", "transmission", "thickness",
+        "dispersion", "clearcoat", "clearcoat_roughness",
+        "specular_intensity", "specular_color",
+        "sheen", "sheen_color", "sheen_roughness",
+        "iridescence", "iridescence_ior", "iridescence_thickness",
+        "emissive_intensity",
+    ):
+        val = raw.get(key)
+        if val is not None:
+            spec[_RAW_TO_THREEJS.get(key, key)] = val
     if raw.get("emissive") is not None:
         spec["emissive"] = list(raw["emissive"])
     return spec

@@ -22,68 +22,106 @@ const licenses = meta.licenses;
 const base = import.meta.env.BASE_URL;
 ---
 <Base title="mat-vis catalog" description="Browse PBR materials from ambientcg, polyhaven, gpuopen, and physicallybased.">
+  <a href="#grid" class="skip-link">Skip to materials</a>
+
   <section class="intro">
     <h1>Material catalog</h1>
     <p class="muted">
       {catalog.length.toLocaleString()} materials from {sources.length} sources.
-      Release tag: <code>{meta.release_tag}</code> ·
+      Release tag: <code>{meta.release_tag}</code> &middot;
       Substrate: <a href={`https://huggingface.co/datasets/${meta.repo_id}/tree/${meta.release_tag}`} target="_blank" rel="noopener"><code>{meta.repo_id}</code></a>
     </p>
   </section>
 
-  <div class="search-wrap">
+  <div class="search-wrap" role="search">
     <input
       id="search-input"
       type="search"
       placeholder="Search by name, tag, or upstream URL…"
       autocomplete="off"
       spellcheck="false"
+      aria-label="Search materials"
     />
-    <span id="result-count" class="muted"></span>
+    <select id="sort-select" aria-label="Sort order">
+      <option value="source-name">Sort: source &rarr; name</option>
+      <option value="name">Sort: name A&ndash;Z</option>
+      <option value="name-desc">Sort: name Z&ndash;A</option>
+      <option value="date-desc">Sort: newest first</option>
+      <option value="date-asc">Sort: oldest first</option>
+    </select>
+    <span id="result-count" class="muted" aria-live="polite" aria-atomic="true"></span>
   </div>
 
   <div class="layout">
-    <aside class="facets">
-      <h3>Source</h3>
-      <div id="facet-source">
-        {sources.map((s) => (
-          <label><input type="checkbox" data-facet="source" value={s} /> {s}</label>
-        ))}
+    <aside class="facets" id="facets-panel">
+      <button id="facets-toggle" type="button" class="facets-toggle" aria-expanded="true" aria-controls="facets-body">
+        Filters
+      </button>
+      <div id="facets-body">
+        <h3>Source</h3>
+        <div id="facet-source">
+          {sources.map((s) => (
+            <label><input type="checkbox" data-facet="source" value={s} /> <span class="facet-label">{s}</span> <span class="facet-count" data-count-facet="source" data-count-value={s}></span></label>
+          ))}
+        </div>
+        {categories.length > 0 && (
+          <>
+            <h3>Category</h3>
+            <div id="facet-category" class="scroll">
+              {categories.map((c) => (
+                <label><input type="checkbox" data-facet="category" value={c} /> <span class="facet-label">{c}</span> <span class="facet-count" data-count-facet="category" data-count-value={c}></span></label>
+              ))}
+            </div>
+          </>
+        )}
+        {licenses.length > 0 && (
+          <>
+            <h3>License</h3>
+            <div id="facet-license">
+              {licenses.map((l) => (
+                <label><input type="checkbox" data-facet="license" value={l} /> <span class="facet-label">{l}</span> <span class="facet-count" data-count-facet="license" data-count-value={l}></span></label>
+              ))}
+            </div>
+          </>
+        )}
+        <h3>Flags</h3>
+        <div>
+          <label><input id="facet-thumb" type="checkbox" /> Has preview thumb</label>
+        </div>
+        <button id="facets-reset" type="button">Reset filters</button>
       </div>
-      {categories.length > 0 && (
-        <>
-          <h3>Category</h3>
-          <div id="facet-category" class="scroll">
-            {categories.map((c) => (
-              <label><input type="checkbox" data-facet="category" value={c} /> {c}</label>
-            ))}
-          </div>
-        </>
-      )}
-      {licenses.length > 0 && (
-        <>
-          <h3>License</h3>
-          <div id="facet-license">
-            {licenses.map((l) => (
-              <label><input type="checkbox" data-facet="license" value={l} /> {l}</label>
-            ))}
-          </div>
-        </>
-      )}
-      <h3>Flags</h3>
-      <div>
-        <label><input id="facet-thumb" type="checkbox" /> Has preview thumb</label>
-      </div>
-      <button id="facets-reset" type="button">Reset filters</button>
     </aside>
 
-    <section class="grid" id="grid">
-      {sorted.map((mat) => <MaterialCard mat={mat} meta={meta} />)}
-    </section>
+    <div class="grid-area">
+      <section class="grid" id="grid">
+        {sorted.map((mat) => <MaterialCard mat={mat} meta={meta} />)}
+      </section>
+      <p id="empty-state" class="empty-state" hidden>No materials match the current filters.</p>
+    </div>
   </div>
 </Base>
 
 <style>
+  .skip-link {
+    position: absolute;
+    left: -999px;
+    top: auto;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    z-index: 100;
+    background: var(--accent);
+    color: white;
+    padding: 0.5rem 1rem;
+    border-radius: 0.3rem;
+  }
+  .skip-link:focus {
+    left: 1rem;
+    top: 0.5rem;
+    width: auto;
+    height: auto;
+    overflow: visible;
+  }
   .intro h1 { margin: 0 0 0.25rem 0; }
   .intro .muted, .muted { color: var(--fg-mute); }
   .search-wrap {
@@ -91,9 +129,11 @@ const base = import.meta.env.BASE_URL;
     align-items: center;
     gap: 0.75rem;
     margin: 1rem 0;
+    flex-wrap: wrap;
   }
   #search-input {
     flex: 1;
+    min-width: 200px;
     padding: 0.6rem 0.8rem;
     font-size: 1rem;
     background: var(--bg-2);
@@ -102,6 +142,16 @@ const base = import.meta.env.BASE_URL;
     border-radius: 0.4rem;
   }
   #search-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #sort-select {
+    padding: 0.5rem 0.6rem;
+    font-size: 0.85rem;
+    background: var(--bg-2);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    cursor: pointer;
+  }
+  #sort-select:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
   .layout {
     display: grid;
     grid-template-columns: 220px 1fr;
@@ -109,6 +159,9 @@ const base = import.meta.env.BASE_URL;
   }
   @media (max-width: 720px) {
     .layout { grid-template-columns: 1fr; }
+    .facets { position: static; max-height: none; }
+    #facets-body[data-collapsed] { display: none; }
+    .facets-toggle { display: flex; }
   }
   .facets {
     position: sticky;
@@ -127,11 +180,39 @@ const base = import.meta.env.BASE_URL;
     margin: 1rem 0 0.5rem;
   }
   .facets label {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
     cursor: pointer;
     padding: 0.15rem 0;
   }
+  .facet-label { flex: 1; }
+  .facet-count {
+    font-size: 0.75rem;
+    color: var(--fg-mute);
+    font-variant-numeric: tabular-nums;
+  }
   .facets .scroll { max-height: 16rem; overflow-y: auto; }
+  .facets-toggle {
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 0.5rem 0;
+    font-size: 1rem;
+    font-weight: 600;
+    background: none;
+    color: var(--fg);
+    border: none;
+    cursor: pointer;
+  }
+  .facets-toggle::after {
+    content: "▾";
+    transition: transform 0.15s;
+  }
+  .facets-toggle[aria-expanded="false"]::after {
+    transform: rotate(-90deg);
+  }
   #facets-reset {
     margin-top: 1rem;
     padding: 0.4rem 0.7rem;
@@ -147,7 +228,14 @@ const base = import.meta.env.BASE_URL;
     grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
     gap: 1rem;
   }
-  .card[hidden] { display: none !important; }
+  .grid :global(.card[hidden]) { display: none !important; }
+  .grid.search-pending :global(.card) { visibility: hidden; }
+  .empty-state {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: var(--fg-mute);
+    font-size: 1.1rem;
+  }
 </style>
 
 <script>
@@ -162,6 +250,7 @@ const base = import.meta.env.BASE_URL;
     category: Set<string>;
     license: Set<string>;
     thumbOnly: boolean;
+    sort: string;
   };
 
   const filters: Filters = {
@@ -170,17 +259,62 @@ const base = import.meta.env.BASE_URL;
     category: new Set(),
     license: new Set(),
     thumbOnly: false,
+    sort: "source-name",
   };
 
   const input = document.getElementById("search-input") as HTMLInputElement;
   const grid = document.getElementById("grid")!;
   const countEl = document.getElementById("result-count")!;
   const resetBtn = document.getElementById("facets-reset")!;
+  const sortSelect = document.getElementById("sort-select") as HTMLSelectElement;
+  const emptyState = document.getElementById("empty-state")!;
+  const facetsToggle = document.getElementById("facets-toggle")!;
+  const facetsBody = document.getElementById("facets-body")!;
 
   const cards = Array.from(grid.querySelectorAll<HTMLAnchorElement>(".card"));
 
-  // Load catalog + build MiniSearch index in parallel with first paint.
-  // Eager fetch — the JSON is the same file we relied on at build time.
+  // Pre-cache card metadata for sort (avoids repeated DOM reads).
+  const cardMeta = new Map(cards.map((c) => [c, {
+    key: c.dataset.key!,
+    name: c.querySelector(".name")?.textContent ?? "",
+    date: c.dataset.date ?? "",
+  }]));
+
+  // ── URL state ──
+  function readUrl() {
+    const p = new URLSearchParams(window.location.search);
+    filters.q = p.get("q") ?? "";
+    filters.source = new Set(p.getAll("source"));
+    filters.category = new Set(p.getAll("category"));
+    filters.license = new Set(p.getAll("license"));
+    filters.thumbOnly = p.get("thumb") === "1";
+    filters.sort = p.get("sort") ?? "source-name";
+
+    // Sync DOM to restored state
+    input.value = filters.q;
+    sortSelect.value = filters.sort;
+    document.querySelectorAll<HTMLInputElement>("input[data-facet]").forEach((cb) => {
+      const facet = cb.dataset.facet as "source" | "category" | "license";
+      cb.checked = filters[facet].has(cb.value);
+    });
+    const thumbCb = document.getElementById("facet-thumb") as HTMLInputElement;
+    thumbCb.checked = filters.thumbOnly;
+  }
+
+  function writeUrl() {
+    const p = new URLSearchParams();
+    if (filters.q) p.set("q", filters.q);
+    for (const s of filters.source) p.append("source", s);
+    for (const c of filters.category) p.append("category", c);
+    for (const l of filters.license) p.append("license", l);
+    if (filters.thumbOnly) p.set("thumb", "1");
+    if (filters.sort !== "source-name") p.set("sort", filters.sort);
+    const qs = p.toString();
+    const url = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+    window.history.replaceState(null, "", url);
+  }
+
+  // ── MiniSearch ──
   let mini: MiniSearch<TrimmedMaterial> | null = null;
   let catalog: TrimmedMaterial[] = [];
 
@@ -189,17 +323,10 @@ const base = import.meta.env.BASE_URL;
     .then((data: TrimmedMaterial[]) => {
       catalog = data;
       mini = new MiniSearch<TrimmedMaterial & { _key: string }>({
-        // IDs collide across sources (e.g. `concrete` appears in
-        // both ambientcg and physicallybased), so the search index
-        // is keyed by `<source>/<id>` to match the card's data-key.
         idField: "_key",
         fields: ["n", "t", "u", "c"],
         storeFields: ["_key"],
         searchOptions: {
-          // AND-combine: multi-word queries must match all tokens.
-          // Default OR-combine produces ~500 hits on a 3K-entry corpus
-          // and is unusable as a "search". Fuzzy is enabled only for
-          // tokens long enough that off-by-one is helpful (>= 4 chars).
           combineWith: "AND",
           prefix: true,
           fuzzy: (term: string) => (term.length >= 5 ? 0.2 : false),
@@ -207,12 +334,43 @@ const base = import.meta.env.BASE_URL;
         },
       });
       mini.addAll(data.map((m) => ({ ...m, _key: `${m.s}/${m.id}` })));
+      grid.classList.remove("search-pending");
       apply();
     })
     .catch((err) => {
       console.error("[catalog] failed to load catalog.json:", err);
     });
 
+  // ── Sorting ──
+  let lastSort = "";
+  function sortCards() {
+    const order = filters.sort;
+    if (order === lastSort) return;
+    lastSort = order;
+
+    const sorted = [...cards].sort((a, b) => {
+      const am = cardMeta.get(a)!;
+      const bm = cardMeta.get(b)!;
+
+      switch (order) {
+        case "name":
+          return am.name.localeCompare(bm.name);
+        case "name-desc":
+          return bm.name.localeCompare(am.name);
+        case "date-desc":
+          return (bm.date || "0").localeCompare(am.date || "0");
+        case "date-asc":
+          return (am.date || "9999").localeCompare(bm.date || "9999");
+        default: // source-name
+          return am.key.localeCompare(bm.key);
+      }
+    });
+    const frag = document.createDocumentFragment();
+    for (const c of sorted) frag.appendChild(c);
+    grid.appendChild(frag);
+  }
+
+  // ── Apply filters ──
   let pending: number | undefined;
   function debouncedApply() {
     if (pending) window.clearTimeout(pending);
@@ -220,13 +378,16 @@ const base = import.meta.env.BASE_URL;
   }
 
   function apply() {
-    // Determine the set of allowed ids: facet AND (search ∩ facet).
-    // When no search query is active, facet filtering alone drives it.
     let allowed: Set<string> | null = null;
     if (filters.q && mini) {
       const hits = mini.search(filters.q);
       allowed = new Set(hits.map((h) => h.id as string));
     }
+
+    // Facet counts: count materials per facet value (considering other active filters).
+    const counts: Record<string, Record<string, number>> = {
+      source: {}, category: {}, license: {},
+    };
 
     let shown = 0;
     for (const card of cards) {
@@ -244,11 +405,31 @@ const base = import.meta.env.BASE_URL;
       if (show && filters.thumbOnly && !hasThumb) show = false;
 
       card.hidden = !show;
-      if (show) shown++;
+      if (show) {
+        shown++;
+        // Count for facets (only count visible cards)
+        counts.source[src] = (counts.source[src] ?? 0) + 1;
+        if (cat) counts.category[cat] = (counts.category[cat] ?? 0) + 1;
+        if (lic) counts.license[lic] = (counts.license[lic] ?? 0) + 1;
+      }
     }
+
     countEl.textContent = `${shown.toLocaleString()} of ${cards.length.toLocaleString()}`;
+    emptyState.hidden = shown > 0;
+
+    // Update facet counts in DOM
+    document.querySelectorAll<HTMLSpanElement>(".facet-count").forEach((el) => {
+      const facet = el.dataset.countFacet!;
+      const val = el.dataset.countValue!;
+      const n = counts[facet]?.[val] ?? 0;
+      el.textContent = `(${n})`;
+    });
+
+    sortCards();
+    writeUrl();
   }
 
+  // ── Event wiring ──
   input.addEventListener("input", (e) => {
     filters.q = (e.target as HTMLInputElement).value.trim();
     debouncedApply();
@@ -269,19 +450,58 @@ const base = import.meta.env.BASE_URL;
     apply();
   });
 
+  sortSelect.addEventListener("change", () => {
+    filters.sort = sortSelect.value;
+    apply();
+  });
+
   resetBtn.addEventListener("click", () => {
     filters.q = "";
     filters.source.clear();
     filters.category.clear();
     filters.license.clear();
     filters.thumbOnly = false;
+    filters.sort = "source-name";
     input.value = "";
+    sortSelect.value = "source-name";
     document.querySelectorAll<HTMLInputElement>("input[data-facet], #facet-thumb").forEach((cb) => {
       cb.checked = false;
     });
     apply();
   });
 
-  // Initial count display before fetch completes.
-  apply();
+  // Mobile facet toggle
+  facetsToggle.addEventListener("click", () => {
+    const expanded = facetsToggle.getAttribute("aria-expanded") === "true";
+    facetsToggle.setAttribute("aria-expanded", String(!expanded));
+    if (expanded) {
+      facetsBody.setAttribute("data-collapsed", "");
+    } else {
+      facetsBody.removeAttribute("data-collapsed");
+    }
+  });
+
+  // Keyboard: "/" focuses search
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "/" && document.activeElement !== input && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLTextAreaElement)) {
+      e.preventDefault();
+      input.focus();
+    }
+  });
+
+  // Back/forward navigation
+  window.addEventListener("popstate", () => {
+    readUrl();
+    apply();
+  });
+
+  // Init: restore state from URL on load. If there's a search query,
+  // defer the first apply until catalog.json loads (otherwise we'd
+  // flash all cards then re-filter). Hide cards while waiting.
+  readUrl();
+  if (filters.q) {
+    grid.classList.add("search-pending");
+  } else {
+    apply();
+  }
 </script>

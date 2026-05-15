@@ -10,13 +10,13 @@
 <script type="module">
 import * as THREE from 'three';
 import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
-import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+import {RGBELoader} from 'three/addons/loaders/RGBELoader.js';
 
 // Single-material thumb renderer (mat-vis#361). Matches bernhard's
 // reference scene from mat-vis#285 ("should look like" image):
 //   geometry  = create_shader_ball (vendored shader_ball.glb)
-//   bg        = 0x1a1a2e (dark navy)
-//   IBL       = RoomEnvironment via PMREM
+//   bg        = 0x1a1a2e (dark navy); env bg for transmissive materials
+//   IBL       = studio_small_09_2k.hdr (Poly Haven CC0) via PMREM
 //   tone-map  = ACES Filmic, exposure 1.0
 //   layout    = single shader ball, framed tight for 256² output
 //
@@ -55,10 +55,8 @@ renderer.toneMappingExposure = 1.0;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.appendChild(renderer.domElement);
 
-const pmrem = new THREE.PMREMGenerator(renderer);
-scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-
 // Lighting: copied from three-cad-viewer's RENDER_DEFAULTS.
+// Kept alongside the HDRI IBL for fill + specular highlight.
 scene.add(new THREE.AmbientLight(0xffffff, 1.0));
 const dir = new THREE.DirectionalLight(0xffffff, 1.1);
 dir.position.set(20, 30, 20);
@@ -104,10 +102,25 @@ async function _buildMaterial(spec) {
   if ('roughness' in spec && spec.roughness != null) params.roughness = spec.roughness;
   if ('ior' in spec && spec.ior != null) params.ior = spec.ior;
   if ('transmission' in spec && spec.transmission != null) params.transmission = spec.transmission;
+  if ('thickness' in spec && spec.thickness != null) params.thickness = spec.thickness;
+  if ('dispersion' in spec && spec.dispersion != null) params.dispersion = spec.dispersion;
   if ('clearcoat' in spec && spec.clearcoat != null) params.clearcoat = spec.clearcoat;
+  if ('clearcoatRoughness' in spec && spec.clearcoatRoughness != null) params.clearcoatRoughness = spec.clearcoatRoughness;
+  if ('specularIntensity' in spec && spec.specularIntensity != null) params.specularIntensity = spec.specularIntensity;
+  if ('specularColor' in spec && spec.specularColor != null) params.specularColor = spec.specularColor;
+  if ('sheen' in spec && spec.sheen != null) params.sheen = spec.sheen;
+  if ('sheenColor' in spec && spec.sheenColor != null) {
+    const sc = spec.sheenColor;
+    params.sheenColor = new THREE.Color(sc[0] ?? 1, sc[1] ?? 1, sc[2] ?? 1);
+  }
+  if ('sheenRoughness' in spec && spec.sheenRoughness != null) params.sheenRoughness = spec.sheenRoughness;
+  if ('iridescence' in spec && spec.iridescence != null) params.iridescence = spec.iridescence;
+  if ('iridescenceIOR' in spec && spec.iridescenceIOR != null) params.iridescenceIOR = spec.iridescenceIOR;
+  if ('iridescenceThicknessRange' in spec && spec.iridescenceThicknessRange != null) params.iridescenceThicknessRange = spec.iridescenceThicknessRange;
   if ('emissive' in spec && spec.emissive != null) {
     params.emissive = new THREE.Color(spec.emissive[0] ?? 0, spec.emissive[1] ?? 0, spec.emissive[2] ?? 0);
   }
+  if ('emissiveIntensity' in spec && spec.emissiveIntensity != null) params.emissiveIntensity = spec.emissiveIntensity;
   // Load all texture maps in parallel, await before constructing the material.
   const texEntries = await Promise.all(
     TEXTURE_KEYS
@@ -130,13 +143,29 @@ async function main() {
   const threejs = raw.threejs || (raw.items && raw.items[0] && raw.items[0].threejs);
   if (!threejs) throw new Error('spec missing threejs material dict');
 
-  // Load shader ball GLB once. build123d uses meters; scale m→mm.
-  // build123d's export_gltf already converts its Z-up to glTF/Three.js
-  // Y-up convention — DO NOT add a manual rotation (was a bug; matches
-  // pymat's visual_render.html which also only scales without rotating).
-  const gltf = await new Promise((resolve, reject) => {
-    new GLTFLoader().load('shader_ball.glb', resolve, undefined, reject);
-  });
+  // Load HDRI + shader ball GLB in parallel. The HDRI provides
+  // higher-frequency specular content than the procedural RoomEnvironment
+  // (ADR-0014 P1) and is essential for transmissive materials where
+  // the environment is visible through the glass.
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const [hdrTexture, gltf] = await Promise.all([
+    new Promise((resolve, reject) => {
+      new RGBELoader().load('studio_small_09_2k.hdr', resolve, undefined, reject);
+    }),
+    new Promise((resolve, reject) => {
+      new GLTFLoader().load('shader_ball.glb', resolve, undefined, reject);
+    }),
+  ]);
+
+  const envMap = pmrem.fromEquirectangular(hdrTexture).texture;
+  hdrTexture.dispose();
+  pmrem.dispose();
+  scene.environment = envMap;
+
+  // build123d uses meters; scale m→mm. build123d's export_gltf already
+  // converts its Z-up to glTF/Three.js Y-up convention — DO NOT add a
+  // manual rotation (was a bug; matches pymat's visual_render.html
+  // which also only scales without rotating).
   const shaderBall = gltf.scene;
   shaderBall.scale.set(1000, 1000, 1000);
 
@@ -148,6 +177,14 @@ async function main() {
     if (child.isMesh) child.material = mat;
   });
   scene.add(shaderBall);
+
+  // Transmissive materials (glass, water, diamond, etc.) refract what's
+  // behind them. With a solid-color background the refraction captures a
+  // flat navy square — glass looks opaque. Swap the background to the
+  // HDRI environment so there's a studio to see through.
+  if (threejs.transmission != null && threejs.transmission > 0) {
+    scene.background = envMap;
+  }
 
   // Camera positioning — bernhard's three-cad-viewer formula adapted
   // for our Y-up post-glTF coords:
