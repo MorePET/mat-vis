@@ -52,18 +52,91 @@ def _generate_thumbnail(src_path: Path, thumb_dir: Path, channel: str) -> Path:
 def _bake_mtlx(mtlx_path: Path, output_dir: Path, resolution_px: int) -> dict[str, Path]:
     """Bake a layered MaterialX graph to flat PNGs.
 
-    Requires the [materialx] optional dependency.
+    Uses MaterialX's TextureBaker to evaluate the nodegraph and produce
+    one flat PNG per resolved channel (color, roughness, normal, etc.).
+    Requires the ``[materialx]`` optional dependency — the Dagger CI
+    image (``build-materialx`` variant) ships it.
+
+    Returns a ``{channel: path}`` dict matching the canonical channel
+    names from :func:`~mat_vis_baker.common.normalize_channel`.
     """
     try:
-        import MaterialX as mx  # noqa: F401
+        import MaterialX as mx
+        from MaterialX import PyMaterialXRenderGlsl as mx_render
     except ImportError as exc:
         raise ImportError(
             "MaterialX is required for baking layered gpuopen graphs. "
             "Install with: pip install mat-vis[materialx]"
         ) from exc
 
-    # TODO: implement full MaterialX TextureBaker flow
-    raise NotImplementedError(f"MaterialX baking not yet implemented: {mtlx_path}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load the document + standard library definitions
+    doc = mx.createDocument()
+    search_path = mx.getDefaultDataSearchPath()
+    library_folders = mx.getDefaultDataLibraryFolders()
+    stdlib = mx.createDocument()
+    mx.loadLibraries(library_folders, search_path, stdlib)
+    doc.importLibrary(stdlib)
+
+    # Read the material MTLX — resolve file paths relative to its dir
+    mx.readFromXmlFile(doc, str(mtlx_path))
+    search_path.append(mx.FilePath(str(mtlx_path.parent)))
+
+    # TextureBaker requires a live GLX/X11 OpenGL context on Linux.
+    # The Dagger CI image must run Xvfb (DISPLAY=:99) so GLX context
+    # creation succeeds. SwiftShader's EGL alone is NOT sufficient —
+    # MaterialXRenderGlsl hardcodes glXChooseVisual/XOpenDisplay.
+    # See /falsify review on #438.
+    baker = mx_render.TextureBaker.create(resolution_px, resolution_px)
+
+    # bakeAllMaterials third arg is an output FILENAME (not a dir).
+    # TextureBaker derives the image output path from the filename's
+    # parent directory. Baked PNGs land alongside the output MTLX.
+    output_mtlx = output_dir / "baked_material.mtlx"
+    baker.bakeAllMaterials(doc, search_path, str(output_mtlx))
+
+    # Map baked output files to canonical channel names. TextureBaker
+    # writes files named ``<material>_<shadingmodel>_<input>.png``,
+    # e.g. ``Concrete_Planks_standard_surface_base_color.png``.
+    # We match on the trailing input name via endswith().
+    channel_map = {
+        "base_color": "color",
+        "basecolor": "color",
+        "diffuse": "color",
+        "normal": "normal",
+        "specular_roughness": "roughness",
+        "roughness": "roughness",
+        "metalness": "metalness",
+        "metallic": "metalness",
+        "emission": "emission",
+        "emissive": "emission",
+        "opacity": "opacity",
+        "occlusion": "ao",
+        "displacement": "displacement",
+    }
+
+    baked: dict[str, Path] = {}
+    for png in output_dir.glob("*.png"):
+        stem = png.stem.lower()
+        for suffix, canonical in channel_map.items():
+            if stem.endswith(suffix) and canonical not in baked:
+                baked[canonical] = png
+                break
+
+    if not baked:
+        raise RuntimeError(
+            f"TextureBaker produced no output PNGs in {output_dir} "
+            f"(mtlx: {mtlx_path})"
+        )
+
+    log.info(
+        "%s: baked %d channels from mtlx (%s)",
+        mtlx_path.stem,
+        len(baked),
+        ", ".join(sorted(baked)),
+    )
+    return baked
 
 
 def bake_material(

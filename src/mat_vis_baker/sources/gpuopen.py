@@ -395,8 +395,12 @@ def _fetch_one(
         resp = retry_request(dl_url)
         mtlx_path, textures = _extract_from_zip(resp.content, mid, output_dir, mtlx_dir=mtlx_dir)
 
-        # If no flat textures but we have mtlx, flag for baking
-        needs_bake = bool(mtlx_path) and not textures
+        # Always bake when MTLX exists — even materials that ship flat
+        # textures may have nodegraph logic (channel extraction, mix
+        # nodes, UV transforms) that the flat files don't represent.
+        # TextureBaker resolves the full graph to correct flat PNGs.
+        # See #438 for the Concrete Planks packed-roughness example.
+        needs_bake = bool(mtlx_path)
 
         if not textures and not mtlx_path:
             log.warning("%s: no textures or mtlx in ZIP", mid)
