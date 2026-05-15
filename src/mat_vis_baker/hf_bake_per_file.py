@@ -386,6 +386,7 @@ def bake_one_per_file(
     dry_run: bool = False,
     storage_tier: str | None = None,
     metrics_path: Path | None = None,
+    force_rebake: bool = False,
     _pre_manifest_hook=None,
 ) -> dict:
     """Bake one (source, tier) into per-file HF commits.
@@ -447,14 +448,20 @@ def bake_one_per_file(
 
     # Pre-flight: which materials are already committed on this tag?
     # Use storage_tier — that's where past runs of THIS bake wrote.
-    already = _already_committed_material_ids(api, repo_id, release_tag, source, storage_tier)
-    if already:
-        log.info(
-            "preflight: %d materials already on %s@%s — skipping",
-            len(already),
-            repo_id,
-            release_tag,
-        )
+    # --force-rebake skips this scan so materials get re-baked even if
+    # their files already exist on HF. Does NOT bypass the prod guard.
+    if force_rebake:
+        already: set[str] = set()
+        log.info("preflight: --force-rebake — skipping tree scan, will re-bake all")
+    else:
+        already = _already_committed_material_ids(api, repo_id, release_tag, source, storage_tier)
+        if already:
+            log.info(
+                "preflight: %d materials already on %s@%s — skipping",
+                len(already),
+                repo_id,
+                release_tag,
+            )
 
     fetch = _get_fetcher(source)
 

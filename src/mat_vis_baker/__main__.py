@@ -394,6 +394,7 @@ def cmd_hf_bake(args: argparse.Namespace) -> int:
         batch_max_bytes=args.batch_max_bytes,
         dry_run=args.dry_run,
         allow_prod=args.allow_prod,
+        force_rebake=args.force_rebake,
         metrics_path=Path(args.metrics_path) if args.metrics_path else None,
     )
     log.info("hf-bake result: %s", result)
@@ -600,6 +601,17 @@ def main() -> int:
             "Permit writes to non-scratch HF dataset repos. Scratch "
             "repos are named */mat-vis-tst and */mat-vis-*-tst; anything "
             "else requires this flag."
+        ),
+    )
+    p_hf.add_argument(
+        "--force-rebake",
+        action="store_true",
+        help=(
+            "Skip the preflight tree scan that detects already-committed "
+            "materials. Use to re-bake materials whose textures need "
+            "regeneration (e.g. after fixing the MTLX baking pipeline). "
+            "Does NOT bypass the prod guard (--allow-prod is still required "
+            "for non-tst repos)."
         ),
     )
     p_hf.add_argument(
