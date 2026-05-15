@@ -57,6 +57,10 @@ def _ids_for_source(source: str) -> list[str]:
         from mat_vis_baker.sources.gpuopen import discover
 
         return [e.get("id") or e.get("name") for e in discover() if e]
+    if source == "physicallybased":
+        from mat_vis_baker.sources.physicallybased import fetch
+
+        return [r.id for r in fetch()]
     raise ValueError(f"unknown source: {source!r}")
 
 
