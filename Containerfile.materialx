@@ -8,6 +8,13 @@ FROM ghcr.io/morepet/mat-vis-baker:latest
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 \
+    xvfb libx11-6 libxext6 libxkbcommon0 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN uv pip install --system --no-cache materialx>=1.39 openexr>=3.3
+
+# TextureBaker requires a GLX/X11 context (not EGL). Xvfb provides
+# a virtual framebuffer. Callers must start it before baking:
+#   Xvfb :99 -screen 0 1024x1024x24 &
+#   export DISPLAY=:99
+ENV DISPLAY=:99
