@@ -919,6 +919,62 @@ class MatVisCi:
             argv.extend(["--previous-tag", previous_tag])
         return await ctr.with_exec(argv).stdout()
 
+    @function
+    async def check_substrate_coverage(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")],
+        release_tag: Annotated[str, Doc("CalVer release tag to check (e.g. v2026.04.99-tst-full-369)")],
+        hf_token: Annotated[
+            dagger.Secret,
+            Doc("HF read token for substrate tree listing"),
+        ],
+        repo_id: Annotated[
+            str, Doc("HF dataset repo (e.g. gerchowl/mat-vis-tst)")
+        ] = "gerchowl/mat-vis-tst",
+        release_line: Annotated[
+            str,
+            Doc("Release line (empty = auto-detect from tag)"),
+        ] = "",
+        include_thumb: Annotated[
+            bool, Doc("Include thumb tier in coverage check")
+        ] = False,
+        upstream_catalog: Annotated[
+            str,
+            Doc("Path to pre-captured upstream-catalog.json (empty = live APIs)"),
+        ] = "",
+        waiver_file: Annotated[
+            str, Doc("Path to waived.yaml (empty = no waivers)")
+        ] = "",
+    ) -> str:
+        """Run scripts/check_substrate_coverage.py — wanted vs actual on HF.
+
+        Compares the canonical release matrix + upstream catalogs against
+        what actually lives on the HF substrate. Returns CLI stdout.
+        Non-zero exit raises ``dagger.ExecError``.
+        """
+        ctr = self._baker_container(context, hf_token=hf_token)
+        argv = [
+            "uv",
+            "run",
+            "--extra",
+            "baker",
+            "python",
+            "scripts/check_substrate_coverage.py",
+            "--release-tag",
+            release_tag,
+            "--repo-id",
+            repo_id,
+        ]
+        if release_line:
+            argv.extend(["--release-line", release_line])
+        if include_thumb:
+            argv.append("--include-thumb")
+        if upstream_catalog:
+            argv.extend(["--upstream-catalog", upstream_catalog])
+        if waiver_file:
+            argv.extend(["--waiver-file", waiver_file])
+        return await ctr.with_exec(argv).stdout()
+
     # ── prod-cut pre-flight (mat-vis#345) ─────────────────────────
     #
     # Three composable gates, each agent-resistant in its own way:

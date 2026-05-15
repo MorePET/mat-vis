@@ -128,15 +128,20 @@ def discover(*, session: requests.Session | None = None) -> list[dict]:
 
 # ── download + extract ──────────────────────────────────────────
 
-# Sub-1k tiers download 1K and let the bake step resize
-_TIER_ATTRS = {
-    "128": "1K-PNG",
-    "256": "1K-PNG",
-    "512": "1K-PNG",
-    "1k": "1K-PNG",
-    "2k": "2K-PNG",
-    "4k": "4K-PNG",
-    "8k": "8K-PNG",
+# Sub-1k tiers download 1K and let the bake step resize.
+# Each tier maps to a list of candidate attributes tried in order:
+# PNG first, then JPG fallback. The 28 oldest ambientcg materials
+# only ship JPG zips; JPG textures are converted to PNG at
+# extraction time (_extract_maps_from_zip) so the downstream
+# pipeline stays PNG-only.
+_TIER_ATTRS: dict[str, list[str]] = {
+    "128": ["1K-PNG", "1K-JPG"],
+    "256": ["1K-PNG", "1K-JPG"],
+    "512": ["1K-PNG", "1K-JPG"],
+    "1k": ["1K-PNG", "1K-JPG"],
+    "2k": ["2K-PNG", "2K-JPG"],
+    "4k": ["4K-PNG", "4K-JPG"],
+    "8k": ["8K-PNG", "8K-JPG"],
 }
 
 
@@ -145,13 +150,15 @@ def _extract_download_url(entry: dict, tier: str) -> str | None:
 
     Downloads live under downloadFolders.default.downloadFiletypeCategories.zip.downloads[]
     with the tier encoded in the `attribute` field (e.g. "1K-PNG").
+    Tries PNG first, then falls back to JPG for older materials that
+    only ship JPEG textures.
     """
     folders = entry.get("downloadFolders")
     if not folders:
         return None
 
-    target_attr = _TIER_ATTRS.get(tier)
-    if not target_attr:
+    candidates = _TIER_ATTRS.get(tier)
+    if not candidates:
         return None
 
     try:
@@ -159,9 +166,10 @@ def _extract_download_url(entry: dict, tier: str) -> str | None:
     except (KeyError, TypeError):
         return None
 
-    for dl in downloads:
-        if dl.get("attribute", "").upper() == target_attr:
-            return dl.get("fullDownloadPath")
+    for target_attr in candidates:
+        for dl in downloads:
+            if dl.get("attribute", "").upper() == target_attr:
+                return dl.get("fullDownloadPath")
 
     return None
 
@@ -227,6 +235,7 @@ def _extract_maps_from_zip(
             if not m:
                 continue
             raw_channel = m.group(1)
+            src_ext = m.group(2).lower()
             channel = normalize_channel("ambientcg", raw_channel)
             if channel is None:
                 continue
@@ -234,7 +243,15 @@ def _extract_maps_from_zip(
                 continue
 
             out_path = mat_dir / f"{channel}.png"
-            out_path.write_bytes(zf.read(name))
+            raw_bytes = zf.read(name)
+            if src_ext == "jpg" or src_ext == "jpeg":
+                # Convert JPEG → PNG so downstream pipeline stays PNG-only.
+                from PIL import Image
+
+                img = Image.open(io.BytesIO(raw_bytes))
+                img.save(out_path, "PNG")
+            else:
+                out_path.write_bytes(raw_bytes)
             result[channel] = out_path
 
     # Per-material channel set is intentionally non-uniform across the
