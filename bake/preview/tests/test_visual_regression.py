@@ -68,6 +68,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 BAKE_PREVIEW = REPO_ROOT / "bake" / "preview"
 THUMB_HTML = BAKE_PREVIEW / "thumb_render.html"
 SHADER_BALL = BAKE_PREVIEW / "assets" / "shader_ball.glb"
+STUDIO_HDRI = BAKE_PREVIEW / "assets" / "studio_small_09_2k.hdr"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -175,6 +176,7 @@ def serve_dir(tmp_path_factory):
     d = tmp_path_factory.mktemp("visual_serve")
     shutil.copy(THUMB_HTML, d / "thumb_render.html")
     shutil.copy(SHADER_BALL, d / "shader_ball.glb")
+    shutil.copy(STUDIO_HDRI, d / "studio_small_09_2k.hdr")
     return d
 
 
