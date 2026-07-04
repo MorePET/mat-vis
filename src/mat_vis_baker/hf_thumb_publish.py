@@ -178,9 +178,20 @@ def publish_thumb_tier(
 
     log.info("found %d local thumbs for %s", len(locals_), source)
 
+    # #428: skip materials marked status="failed" in the catalog — their
+    # thumbs are the renderer's default white sphere (no baseColor applied)
+    # and ship as broken-looking placeholder cards in the gallery (#423).
+    # Fetch the catalog once here for the status filter and reuse it for the
+    # catalog + manifest update below (previously fetched only post-loop).
+    catalog = _fetch_catalog(repo_id, release_tag, source, hf_token)
+    failed_ids = {e["id"] for e in (catalog or []) if e.get("status") == "failed" and e.get("id")}
+    if failed_ids:
+        log.info("thumb: skipping %d status=failed materials for %s", len(failed_ids), source)
+
     n_ok = 0
     n_failed = 0
     n_skipped = 0
+    n_skipped_failed = 0
     derived_ids: set[str] = set()
     last_commit_sha = ""
 
@@ -226,6 +237,9 @@ def publish_thumb_tier(
         return sha or last_commit_sha
 
     for i, (mid, png_path) in enumerate(locals_):
+        if mid in failed_ids:  # #428 — don't publish default-sphere thumbs
+            n_skipped_failed += 1
+            continue
         target_path = f"{source}/{THUMB_TIER}/{mid}/{THUMB_CHANNEL}.png"
         target_url = _resolve_url(repo_id, release_tag, target_path)
 
@@ -272,15 +286,20 @@ def publish_thumb_tier(
         pending_bytes = 0
 
     if n_ok == 0 and n_skipped == 0:
-        return {
-            "error": "no thumbs published",
+        out = {
             "ok": 0,
             "failed": n_failed,
             "skipped_preflight": 0,
+            "skipped_failed": n_skipped_failed,
         }
+        # All-failed (everything status=failed and correctly skipped) is a
+        # valid no-op, not a failure — only flag when nothing was filtered.
+        if n_skipped_failed == 0:
+            out["error"] = "no thumbs published"
+        return out
 
     # ── catalog + manifest update (CAS-retried) ──────────────────
-    catalog = _fetch_catalog(repo_id, release_tag, source, hf_token)
+    # catalog was fetched once up front (for the #428 status filter) — reuse it
     if catalog:
         _extend_available_tiers(catalog, derived_ids, THUMB_TIER)
         _extend_maps_for_thumb(catalog, derived_ids)
@@ -369,11 +388,13 @@ def publish_thumb_tier(
         )
 
     log.info(
-        "PERF thumb publish: %.1fs, %d ok / %d failed / %d skipped (preflight)",
+        "PERF thumb publish: %.1fs, %d ok / %d failed / %d skipped-preflight / "
+        "%d skipped-failed (#428)",
         time.monotonic() - t0,
         n_ok,
         n_failed,
         n_skipped,
+        n_skipped_failed,
     )
 
     return {
@@ -381,5 +402,6 @@ def publish_thumb_tier(
         "ok": n_ok,
         "failed": n_failed,
         "skipped_preflight": n_skipped,
+        "skipped_failed": n_skipped_failed,
         "materials": len(locals_),
     }

@@ -151,6 +151,46 @@ def test_publish_sentinel_is_last_commit(tmp_path: Path):
     assert ops[0].path_in_repo == "ambientcg/thumb/.tier_complete"
 
 
+def test_publish_skips_status_failed_materials(tmp_path: Path):
+    """#428: materials marked status=failed in the catalog must not get a
+    published thumb — the renderer ships a default white sphere for them."""
+    for mid in ("Good_A", "Bad_B", "Good_C"):
+        _make_png(tmp_path / "gpuopen" / mid / "thumb.png")
+    catalog = [
+        {"id": "Good_A", "status": "ok", "maps": ["color"]},
+        {"id": "Bad_B", "status": "failed"},
+        {"id": "Good_C", "status": "ok", "maps": ["color"]},
+    ]
+    fake_api = MagicMock()
+    with (
+        patch("mat_vis_baker.hf_thumb_publish.HfApi", return_value=fake_api),
+        patch("mat_vis_baker.hf_thumb_publish._http_head_ok", return_value=False),
+        patch("mat_vis_baker.hf_thumb_publish._fetch_catalog", return_value=catalog),
+        patch(
+            "mat_vis_baker.hf_thumb_publish._fetch_manifest_with_parent",
+            return_value=({}, "parent"),
+        ),
+        patch("mat_vis_baker.hf_thumb_publish._create_commit_with_backoff") as mock_commit,
+    ):
+        mock_commit.return_value.oid = "x"
+        result = publish_thumb_tier(
+            source="gpuopen",
+            release_tag="v0.0.0-tst",
+            thumbs_dir=tmp_path,
+            repo_id="gerchowl/mat-vis-tst",
+        )
+    committed = [
+        op.path_in_repo
+        for call in mock_commit.call_args_list
+        for op in call.kwargs.get("operations", [])
+    ]
+    assert any(p == "gpuopen/thumb/Good_A/thumb.png" for p in committed)
+    assert any(p == "gpuopen/thumb/Good_C/thumb.png" for p in committed)
+    assert not any("Bad_B" in p for p in committed), "status=failed thumb must not be published"
+    assert result["ok"] == 2
+    assert result["skipped_failed"] == 1
+
+
 def test_publish_skips_bad_png_bytes(tmp_path: Path):
     # Write a non-PNG file as thumb.png — magic-byte verify must reject.
     bad = tmp_path / "ambientcg" / "Bad" / "thumb.png"
