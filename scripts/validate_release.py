@@ -1,7 +1,7 @@
 """Release validator — enforces coverage invariants against the
 per-file substrate metrics parquet (#263 phase C).
 
-Two gates (both hard-failing):
+Three gates (all hard-failing):
 
 1. **Regression gate** — current release's per-(source, tier) material
    total must be >= ``--min-ratio`` x previous release's total. Catches
@@ -11,6 +11,14 @@ Two gates (both hard-failing):
    must be within ``--parity-min-ratio`` of the tier with the largest
    total. Catches uniformly regressed tiers when the previous release
    already had the bug (so the regression gate alone wouldn't fire).
+
+3. **Manifest-asset reachability** (#293, --from-hf only) — every asset
+   the ``release-manifest.json`` *declares* (source catalog, bundled
+   ``mtlx``, each ``complete`` tier's ``.tier_complete`` sentinel) must
+   HEAD-200 on HF. Catches the vertical-completeness class the count
+   gates are blind to: "manifest claims X but X is 404 / never uploaded"
+   (#290 pbr, #292 mtlx). Manifest-declared only → no false positives;
+   only a definitive 404 fails (transient HF statuses are skipped).
 
 Schema-autodetect: the underlying loader handles both the v0.5.x
 ``bake-metrics.parquet`` (one row per release-tag with an
@@ -58,6 +66,7 @@ DEFAULT_EXCLUDE_TIER_PREFIXES = ("ktx2-",)
 __all__ = [
     "baked_ids_from_release_manifest",
     "find_catalog_violations",
+    "find_manifest_asset_violations",
     "find_regressions",
     "find_regressions_from_hf",
     "find_tier_parity_violations",
@@ -288,6 +297,86 @@ def baked_ids_from_release_manifest(
                 pass
             out[(source, tier)] = mids
     return out
+
+
+def _fetch_release_manifest(api: Any, repo_id: str, release_tag: str) -> dict:
+    """Fetch + parse ``release-manifest.json`` from HF. ``{}`` if missing."""
+    try:
+        p = api.hf_hub_download(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=release_tag,
+            filename="release-manifest.json",
+        )
+        return json.loads(Path(p).read_text())
+    except Exception:  # noqa: BLE001 — missing/unparseable manifest → empty
+        return {}
+
+
+def _head_status(url: str) -> int:
+    """HEAD ``url`` and return the final HTTP status (following redirects,
+    e.g. HF's LFS 302). ``0`` on a network-level failure (treated as
+    inconclusive by callers, never a violation)."""
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(url, method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return getattr(resp, "status", 200) or 200
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:  # noqa: BLE001 — DNS/conn/timeout → inconclusive
+        return 0
+
+
+def find_manifest_asset_violations(
+    api: Any,
+    repo_id: str,
+    release_tag: str,
+    *,
+    head_fn: Any = None,
+) -> list[dict[str, Any]]:
+    """#293: assert every asset the release-manifest *declares* is actually
+    reachable on HF (HEAD → 200). Catches the vertical-completeness bug class
+    the count gates are blind to — "manifest claims X but X is 404 / was never
+    uploaded" (#290 pbr, #292 mtlx).
+
+    Manifest-declared only, so **no false positives**: it checks the source
+    catalog (``<src>.json``), the optional bundled ``mtlx`` (``<src>-mtlx.json``,
+    #292), and the ``.tier_complete`` sentinel of every tier the manifest marks
+    ``complete``. Only a definitive **404** is a violation; transient/network
+    statuses (429/5xx/0) are inconclusive and skipped so an HF hiccup can't
+    spuriously red the daily cron.
+
+    ``head_fn`` is injectable for testing (default :func:`_head_status`).
+    """
+    manifest = _fetch_release_manifest(api, repo_id, release_tag)
+    if not manifest:
+        return []
+    head = head_fn or _head_status
+    base = f"https://huggingface.co/datasets/{repo_id}/resolve/{release_tag}"
+
+    violations: list[dict[str, Any]] = []
+    for source, entry in (manifest.get("sources") or {}).items():
+        entry = entry or {}
+        assets: list[tuple[str, str | None, str]] = []
+        if entry.get("catalog"):
+            assets.append(("catalog", None, str(entry["catalog"])))
+        if entry.get("mtlx"):
+            assets.append(("mtlx", None, str(entry["mtlx"])))
+        for tier, tinfo in (entry.get("tiers") or {}).items():
+            if (tinfo or {}).get("complete"):
+                assets.append(("tier_complete", tier, f"{source}/{tier}/.tier_complete"))
+
+        for feature, tier, path in assets:
+            url = f"{base}/{path}"
+            status = head(url)
+            if status == 404:
+                violations.append(
+                    {"source": source, "feature": feature, "tier": tier, "url": url}
+                )
+    return violations
 
 
 # ── Live HF gate (no metrics parquet needed) ──────────────────
@@ -595,18 +684,25 @@ def _run_from_hf(args: argparse.Namespace) -> int:
         min_ratio=args.parity_min_ratio,
         exclude_tier_prefixes=tuple(args.exclude_tier_prefix),
     )
-    return _report(args, regressions, violations)
+    # #293: vertical-completeness — every manifest-declared asset must be
+    # reachable (catches "declared but 404" that count gates miss).
+    asset_violations = find_manifest_asset_violations(
+        api, repo_id=args.repo_id, release_tag=args.release_tag
+    )
+    return _report(args, regressions, violations, asset_violations)
 
 
 def _report(
     args: argparse.Namespace,
     regressions: list[dict[str, Any]],
     violations: list[dict[str, Any]],
+    asset_violations: list[dict[str, Any]] | None = None,
 ) -> int:
     """Shared output writer + return-code computation. Centralised so
     both --metrics and --from-hf modes emit the same operator-facing
     text format."""
-    if not regressions and not violations:
+    asset_violations = asset_violations or []
+    if not regressions and not violations and not asset_violations:
         mode = "from-hf" if args.from_hf else "parquet"
         print(f"validate-release {args.release_tag} ({mode}): clean")
         return 0
@@ -628,6 +724,14 @@ def _report(
                 f"(leader={v['leader_count']}, ratio={v['ratio']:.3f}, "
                 f"min={args.parity_min_ratio})"
             )
+
+    if asset_violations:
+        print(f"\n=== manifest-declared assets missing (404) in {args.release_tag} ===")
+        for a in asset_violations:
+            where = f"{a['source']}/{a['feature']}"
+            if a.get("tier"):
+                where += f"/{a['tier']}"
+            print(f"  {where}: {a['url']}")
 
     return 1
 
