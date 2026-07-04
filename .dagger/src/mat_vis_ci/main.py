@@ -59,6 +59,16 @@ from mat_vis_ci._bake_cli import bake_argv as _bake_argv
 IMAGE = "ghcr.io/morepet/mat-vis-baker"
 TARGET_PLATFORM = dagger.Platform("linux/amd64")
 
+# MaterialX TextureBaker needs a live GLX/X11 display for the DURATION of
+# the render — glXChooseVisual/XOpenDisplay, not EGL (see /falsify on #438).
+# A backgrounded `Xvfb &` in an earlier build layer does NOT survive into a
+# later render exec: Dagger runs each with_exec() as a fresh process tree, so
+# the daemon is already gone. `xvfb-run` starts the server, waits for it to be
+# ready, exports DISPLAY, runs the wrapped command, and tears the server down —
+# all inside the ONE exec that renders. Prepend to any argv that drives
+# TextureBaker (the gpuopen bake, the materialx smoke test). Fixes #440/#441.
+XVFB_RUN = ["xvfb-run", "-a", "--server-args=-screen 0 1024x1024x24"]
+
 PROBE_SCRIPT = '''\
 """Probe upstream material APIs — one minimal request each."""
 
@@ -271,6 +281,82 @@ class MatVisCi:
         ctr = self.build_materialx(src)
         return await ctr.with_exec(
             ["python", "-c", "import pyarrow; import MaterialX; print('materialx ok')"]
+        ).stdout()
+
+    @function
+    async def test_materialx(
+        self,
+        src: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+    ) -> str:
+        """Run the MaterialX baker smoke test under a live Xvfb display.
+
+        This is the ONLY CI leg that drives the real ``TextureBaker`` API
+        path end-to-end (``tests/test_bake_mtlx_smoke.py``). It runs in the
+        heavy materialx container, wrapped in ``xvfb-run`` — the SAME display
+        wrapper the gpuopen bake uses — so a ``TextureBaker.create()``
+        signature/``BaseType`` regression (#442/#443/#445) or a broken
+        display wiring fails HERE, in seconds, instead of at bake runtime
+        one CI round-trip at a time.
+
+        ``uv sync --all-extras`` (run by ``_baker_container``) already
+        installs pytest + Pillow (``[dev]``/``[baker]``) and MaterialX
+        (``[materialx]``), so ``uv run pytest`` sees the full env. Under
+        ``xvfb-run`` DISPLAY is exported to a live server, so the two
+        GLX-gated bake tests run for real rather than skipping.
+        """
+        context = src or dag.host().directory(".")
+        ctr = self._baker_container(context, with_materialx=True)
+        return await ctr.with_exec(
+            [*XVFB_RUN, "uv", "run", "pytest", "tests/test_bake_mtlx_smoke.py", "-v"]
+        ).stdout()
+
+    @function
+    async def test_visual(
+        self,
+        context: Annotated[dagger.Directory, Doc("Project root directory")] | None = None,
+        repo_id: Annotated[
+            str, Doc("HF dataset the bernhard grid resolves against")
+        ] = "gerchowl/mat-vis-tst",
+        release_tag: Annotated[
+            str, Doc("Substrate revision with full 4-source bernhard coverage")
+        ] = "v2026.04.99-tst-full-369",
+        hf_token: Annotated[
+            dagger.Secret | None, Doc("HF read token (needed for private scratch repos)")
+        ] = None,
+    ) -> str:
+        """Run the headless visual-regression suite against a live substrate.
+
+        Ungates ``bake/preview/tests/test_visual_regression.py`` — the
+        RMS-vs-baseline renders (30 committed baselines) that catch the
+        transmissive-renders-opaque class (#429/#428) and the #285 scalar
+        regression. Default-skipped via ``MAT_VIS_SKIP_VISUAL=1``; here we
+        flip it to ``0`` and drive headless Chromium (SwiftShader) through
+        Playwright, pinned to the tst full-bake so bernhard's 24 textured +
+        5 scalar materials are actually staged.
+
+        Repo routing: the test constructs ``MatVisClient(tag=...)`` with no
+        ``repo=`` kwarg, so ``MAT_VIS_DATASET=<repo>@<tag>`` steers it at the
+        scratch dataset (client resolver Layer 2; ``repo_kwarg or env_repo``).
+
+        Scheduled (visual-regression.yml), NOT on the PR gate: it hits live
+        HF + downloads a browser, and the repo keeps live-substrate checks
+        off PR CI (#80).
+        """
+        ctx = context or dag.host().directory(".")
+        ctr = self._baker_container(ctx, hf_token=hf_token)
+        # Playwright + Chromium (~300 MB per-job add, same as the thumb
+        # derive leg — not baked into the image while visual is the only
+        # consumer here).
+        ctr = ctr.with_exec(["uv", "pip", "install", "playwright>=1.45"]).with_exec(
+            ["uv", "run", "playwright", "install", "--with-deps", "chromium"]
+        )
+        ctr = (
+            ctr.with_env_variable("MAT_VIS_SKIP_VISUAL", "0")
+            .with_env_variable("MAT_VIS_DATASET", f"{repo_id}@{release_tag}")
+            .with_env_variable("MAT_VIS_TAG", release_tag)
+        )
+        return await ctr.with_exec(
+            ["uv", "run", "pytest", "bake/preview/tests/test_visual_regression.py", "-v"]
         ).stdout()
 
     @function
@@ -610,18 +696,21 @@ class MatVisCi:
             )
 
         if with_materialx:
-            # MaterialX TextureBaker requires GLX/X11 (not EGL). Install
-            # Xvfb + X11 libs + MaterialX. Xvfb must be started before
-            # baking — the with_exec below launches it as a background
-            # daemon. See /falsify review on #438.
+            # MaterialX TextureBaker requires a live GLX/X11 context (not
+            # EGL). Install Xvfb + xauth (xvfb-run needs it for the auth
+            # cookie) + the X11 runtime libs. The display itself is NOT
+            # started here — it is launched per-render via `xvfb-run` (see
+            # XVFB_RUN + the bake / test_materialx call sites), which also
+            # exports DISPLAY, so there is deliberately no static DISPLAY
+            # env to dangle at a dead server. #438/#441.
             ctr = ctr.with_exec(
                 [
                     "sh",
                     "-c",
                     "apt-get install -y -qq "
-                    "xvfb libgl1 libglib2.0-0 libx11-6 libxext6 libxkbcommon0",
+                    "xvfb xauth libgl1 libglib2.0-0 libx11-6 libxext6 libxkbcommon0",
                 ]
-            ).with_env_variable("DISPLAY", ":99")
+            )
 
         ctr = (
             ctr.with_env_variable("PYTHONUNBUFFERED", "1")
@@ -632,12 +721,12 @@ class MatVisCi:
         )
 
         if with_materialx:
-            # Install MaterialX after uv sync so it layers on top of
-            # the project deps. Start Xvfb as a background daemon.
-            ctr = (
-                ctr.with_exec(["uv", "pip", "install", "--system", "materialx>=1.39"])
-                .with_exec(["sh", "-c", "Xvfb :99 -screen 0 1024x1024x24 &"])
-            )
+            # Reinforce the MaterialX install on top of the uv-synced env.
+            # No Xvfb daemon is started here — see the note above; renders
+            # wrap their command in XVFB_RUN so the server lives for the
+            # duration of the render (a background Xvfb in this layer would
+            # not survive into the render exec). #441.
+            ctr = ctr.with_exec(["uv", "pip", "install", "--system", "materialx>=1.39"])
 
         if hf_token is not None:
             ctr = ctr.with_secret_variable("HF_TOKEN", hf_token)
@@ -706,8 +795,9 @@ class MatVisCi:
         self._guard_prod_target(repo_id, allow_prod)
         # gpuopen materials have MTLX nodegraphs that need TextureBaker
         # to resolve packed textures to flat PNGs (#438).
+        needs_display = source == "gpuopen"
         ctr = self._baker_container(
-            context, hf_token=hf_token, with_materialx=(source == "gpuopen"),
+            context, hf_token=hf_token, with_materialx=needs_display,
         )
         argv = _bake_argv(
             source=source,
@@ -723,6 +813,14 @@ class MatVisCi:
             allow_prod=allow_prod,
             force_rebake=force_rebake,
         )
+        if needs_display:
+            # TextureBaker opens a GLX context for the whole render, so the
+            # baker must run under a live Xvfb started in THIS exec. Without
+            # the wrapper the render crashes with "Can't open display" even
+            # though DISPLAY looks set — the root cause of #441. Dry-runs
+            # skip baking, but wrapping is harmless (xvfb-run just execs the
+            # CLI, which exits before touching a display).
+            argv = [*XVFB_RUN, *argv]
         return await ctr.with_exec(argv).stdout()
 
     # ── release matrix (mat-vis#306) ──────────────────────────────
