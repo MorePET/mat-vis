@@ -138,18 +138,21 @@ env:
 # bake.yml. Job-level concurrency in #233 conflicted with matrix
 # siblings; reverted to workflow level + matrix.max-parallel: 1 below.
 #
-# Group key includes kind/source-tier/target-tier so distinct-purpose
-# dispatches (e.g. resize 1k→512 vs resize 1k→256 vs ktx2-1k) don't
-# displace each other in the queue. GHA's "at most one pending per
-# group with cancel-in-progress=false" rule cancelled sibling resize
-# dispatches that all shared the legacy ``derive-{repo}-budget`` key —
-# repeatable trigger when a user fires three target-tiers in quick
-# succession (the third dispatch would cancel the second's pending
-# slot, leaving a hole in the chain). Same-purpose double-dispatch
-# (e.g. retrying resize 1k→512 while one is still queued) still
-# serializes correctly because that case shares the group key.
+# Group key includes kind/sources/source-tier/target-tier so distinct-purpose
+# dispatches (e.g. resize 1k→512 vs resize 1k→256 vs ktx2-1k, or thumb
+# polyhaven vs thumb gpuopen) don't displace each other in the queue. GHA's
+# "at most one pending per group with cancel-in-progress=false" rule cancelled
+# sibling dispatches that shared the legacy ``derive-{repo}-budget`` key —
+# repeatable when a user fires three target-tiers OR three sources in quick
+# succession (the third dispatch would cancel the second's pending slot,
+# leaving a hole in the chain). #422: ``sources`` was missing, so per-source
+# sibling dispatches of the same kind still cancelled (surfaced by #402/#403's
+# 4-source thumb bake). Same-purpose double-dispatch (e.g. retrying resize
+# 1k→512, or the same sources string, while one is still queued) still
+# serializes correctly because that case shares the group key. ``sources=all``
+# collapses to one slot — correct, it's one logical dispatch.
 concurrency:
-  group: derive-${{ inputs.repo-id }}-${{ inputs.kind }}-${{ inputs.source-tier }}-${{ inputs.target-tier }}-budget
+  group: derive-${{ inputs.repo-id }}-${{ inputs.kind }}-${{ inputs.sources }}-${{ inputs.source-tier }}-${{ inputs.target-tier }}-budget
   cancel-in-progress: false
 
 jobs:
