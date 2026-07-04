@@ -48,9 +48,16 @@ inputs:
     required: false
     default: 'call'
   version:
-    description: 'Dagger CLI version. Empty = action default.'
+    # Pin the CLI to the module-compatible engine (matches
+    # .dagger/dagger.json engineVersion). The action installs *latest*
+    # when this is empty, and latest drifted 0.20.8 -> 0.21.7 whose
+    # bundled beartype rejects `Optional[dagger.Directory]` — the
+    # Annotated[dagger.Directory,...] | None pattern used throughout the
+    # module — so every Dagger job fails at module load. Unpin only once
+    # the module is made 0.21+ compatible.
+    description: 'Dagger CLI version (pinned for module compatibility).'
     required: false
-    default: ''
+    default: '0.20.8'
   cloud-token:
     description: 'DAGGER_CLOUD_TOKEN. Empty = no cloud telemetry.'
     required: false
