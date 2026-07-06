@@ -69,6 +69,21 @@ jobs:
         with:
           args: test-clients --src=. --tag=v2026.04.2 --live=true
 
+  materialx-test:
+    name: MaterialX baker smoke (Xvfb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Builds the heavy materialx container and runs the TextureBaker
+      # smoke test (tests/test_bake_mtlx_smoke.py) under a live xvfb-run
+      # display. This is the only leg that exercises the real MaterialX
+      # bake API — the class of bug (#442/#443/#445 signature/import, plus
+      # the #441 "no live display during bake" wiring) that previously
+      # slipped every unit gate and only surfaced at bake runtime.
+      - uses: ./.github/actions/dagger-call
+        with:
+          args: test-materialx --src=.
+
   # validate-release lives in promote-data-release.yml (pre-promotion gate)
   # and release-validate.yml (daily drift check). It tests the state of a
   # published GitHub Release, not the code in this PR, so it does not
@@ -77,7 +92,7 @@ jobs:
   push:
     name: Push baker image to GHCR
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [ci, integration, client-tests]
+    needs: [ci, integration, client-tests, materialx-test]
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -266,6 +266,7 @@ jobs:
         with:
           verb: call
           module: .dagger
+          version: '0.20.8'  # module-compatible CLI (0.21+ beartype breaks load)
           args: >-
             ${{ inputs.kind == 'resize' && 'derive' || 'derive-ktx-2' }}
             --context=.
@@ -285,6 +286,7 @@ jobs:
         with:
           verb: call
           module: .dagger
+          version: '0.20.8'  # module-compatible CLI (0.21+ beartype breaks load)
           args: >-
             thumb
             --context=.
