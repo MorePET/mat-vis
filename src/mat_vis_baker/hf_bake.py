@@ -47,6 +47,11 @@ DEFAULT_REPO_ID = "gerchowl/mat-vis"
 DEFAULT_BATCH_SIZE = 300
 DEFAULT_BATCH_MAX_BYTES = 700 * 1024 * 1024  # 700 MiB
 
+# The single tier a scalar-only source ships. Shared so the manifest tier key
+# and the `.tier_complete` sentinel path can never drift apart (drift would
+# silently re-404 the #293 asset-reachability gate).
+SCALAR_TIER = "scalar"
+
 
 def _get_fetcher(source: str):
     if source == "ambientcg":
@@ -107,11 +112,22 @@ def bake_scalar_source(
         )
         return {"dry_run": True, "materials": len(index)}
 
-    # 1) Catalog commit — single file, same wholesale-overwrite shape
-    # as before. push_to_hf takes care of branch creation if missing.
+    # 1) Catalog commit — catalog + the `.tier_complete` sentinel. #293: the
+    # scalar path declares `scalar: {complete: True}` in the manifest but
+    # (pre-fix) never wrote the `<source>/scalar/.tier_complete` marker the
+    # textured path writes, so the manifest-asset-reachability gate correctly
+    # 404'd on it. Emit the zero-byte sentinel so "declared" matches "shipped"
+    # and clients can probe scalar completeness in one HEAD like any tier.
+    sentinel_path = work_dir / ".tier_complete"
+    # Carry the release tag (the convention the textured/thumb/derive paths
+    # use) — a "which tag completed this tier" breadcrumb, not just zero bytes.
+    sentinel_path.write_text(release_tag + "\n")
     catalog_sha = push_to_hf(
         repo_id=repo_id,
-        files=[(catalog_path, f"{source}.json")],
+        files=[
+            (catalog_path, f"{source}.json"),
+            (sentinel_path, f"{source}/{SCALAR_TIER}/.tier_complete"),
+        ],
         revision=release_tag,
         commit_message=f"feat(data): {release_tag} — bake {source} (scalar)",
         token=hf_token,
@@ -130,7 +146,7 @@ def bake_scalar_source(
     manifest_sha = ""
     for attempt in range(max_retries):
         existing_manifest, parent_sha = _fetch_manifest_with_parent(api, repo_id, release_tag)
-        merged = _merge_manifest_for_source(existing_manifest, source, "scalar", release_tag)
+        merged = _merge_manifest_for_source(existing_manifest, source, SCALAR_TIER, release_tag)
         manifest_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
         try:
             manifest_commit = _create_commit_with_backoff(
