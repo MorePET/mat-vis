@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar
 
 from mat_vis_client.match import Match
 from mat_vis_client.progress import ClientEvent
@@ -461,13 +461,21 @@ _NOT_FOUND_BY_KIND: dict[str, type[NotFoundError]] = {
 }
 
 
-def _lookup(mapping: dict, key: str, *, kind: str, context: str = "") -> object:
+_V = TypeVar("_V")
+
+
+def _lookup(mapping: dict[str, _V], key: str, *, kind: str, context: str = "") -> _V:
     """Dict lookup that raises the typed ``NotFoundError`` subclass for
     ``kind`` (with an ``available=[...]`` hint) instead of ``KeyError``.
 
     Example: ``_lookup(materials, "Rock999", kind="material", context="ambientcg/1k")``
     raises :class:`MaterialNotFoundError` carrying ``.key`` / ``.available`` /
     ``.context``.
+
+    #72: generic over the value type so callers keep static inference —
+    ``_lookup(tier_data, "base_url", ...)`` returns the mapping's value
+    type instead of an opaque ``object`` (which broke Pyright/mypy on the
+    downstream ``tier_data["base_url"]`` / ``mat[channel]`` indexing).
     """
     if key in mapping:
         return mapping[key]
