@@ -1,7 +1,7 @@
 """Release validator — enforces coverage invariants against the
 per-file substrate metrics parquet (#263 phase C).
 
-Four gates (all hard-failing):
+Five gates (all hard-failing):
 
 1. **Regression gate** — current release's per-(source, tier) material
    total must be >= ``--min-ratio`` x previous release's total. Catches
@@ -32,6 +32,16 @@ Four gates (all hard-failing):
    every phase (bake + derive + ktx2) has run — enabled in release-validate,
    not in bake.yml's per-phase post-bake validate (which sees only the native
    bake tier and would false-fire on the not-yet-derived tiers).
+
+5. **PBR coverage regression** (#293-P1, --from-hf only) — each source's
+   populated-``pbr`` fraction (materials with ≥1 non-null scalar) must be >=
+   ``--pbr-coverage-min-ratio`` x the previous release's fraction. Catches the
+   #290 class the count/parity/asset gates are blind to: a material ships and
+   is counted "complete", but its scalar ``pbr`` block is silently all-null
+   (the gpuopen 454×``pbr=None`` that read as green). Regression-relative and
+   self-calibrating — a source with no prior coverage gets a free pass;
+   ``--pbr-waive-source`` exempts one. A catalog property (not tier-dependent),
+   so — unlike gate 4 — it's valid after the bake phase and stays always-on.
 
 Schema-autodetect: the underlying loader handles both the v0.5.x
 ``bake-metrics.parquet`` (one row per release-tag with an
@@ -73,6 +83,7 @@ import pyarrow.parquet as pq
 
 DEFAULT_MIN_RATIO = 0.95
 DEFAULT_PARITY_MIN_RATIO = 0.80
+DEFAULT_PBR_COVERAGE_MIN_RATIO = 0.95
 DEFAULT_EXCLUDE_TIER_PREFIXES = ("ktx2-",)
 
 
@@ -80,6 +91,7 @@ __all__ = [
     "baked_ids_from_release_manifest",
     "find_catalog_violations",
     "find_manifest_asset_violations",
+    "find_pbr_coverage_regressions",
     "find_regressions",
     "find_regressions_from_hf",
     "find_tier_completeness_violations",
@@ -475,6 +487,109 @@ def find_tier_completeness_violations(
     return violations
 
 
+# ── #293-P1: pbr scalar coverage regression (per source) ──
+
+
+def _pbr_populated(pbr: Any) -> bool:
+    """True if a material's ``mat_vis.pbr`` block carries at least one
+    non-null scalar value.
+
+    The block always serializes as a full dict (``asdict`` emits every key,
+    ``null`` where the extractor had nothing), so "has a pbr dict" is NOT
+    coverage — an all-null dict is the #290 gpuopen-omits-scalars bug. Coverage
+    means ≥1 field is actually populated.
+    """
+    if not isinstance(pbr, dict):
+        return False
+    return any(v is not None and v != [] and v != {} for v in pbr.values())
+
+
+def _fetch_source_catalog(api: Any, repo_id: str, release_tag: str, catalog: str) -> list[dict]:
+    """Fetch + parse a source catalog (``<source>.json``) from HF. ``[]`` if
+    missing/unparseable. Normalizes list vs ``{"materials": [...]}`` shapes."""
+    try:
+        p = api.hf_hub_download(
+            repo_id=repo_id, repo_type="dataset", revision=release_tag, filename=catalog
+        )
+        data = json.loads(Path(p).read_text())
+    except Exception:  # noqa: BLE001 — missing/unparseable catalog → empty
+        return []
+    if isinstance(data, list):
+        return data
+    return data.get("materials") or data.get("entries") or []
+
+
+def source_pbr_coverage(api: Any, repo_id: str, release_tag: str) -> dict[str, tuple[int, int]]:
+    """Return ``{source: (populated, total)}`` pbr coverage, reading each
+    source's catalog declared in the release manifest."""
+    manifest = _fetch_release_manifest(api, repo_id, release_tag)
+    out: dict[str, tuple[int, int]] = {}
+    for source, entry in (manifest.get("sources") or {}).items():
+        catalog = (entry or {}).get("catalog")
+        if not catalog:
+            continue
+        entries = _fetch_source_catalog(api, repo_id, release_tag, str(catalog))
+        total = len(entries)
+        populated = sum(
+            1 for e in entries if _pbr_populated((e.get("mat_vis") or {}).get("pbr"))
+        )
+        out[source] = (populated, total)
+    return out
+
+
+def find_pbr_coverage_regressions(
+    api: Any,
+    *,
+    repo_id: str,
+    current_tag: str,
+    previous_tag: str,
+    min_ratio: float = DEFAULT_PBR_COVERAGE_MIN_RATIO,
+    waivers: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """#293-P1: flag a source whose populated-``pbr`` fraction dropped below
+    ``min_ratio`` × the previous release's fraction.
+
+    Regression-relative (mirrors the material-count :func:`find_regressions`):
+    self-calibrating, no per-source hardcoded floor, and it tolerates a
+    legitimate single-material gap (fresh data: all sources ~100%, ambientcg
+    99.9%). Catches the class the count/parity/asset gates are blind to — a
+    material ships but its scalar ``pbr`` block is silently all-null (#290: the
+    gpuopen 454×``pbr=None`` that read as "complete"). A source in ``waivers``
+    is skipped. Sources with no previous coverage (prev fraction 0 / absent)
+    get a free pass — nothing to regress against.
+    """
+    waivers = waivers or set()
+    prev = source_pbr_coverage(api, repo_id, previous_tag)
+    if not prev:
+        return []
+    cur = source_pbr_coverage(api, repo_id, current_tag)
+
+    violations: list[dict[str, Any]] = []
+    for source, (pop, total) in sorted(cur.items()):
+        if source in waivers or source not in prev:
+            continue
+        prev_pop, prev_total = prev[source]
+        prev_frac = prev_pop / prev_total if prev_total else 0.0
+        if prev_frac <= 0:
+            continue  # nothing to regress against (source had no pbr before)
+        cur_frac = pop / total if total else 0.0
+        ratio = cur_frac / prev_frac
+        if ratio < min_ratio:
+            violations.append(
+                {
+                    "source": source,
+                    "current_tag": current_tag,
+                    "previous_tag": previous_tag,
+                    "current_frac": cur_frac,
+                    "previous_frac": prev_frac,
+                    "ratio": ratio,
+                    "current_populated": pop,
+                    "current_total": total,
+                }
+            )
+    return violations
+
+
 # ── Live HF gate (no metrics parquet needed) ──────────────────
 
 
@@ -740,6 +855,22 @@ def main(argv: list[str] | None = None) -> int:
             "derived tiers."
         ),
     )
+    p.add_argument(
+        "--pbr-coverage-min-ratio",
+        type=float,
+        default=DEFAULT_PBR_COVERAGE_MIN_RATIO,
+        help=(
+            f"#293-P1 pbr-coverage regression threshold (default "
+            f"{DEFAULT_PBR_COVERAGE_MIN_RATIO}). A source's populated-pbr fraction "
+            f"must be >= this x the previous release's. --from-hf only."
+        ),
+    )
+    p.add_argument(
+        "--pbr-waive-source",
+        action="append",
+        default=[],
+        help="source to exempt from the pbr-coverage regression gate (repeatable)",
+    )
     args = p.parse_args(argv)
 
     if args.from_hf:
@@ -819,7 +950,31 @@ def _run_from_hf(args: argparse.Namespace) -> int:
                     f"(tier-completeness gate skipped)",
                     file=sys.stderr,
                 )
-    return _report(args, regressions, violations, asset_violations, completeness_violations)
+    # #293-P1: pbr scalar coverage regression — a source's populated-pbr
+    # fraction must not drop below min_ratio × the previous release's fraction.
+    # Catches the #290 class (material ships but its pbr block is silently
+    # all-null) that the count/parity/asset gates miss. Regression-relative and
+    # a catalog property (not tier-dependent), so it's safe after the bake phase
+    # too. Free pass when there's no previous tag / no prior coverage.
+    if args.previous_tag:
+        coverage_regressions = find_pbr_coverage_regressions(
+            api,
+            repo_id=args.repo_id,
+            current_tag=args.release_tag,
+            previous_tag=args.previous_tag,
+            min_ratio=args.pbr_coverage_min_ratio,
+            waivers=set(args.pbr_waive_source),
+        )
+    else:
+        coverage_regressions = []
+    return _report(
+        args,
+        regressions,
+        violations,
+        asset_violations,
+        completeness_violations,
+        coverage_regressions,
+    )
 
 
 def _report(
@@ -828,13 +983,17 @@ def _report(
     violations: list[dict[str, Any]],
     asset_violations: list[dict[str, Any]] | None = None,
     completeness_violations: list[dict[str, Any]] | None = None,
+    coverage_regressions: list[dict[str, Any]] | None = None,
 ) -> int:
     """Shared output writer + return-code computation. Centralised so
     both --metrics and --from-hf modes emit the same operator-facing
     text format."""
     asset_violations = asset_violations or []
     completeness_violations = completeness_violations or []
-    if not regressions and not violations and not asset_violations and not completeness_violations:
+    coverage_regressions = coverage_regressions or []
+    if not any(
+        (regressions, violations, asset_violations, completeness_violations, coverage_regressions)
+    ):
         mode = "from-hf" if args.from_hf else "parquet"
         print(f"validate-release {args.release_tag} ({mode}): clean")
         return 0
@@ -872,6 +1031,16 @@ def _report(
         )
         for c in completeness_violations:
             print(f"  {c['source']}/{c['tier']}: {c['kind']}")
+
+    if coverage_regressions:
+        print(f"\n=== pbr coverage regressions in {args.release_tag} (#293-P1) ===")
+        for c in coverage_regressions:
+            print(
+                f"  {c['source']}: {c['current_frac']:.1%} "
+                f"({c['current_populated']}/{c['current_total']}) "
+                f"vs {c['previous_frac']:.1%} in {c['previous_tag']} "
+                f"(ratio={c['ratio']:.3f}, min={args.pbr_coverage_min_ratio})"
+            )
 
     return 1
 
