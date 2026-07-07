@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 from mat_vis_baker.sources.gpuopen import (
     UPSTREAM_ALLOWLIST,
     _authors,
+    _extract_from_zip,
     _fetch_one,
     _iso_date,
     _max_resolution_px,
@@ -281,3 +282,92 @@ def test_upstream_allowlist_includes_mtlx_anchor() -> None:
     assert "mtlx_material_name" in UPSTREAM_ALLOWLIST
     assert "packages" not in UPSTREAM_ALLOWLIST
     assert "renders" not in UPSTREAM_ALLOWLIST
+
+
+# ── #461: source images must land where the mtlx references them ──
+#
+# The bug: extraction renamed textures to channel names (color.png) but the
+# mtlx still referenced textures/<Original>.png, so TextureBaker resolved
+# nothing → no output PNGs → the whole gpuopen bake failed. No prior test
+# baked (or even extracted) a real image-referencing gpuopen material.
+
+
+def _zip_with(members: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+_PNG = b"\x89PNG\r\n\x1a\nfake"
+_MTLX_WITH_IMAGE = (
+    b'<?xml version="1.0"?><materialx version="1.38">'
+    b'<image name="base" type="color3"><input name="file" type="filename" '
+    b'value="textures/Foo_baseColor.png"/></image>'
+    b'<image name="msk" type="float"><input name="file" type="filename" '
+    b'value="textures/Foo_Mask.png"/></image></materialx>'
+)
+
+
+def test_extract_places_textures_at_mtlx_referenced_path(tmp_path: Path) -> None:
+    """#461: the file the mtlx references (``textures/Foo_baseColor.png``)
+    must exist relative to the extracted mtlx — NOT renamed to ``color.png``."""
+    zip_bytes = _zip_with(
+        {
+            "material.mtlx": _MTLX_WITH_IMAGE,
+            "textures/Foo_baseColor.png": _PNG,
+        }
+    )
+    mtlx_path, textures = _extract_from_zip(zip_bytes, "mat-1", tmp_path)
+    mat_dir = tmp_path / "mat-1"
+    # The mtlx's <image file="textures/Foo_baseColor.png"> resolves relative
+    # to the mtlx dir — so the file must be exactly there.
+    assert (mat_dir / "textures" / "Foo_baseColor.png").is_file()
+    assert mtlx_path == mat_dir / "material.mtlx"
+    # Channel map still derived, now pointing at the preserved path.
+    assert textures.get("color") == mat_dir / "textures" / "Foo_baseColor.png"
+    # Pre-#461 wrote color.png at the material root — must NOT be there.
+    assert not (mat_dir / "color.png").exists()
+
+
+def test_extract_strips_mtlx_subdir_prefix(tmp_path: Path) -> None:
+    """Zip laid out under a folder (``Foo/material.mtlx`` + ``Foo/textures/…``)
+    must still resolve: the mtlx flattens to mat_dir, so textures land at
+    ``mat_dir/textures/…`` (prefix stripped)."""
+    zip_bytes = _zip_with(
+        {
+            "Foo/material.mtlx": _MTLX_WITH_IMAGE,
+            "Foo/textures/Foo_baseColor.png": _PNG,
+        }
+    )
+    _extract_from_zip(zip_bytes, "mat-2", tmp_path)
+    assert (tmp_path / "mat-2" / "textures" / "Foo_baseColor.png").is_file()
+
+
+def test_extract_keeps_non_channel_textures(tmp_path: Path) -> None:
+    """A mask (no derivable channel) is referenced by the mtlx, so it must be
+    extracted too — pre-#461 gated extraction on a resolved channel and
+    dropped it, leaving a dangling <image> ref."""
+    zip_bytes = _zip_with(
+        {
+            "material.mtlx": _MTLX_WITH_IMAGE,
+            "textures/Foo_baseColor.png": _PNG,
+            "textures/Foo_Mask.png": _PNG,
+        }
+    )
+    _extract_from_zip(zip_bytes, "mat-3", tmp_path)
+    assert (tmp_path / "mat-3" / "textures" / "Foo_Mask.png").is_file()
+
+
+def test_extract_sanitizes_zip_slip(tmp_path: Path) -> None:
+    """A malicious ``../`` member must not escape the material dir."""
+    zip_bytes = _zip_with(
+        {
+            "material.mtlx": _MTLX_WITH_IMAGE,
+            "../evil_baseColor.png": _PNG,
+        }
+    )
+    _extract_from_zip(zip_bytes, "mat-4", tmp_path)
+    assert not (tmp_path / "evil_baseColor.png").exists()
+    assert (tmp_path / "mat-4" / "evil_baseColor.png").is_file()
