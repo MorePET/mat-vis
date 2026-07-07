@@ -28,6 +28,7 @@ from unittest.mock import MagicMock
 from mat_vis_baker.per_file_metrics import record_batch
 from scripts.validate_release import (
     baked_ids_from_release_manifest,
+    find_manifest_asset_violations,
     find_regressions,
     find_regressions_from_hf,
     find_tier_parity_violations,
@@ -554,3 +555,73 @@ def test_regression_from_hf_detects_tier_completely_missing(tmp_path):
     assert r["tier"] == "512"
     assert r["actual_count"] == 0
     assert r["kind"] == "tier_missing"
+
+
+# ── #293: manifest-declared asset reachability ──────────────────
+
+
+def _manifest_api(tmp_path, manifest):
+    """MagicMock HfApi whose hf_hub_download yields a written manifest file."""
+    mfile = tmp_path / "release-manifest.json"
+    mfile.write_text(json.dumps(manifest))
+    api = MagicMock()
+    api.hf_hub_download.return_value = str(mfile)
+    return api
+
+
+def test_manifest_assets_flags_declared_but_missing(tmp_path):
+    # gpuopen declares catalog + mtlx + a complete 1k tier; only the mtlx 404s.
+    manifest = {
+        "schema_version": 3,
+        "sources": {
+            "gpuopen": {
+                "catalog": "gpuopen.json",
+                "mtlx": "gpuopen-mtlx.json",
+                "tiers": {"1k": {"complete": True}},
+            },
+            "ambientcg": {"catalog": "ambientcg.json", "tiers": {"1k": {"complete": True}}},
+        },
+    }
+    api = _manifest_api(tmp_path, manifest)
+    vs = find_manifest_asset_violations(
+        api,
+        "gerchowl/mat-vis",
+        "v1",
+        head_fn=lambda url: 404 if url.endswith("gpuopen-mtlx.json") else 200,
+    )
+    assert len(vs) == 1
+    assert vs[0]["source"] == "gpuopen" and vs[0]["feature"] == "mtlx"
+    assert "gpuopen-mtlx.json" in vs[0]["url"]
+
+
+def test_manifest_assets_flags_missing_tier_sentinel(tmp_path):
+    manifest = {"sources": {"polyhaven": {"catalog": "polyhaven.json", "tiers": {"1k": {"complete": True}}}}}
+    api = _manifest_api(tmp_path, manifest)
+    vs = find_manifest_asset_violations(
+        api, "r", "v1", head_fn=lambda url: 404 if url.endswith(".tier_complete") else 200
+    )
+    assert len(vs) == 1 and vs[0]["feature"] == "tier_complete" and vs[0]["tier"] == "1k"
+
+
+def test_manifest_assets_transient_status_not_a_violation(tmp_path):
+    # 429/5xx/0 are inconclusive — must not spuriously red the cron.
+    manifest = {"sources": {"gpuopen": {"catalog": "gpuopen.json", "tiers": {"1k": {"complete": True}}}}}
+    api = _manifest_api(tmp_path, manifest)
+    for transient in (429, 503, 0):
+        assert find_manifest_asset_violations(api, "r", "v1", head_fn=lambda u: transient) == []
+
+
+def test_manifest_assets_clean_when_all_present(tmp_path):
+    manifest = {
+        "sources": {
+            "gpuopen": {"catalog": "gpuopen.json", "mtlx": "gpuopen-mtlx.json", "tiers": {"1k": {"complete": True}}}
+        }
+    }
+    api = _manifest_api(tmp_path, manifest)
+    assert find_manifest_asset_violations(api, "r", "v1", head_fn=lambda u: 200) == []
+
+
+def test_manifest_assets_missing_manifest_is_empty(tmp_path):
+    api = MagicMock()
+    api.hf_hub_download.side_effect = Exception("404")
+    assert find_manifest_asset_violations(api, "r", "v1", head_fn=lambda u: 404) == []
