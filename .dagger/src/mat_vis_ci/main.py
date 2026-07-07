@@ -983,6 +983,15 @@ class MatVisCi:
                 "comparison (clean by definition for first cuts)."
             ),
         ] = "",
+        check_completeness: Annotated[
+            bool,
+            Doc(
+                "#436: enable the matrix-vs-manifest tier-completeness gate. Only "
+                "for finished-release validation (release-validate) — NOT bake.yml's "
+                "per-phase post-bake validate, which sees only the native bake tier "
+                "and would false-fire on not-yet-derived tiers."
+            ),
+        ] = False,
     ) -> str:
         """Run scripts/validate_release.py --from-hf in the baker container.
 
@@ -1015,6 +1024,8 @@ class MatVisCi:
         ]
         if previous_tag:
             argv.extend(["--previous-tag", previous_tag])
+        if check_completeness:
+            argv.append("--check-completeness")
         return await ctr.with_exec(argv).stdout()
 
     # ── prod-cut pre-flight (mat-vis#345) ─────────────────────────

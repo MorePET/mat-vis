@@ -123,6 +123,7 @@ jobs:
             --repo-id=${{ steps.tag.outputs.repo_id }}
             --hf-token=env:HF_TOKEN
             --previous-tag=${{ steps.prev.outputs.previous_tag }}
+            --check-completeness=true
 
       - name: Notify on failure
         if: failure()
