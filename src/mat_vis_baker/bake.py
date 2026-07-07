@@ -8,6 +8,7 @@ gpuopen layered graphs require MaterialX baking (optional dependency).
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from PIL import Image
@@ -127,10 +128,23 @@ def _bake_mtlx(mtlx_path: Path, output_dir: Path, resolution_px: int) -> dict[st
                 break
 
     if not baked:
-        raise RuntimeError(
-            f"TextureBaker produced no output PNGs in {output_dir} "
-            f"(mtlx: {mtlx_path})"
+        # #461 bug 2: a constant/procedural material (e.g. a glass BRDF) has no
+        # spatial <image> textures, so TextureBaker correctly produces nothing.
+        # That's a scalar-only material (#369), not a failure. Only raise when
+        # the mtlx DID reference images but none baked — the real "textures
+        # unresolved" error (the #461 bug-1 case-mismatch symptom).
+        mtlx_text = mtlx_path.read_text(encoding="utf-8", errors="replace")
+        if re.search(r'value="[^"]*\.(?:png|jpg|jpeg|exr|tif|tiff)"', mtlx_text, re.IGNORECASE):
+            raise RuntimeError(
+                f"TextureBaker produced no output PNGs in {output_dir} "
+                f"(mtlx: {mtlx_path}): the material references image textures but "
+                f"none resolved"
+            )
+        log.info(
+            "%s: procedural/constant mtlx (no image textures) — scalar-only, no maps",
+            mtlx_path.stem,
         )
+        return {}
 
     log.info(
         "%s: baked %d channels from mtlx (%s)",

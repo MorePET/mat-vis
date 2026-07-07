@@ -371,3 +371,58 @@ def test_extract_sanitizes_zip_slip(tmp_path: Path) -> None:
     _extract_from_zip(zip_bytes, "mat-4", tmp_path)
     assert not (tmp_path / "evil_baseColor.png").exists()
     assert (tmp_path / "mat-4" / "evil_baseColor.png").is_file()
+
+
+# -- #461 bug 1: case-correction (mtlx ref case != zip filename case) --
+#
+# Real gpuopen zips store textures/Foo_basecolor.png but the mtlx references
+# textures/Foo_baseColor.png (capital C). MaterialX's open() is case-sensitive
+# on Linux, so the image must be written at the case the mtlx names it.
+
+_MTLX_MIXED_CASE = (
+    b'<?xml version="1.0"?><materialx version="1.38">'
+    b'<image name="c"><input name="file" type="filename" '
+    b'value="textures/Foo_baseColor.png"/></image>'
+    b'<image name="n"><input name="file" type="filename" '
+    b'value="textures/Foo_Normal.png"/></image></materialx>'
+)
+
+
+def test_extract_case_corrects_to_mtlx_reference(tmp_path: Path) -> None:
+    zip_bytes = _zip_with(
+        {
+            "material.mtlx": _MTLX_MIXED_CASE,
+            "textures/Foo_basecolor.png": _PNG,  # lowercase on disk
+            "textures/Foo_normal.png": _PNG,
+        }
+    )
+    _extract_from_zip(zip_bytes, "mat-5", tmp_path)
+    mat = tmp_path / "mat-5"
+    # Written at the mtlx-referenced CASE so the <image file> ref resolves.
+    assert (mat / "textures" / "Foo_baseColor.png").is_file()
+    assert (mat / "textures" / "Foo_Normal.png").is_file()
+    # The lowercase originals must NOT be what's on disk (case-corrected).
+    assert not (mat / "textures" / "Foo_basecolor.png").exists()
+    assert not (mat / "textures" / "Foo_normal.png").exists()
+
+
+def test_referenced_image_paths_keys_case_insensitively() -> None:
+    from mat_vis_baker.sources.gpuopen import _referenced_image_paths
+
+    refs = _referenced_image_paths(_MTLX_MIXED_CASE)
+    assert refs["textures/foo_basecolor.png"] == "textures/Foo_baseColor.png"
+    assert refs["textures/foo_normal.png"] == "textures/Foo_Normal.png"
+
+
+def test_extract_unreferenced_image_keeps_own_path(tmp_path: Path) -> None:
+    """An image the mtlx doesn't reference keeps its own preserved path."""
+    zip_bytes = _zip_with(
+        {
+            "material.mtlx": _MTLX_MIXED_CASE,
+            "textures/Foo_basecolor.png": _PNG,
+            "textures/Foo_normal.png": _PNG,
+            "textures/Extra_height.png": _PNG,  # not referenced by the mtlx
+        }
+    )
+    _extract_from_zip(zip_bytes, "mat-6", tmp_path)
+    assert (tmp_path / "mat-6" / "textures" / "Extra_height.png").is_file()

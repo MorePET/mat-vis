@@ -225,6 +225,30 @@ def _rel_under_mtlx(member: str, mtlx_prefix: str) -> str:
     return "/".join(parts) or "texture"
 
 
+_MTLX_IMG_REF_RE = re.compile(rb'value="([^"]*\.(?:png|jpg|jpeg|exr|tif|tiff))"', re.IGNORECASE)
+
+
+def _referenced_image_paths(mtlx_bytes: bytes) -> dict[str, str]:
+    """Map ``lower(relpath) -> exact relpath`` for every ``<image file="...">``
+    the mtlx references (#461 bug 1).
+
+    gpuopen mtlx files reference textures with different CASE than the zip
+    stores them under (``textures/Foo_baseColor.png`` in the mtlx vs
+    ``textures/Foo_basecolor.png`` on disk). MaterialX resolves via a
+    case-sensitive OS ``open()`` on Linux, so the extractor must write each
+    image at the case the mtlx names it. This returns the mtlx's exact-case
+    reference for each texture, keyed case-insensitively for matching.
+    """
+    refs: dict[str, str] = {}
+    for m in _MTLX_IMG_REF_RE.findall(mtlx_bytes):
+        ref = m.decode("utf-8", "replace").replace("\\", "/")
+        parts = [p for p in ref.split("/") if p not in ("", ".", "..")]
+        norm = "/".join(parts)
+        if norm:
+            refs.setdefault(norm.lower(), norm)
+    return refs
+
+
 def _extract_from_zip(
     zip_bytes: bytes,
     material_id: str,
@@ -258,13 +282,16 @@ def _extract_from_zip(
         members = [n for n in zf.namelist() if not n.endswith("/")]
 
         # Locate the mtlx first: texture members are placed relative to its
-        # dir so its <image file="..."> refs resolve at bake time.
+        # dir (and at the CASE it references, #461 bug 1) so its
+        # <image file="..."> refs resolve at bake time.
         mtlx_member = next(
             (n for n in members if n.rsplit("/", 1)[-1].lower().endswith(".mtlx")), None
         )
         mtlx_prefix = (
             mtlx_member.rsplit("/", 1)[0] + "/" if mtlx_member and "/" in mtlx_member else ""
         )
+        mtlx_bytes = zf.read(mtlx_member) if mtlx_member else b""
+        referenced = _referenced_image_paths(mtlx_bytes)
 
         for name in members:
             basename = name.rsplit("/", 1)[-1].lower()
@@ -272,18 +299,25 @@ def _extract_from_zip(
             if name == mtlx_member:
                 # Save to working dir for bake pipeline (flattened).
                 mtlx_path = mat_dir / "material.mtlx"
-                raw = zf.read(name)
-                mtlx_path.write_bytes(raw)
+                mtlx_path.write_bytes(mtlx_bytes)
                 # Also save attributed copy to mtlx_dir for git
                 if mtlx_dir:
                     git_mtlx = mtlx_dir / "gpuopen" / material_id / "material.mtlx"
                     git_mtlx.parent.mkdir(parents=True, exist_ok=True)
-                    git_mtlx.write_bytes(_inject_mtlx_comment(raw, material_id, source_url))
+                    git_mtlx.write_bytes(
+                        _inject_mtlx_comment(mtlx_bytes, material_id, source_url)
+                    )
                 continue
 
             if _IMG_RE.search(basename):
-                # Preserve the mtlx-relative path so <image> refs resolve.
-                out_path = mat_dir / _rel_under_mtlx(name, mtlx_prefix)
+                # Write at the CASE the mtlx references (bug 1): gpuopen mtlx
+                # names textures with different case than the zip stores them
+                # (baseColor vs basecolor), and MaterialX's open() is
+                # case-sensitive on Linux. Fall back to the preserved path when
+                # the mtlx doesn't reference this member.
+                rel = _rel_under_mtlx(name, mtlx_prefix)
+                rel = referenced.get(rel.lower(), rel)
+                out_path = mat_dir / rel
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_bytes(zf.read(name))
                 # Map to a canonical channel when derivable — used by the
