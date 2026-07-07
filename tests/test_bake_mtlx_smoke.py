@@ -191,3 +191,46 @@ def test_bake_material_routes_mtlx_records(smoke_mtlx: Path, tmp_path: Path) -> 
 
     assert out.status != "failed", "mtlx bake failed through bake_material()"
     assert "color" in out.maps, f"expected color in maps, got {out.maps}"
+
+
+# -- #461 bug 2: procedural-vs-image decision (GL-free; the branch that
+# distinguishes "no textures = scalar-only" from "textures unresolved = error") --
+
+
+def test_mtlx_references_images_true_for_image_based() -> None:
+    from mat_vis_baker.bake import _mtlx_references_images
+
+    txt = (
+        '<materialx><image><input name="file" type="filename" '
+        'value="textures/Foo_baseColor.png"/></image></materialx>'
+    )
+    assert _mtlx_references_images(txt) is True
+
+
+def test_mtlx_references_images_false_for_procedural() -> None:
+    from mat_vis_baker.bake import _mtlx_references_images
+
+    # A constant/procedural material (e.g. glass BRDF) — no <image> file refs.
+    txt = (
+        '<materialx><standard_surface><input name="transmission" '
+        'type="float" value="1.0"/></standard_surface></materialx>'
+    )
+    assert _mtlx_references_images(txt) is False
+
+
+def test_mtlx_references_images_handles_single_quotes() -> None:
+    from mat_vis_baker.bake import _mtlx_references_images
+
+    # A single-quoted image material must NOT be misclassified as scalar-only
+    # (that would silently mask a real bake failure as an empty-ok record).
+    txt = "<image><input name='file' value='textures/Foo_normal.png'/></image>"
+    assert _mtlx_references_images(txt) is True
+
+
+def test_mtlx_references_images_ignores_non_image_values() -> None:
+    from mat_vis_baker.bake import _mtlx_references_images
+
+    # A value that merely contains a word ending in a mapish token but no image
+    # extension must not count.
+    txt = '<input name="base" type="color3" value="0.8, 0.8, 0.8"/>'
+    assert _mtlx_references_images(txt) is False

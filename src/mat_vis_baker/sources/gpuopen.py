@@ -225,7 +225,11 @@ def _rel_under_mtlx(member: str, mtlx_prefix: str) -> str:
     return "/".join(parts) or "texture"
 
 
-_MTLX_IMG_REF_RE = re.compile(rb'value="([^"]*\.(?:png|jpg|jpeg|exr|tif|tiff))"', re.IGNORECASE)
+# Match both quote styles (canonical MaterialX is double-quoted; be robust so a
+# single-quoted image material still gets case-corrected — #461 review nit).
+_MTLX_IMG_REF_RE = re.compile(
+    rb"""value=["']([^"']*\.(?:png|jpg|jpeg|exr|tif|tiff))["']""", re.IGNORECASE
+)
 
 
 def _referenced_image_paths(mtlx_bytes: bytes) -> dict[str, str]:
