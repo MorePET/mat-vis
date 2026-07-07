@@ -8,6 +8,7 @@ gpuopen layered graphs require MaterialX baking (optional dependency).
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from PIL import Image
@@ -17,6 +18,19 @@ from mat_vis_baker.common import TIER_TO_PX, MaterialRecord, hash_textures
 log = logging.getLogger("mat-vis-baker.bake")
 
 THUMB_SIZE = 128
+
+# #461 bug 2: distinguish a procedural/constant material (no <image> texture
+# refs → TextureBaker legitimately produces no PNGs → scalar-only) from an
+# image-based material whose textures failed to resolve (real error). Match
+# both quote styles — canonical MaterialX is double-quoted, but a single-quoted
+# image material must NOT be silently misclassified as scalar-only (that would
+# mask a real bake failure as an empty-but-ok record).
+_IMAGE_REF_RE = re.compile(r"""value=["'][^"']*\.(?:png|jpg|jpeg|exr|tif|tiff)["']""", re.IGNORECASE)
+
+
+def _mtlx_references_images(mtlx_text: str) -> bool:
+    """True if the mtlx has any ``<image file="...">`` texture reference."""
+    return bool(_IMAGE_REF_RE.search(mtlx_text))
 
 
 def _validate_and_resize_png(path: Path, target_px: int | None = None) -> bool:
@@ -127,10 +141,23 @@ def _bake_mtlx(mtlx_path: Path, output_dir: Path, resolution_px: int) -> dict[st
                 break
 
     if not baked:
-        raise RuntimeError(
-            f"TextureBaker produced no output PNGs in {output_dir} "
-            f"(mtlx: {mtlx_path})"
+        # #461 bug 2: a constant/procedural material (e.g. a glass BRDF) has no
+        # spatial <image> textures, so TextureBaker correctly produces nothing.
+        # That's a scalar-only material (#369), not a failure. Only raise when
+        # the mtlx DID reference images but none baked — the real "textures
+        # unresolved" error (the #461 bug-1 case-mismatch symptom).
+        mtlx_text = mtlx_path.read_text(encoding="utf-8", errors="replace")
+        if _mtlx_references_images(mtlx_text):
+            raise RuntimeError(
+                f"TextureBaker produced no output PNGs in {output_dir} "
+                f"(mtlx: {mtlx_path}): the material references image textures but "
+                f"none resolved"
+            )
+        log.info(
+            "%s: procedural/constant mtlx (no image textures) — scalar-only, no maps",
+            mtlx_path.stem,
         )
+        return {}
 
     log.info(
         "%s: baked %d channels from mtlx (%s)",
