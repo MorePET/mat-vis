@@ -20,15 +20,18 @@ Four gates (all hard-failing):
    (#290 pbr, #292 mtlx). Manifest-declared only → no false positives;
    only a definitive 404 fails (transient HF statuses are skipped).
 
-4. **Tier completeness** (#436, --from-hf only) — every ``(source, tier)``
-   cell the release **matrix** DECLARES (``release_matrix`` bake cells +
-   ``ktx2_matrix`` transcode cells) must be present and ``complete`` in the
-   manifest. Closes the "wanted (matrix) vs got (manifest)" gap the other
-   gates miss: gate 1 only fires on tiers that shrank vs the *previous*
-   release, gate 2 EXCLUDES ``ktx2-`` tiers, and gate 3 only checks
-   manifest-*declared* assets — so a matrix cell that silently never baked
-   (the ``ktx2-512`` never-derived #436 scenario) is invisible to all
-   three. This gate reconciles the two sides directly.
+4. **Tier completeness** (#436, --from-hf + ``--check-completeness``) — every
+   ``(source, tier)`` cell the release **matrix** DECLARES (``release_matrix``
+   bake + ``derive_matrix`` downscale + ``ktx2_matrix`` transcode cells) must
+   be present and ``complete`` in the manifest. Closes the "wanted (matrix) vs
+   got (manifest)" gap the other gates miss: gate 1 only fires on tiers that
+   shrank vs the *previous* release, gate 2 EXCLUDES ``ktx2-`` tiers, and gate
+   3 only checks manifest-*declared* assets — so a matrix cell that silently
+   never baked (the ``ktx2-512`` never-derived #436 scenario) is invisible to
+   all three. **Opt-in**: it's a whole-release invariant, valid only after
+   every phase (bake + derive + ktx2) has run — enabled in release-validate,
+   not in bake.yml's per-phase post-bake validate (which sees only the native
+   bake tier and would false-fire on the not-yet-derived tiers).
 
 Schema-autodetect: the underlying loader handles both the v0.5.x
 ``bake-metrics.parquet`` (one row per release-tag with an
@@ -724,6 +727,19 @@ def main(argv: list[str] | None = None) -> int:
         default=list(DEFAULT_EXCLUDE_TIER_PREFIXES),
         help="tier prefixes to skip in parity check (repeatable)",
     )
+    p.add_argument(
+        "--check-completeness",
+        action="store_true",
+        help=(
+            "#436: enable the matrix-vs-manifest tier-completeness gate. OFF by "
+            "default because it's a WHOLE-RELEASE invariant — it must only run "
+            "after every phase (bake + derive + ktx2) has produced its tiers. "
+            "Enable it in release-validate (the finished-release validator), NOT "
+            "in bake.yml's per-phase post-bake validate, which sees only the "
+            "freshly-baked native tier and would false-fire on the not-yet-"
+            "derived tiers."
+        ),
+    )
     args = p.parse_args(argv)
 
     if args.from_hf:
@@ -784,21 +800,25 @@ def _run_from_hf(args: argparse.Namespace) -> int:
     )
     # #436: matrix-vs-manifest tier completeness — every (source, tier) the
     # release matrix DECLARES must be present + complete in the manifest.
-    # Reconciles the "wanted" (matrix) side against "got" (manifest), which no
-    # other gate does (see module docstring, gate 4).
+    # Reconciles the "wanted" (matrix) side against "got" (manifest). OPT-IN
+    # (--check-completeness): a WHOLE-RELEASE invariant, valid only after every
+    # phase (bake + derive + ktx2) has produced its tiers — so it runs in
+    # release-validate, NOT bake.yml's per-phase post-bake validate (which sees
+    # only the native bake tier and would false-fire).
     completeness_violations: list[dict[str, Any]] = []
-    line = _line_for_tag(args.release_tag)
-    if line:
-        wanted = wanted_cells_for_line(line)
-        if wanted:
-            manifest = _fetch_release_manifest(api, args.repo_id, args.release_tag)
-            completeness_violations = find_tier_completeness_violations(manifest, wanted)
-        else:
-            print(
-                f"validate-release: no matrix cells for line {line!r} "
-                f"(tier-completeness gate skipped)",
-                file=sys.stderr,
-            )
+    if args.check_completeness:
+        line = _line_for_tag(args.release_tag)
+        if line:
+            wanted = wanted_cells_for_line(line)
+            if wanted:
+                manifest = _fetch_release_manifest(api, args.repo_id, args.release_tag)
+                completeness_violations = find_tier_completeness_violations(manifest, wanted)
+            else:
+                print(
+                    f"validate-release: no matrix cells for line {line!r} "
+                    f"(tier-completeness gate skipped)",
+                    file=sys.stderr,
+                )
     return _report(args, regressions, violations, asset_violations, completeness_violations)
 
 

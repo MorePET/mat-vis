@@ -705,3 +705,31 @@ def test_wanted_cells_for_line_spans_all_three_phases():
 
 def test_wanted_cells_for_unknown_line_is_empty():
     assert wanted_cells_for_line("v1999.01") == set()
+
+
+def test_completeness_gate_is_opt_in(monkeypatch):
+    """#436 gate is a WHOLE-RELEASE invariant — it must stay OFF unless
+    --check-completeness is passed, so bake.yml's per-phase post-bake validate
+    (native tier only) doesn't false-fire on not-yet-derived tiers."""
+    import scripts.validate_release as vr
+
+    calls: list[int] = []
+    monkeypatch.setattr(vr, "find_regressions_from_hf", lambda *a, **k: [])
+    monkeypatch.setattr(vr, "find_tier_parity_violations_from_hf", lambda *a, **k: [])
+    monkeypatch.setattr(vr, "find_manifest_asset_violations", lambda *a, **k: [])
+    monkeypatch.setattr(vr, "wanted_cells_for_line", lambda line: {("gpuopen", "ktx2-512")})
+    monkeypatch.setattr(vr, "_fetch_release_manifest", lambda *a, **k: {"sources": {}})
+    monkeypatch.setattr(
+        vr, "find_tier_completeness_violations", lambda *a, **k: calls.append(1) or []
+    )
+    monkeypatch.setattr("huggingface_hub.HfApi", lambda *a, **k: object())
+
+    # Default (no flag) — completeness must NOT run.
+    rc = vr.main(["--from-hf", "--release-tag", "v2026.04.2", "--repo-id", "r"])
+    assert rc == 0
+    assert calls == []
+
+    # Opt-in — completeness runs.
+    rc = vr.main(["--from-hf", "--release-tag", "v2026.04.2", "--repo-id", "r", "--check-completeness"])
+    assert rc == 0
+    assert calls == [1]
