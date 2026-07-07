@@ -1,7 +1,7 @@
 """Release validator — enforces coverage invariants against the
 per-file substrate metrics parquet (#263 phase C).
 
-Three gates (all hard-failing):
+Four gates (all hard-failing):
 
 1. **Regression gate** — current release's per-(source, tier) material
    total must be >= ``--min-ratio`` x previous release's total. Catches
@@ -19,6 +19,16 @@ Three gates (all hard-failing):
    gates are blind to: "manifest claims X but X is 404 / never uploaded"
    (#290 pbr, #292 mtlx). Manifest-declared only → no false positives;
    only a definitive 404 fails (transient HF statuses are skipped).
+
+4. **Tier completeness** (#436, --from-hf only) — every ``(source, tier)``
+   cell the release **matrix** DECLARES (``release_matrix`` bake cells +
+   ``ktx2_matrix`` transcode cells) must be present and ``complete`` in the
+   manifest. Closes the "wanted (matrix) vs got (manifest)" gap the other
+   gates miss: gate 1 only fires on tiers that shrank vs the *previous*
+   release, gate 2 EXCLUDES ``ktx2-`` tiers, and gate 3 only checks
+   manifest-*declared* assets — so a matrix cell that silently never baked
+   (the ``ktx2-512`` never-derived #436 scenario) is invisible to all
+   three. This gate reconciles the two sides directly.
 
 Schema-autodetect: the underlying loader handles both the v0.5.x
 ``bake-metrics.parquet`` (one row per release-tag with an
@@ -69,11 +79,13 @@ __all__ = [
     "find_manifest_asset_violations",
     "find_regressions",
     "find_regressions_from_hf",
+    "find_tier_completeness_violations",
     "find_tier_parity_violations",
     "find_tier_parity_violations_from_hf",
     "load_aggregated_counts",
     "load_waivers",
     "main",
+    "wanted_cells_for_line",
 ]
 
 
@@ -376,6 +388,87 @@ def find_manifest_asset_violations(
                 violations.append(
                     {"source": source, "feature": feature, "tier": tier, "url": url}
                 )
+    return violations
+
+
+# ── #436: matrix-vs-manifest tier completeness (wanted vs got) ──
+
+
+def _line_for_tag(tag: str) -> str | None:
+    """Extract the CalVer line prefix (``vYYYY.MM``) from a release tag.
+
+    ``v2026.04.3`` → ``v2026.04``; ``v2026.04.99-tst-full-369`` → ``v2026.04``.
+    Returns ``None`` if the tag doesn't start with a ``vYYYY.MM`` prefix (the
+    completeness gate can't map it to a matrix line, so it's skipped).
+    """
+    import re
+
+    m = re.match(r"^(v\d{4}\.\d{2})", tag)
+    return m.group(1) if m else None
+
+
+def wanted_cells_for_line(line: str) -> set[tuple[str, str]]:
+    """Union of ``(source, tier)`` cells every phase of the release declares
+    for ``line`` — the canonical "wanted" set the manifest is reconciled
+    against.
+
+    Spans all three declaration phases so a gap in any of them is caught:
+
+    - ``release_matrix`` — bake cells (``(source, tier)``, the fetched tier);
+    - ``derive_matrix``  — PNG downscale cells (512 / 256 / 128, via
+      ``produces``);
+    - ``ktx2_matrix``    — transcode cells (``ktx2-<tier>``, via ``produces``).
+
+    Returns an empty set if the line is unknown to a matrix (``KeyError``) or
+    the baker package isn't importable (``ImportError``); the caller treats
+    empty as "nothing to reconcile".
+    """
+    cells: set[tuple[str, str]] = set()
+    try:
+        from mat_vis_baker.release_matrix import get_release as _get_bake
+
+        for c in _get_bake(line).cells:
+            cells.add((c.source, c.tier))
+    except (KeyError, ImportError):
+        pass
+    for _mod in ("derive_matrix", "ktx2_matrix"):
+        try:
+            import importlib
+
+            get_release = importlib.import_module(f"mat_vis_baker.{_mod}").get_release
+            for c in get_release(line).cells:
+                cells.add((c.produces.source, c.produces.tier))
+        except (KeyError, ImportError):
+            pass
+    return cells
+
+
+def find_tier_completeness_violations(
+    manifest: dict,
+    wanted_cells: Any,
+) -> list[dict[str, Any]]:
+    """#436: assert every matrix-declared ``(source, tier)`` cell is present
+    and ``complete`` in the release manifest.
+
+    Pure function — the caller supplies the fetched ``manifest`` and the
+    ``wanted_cells`` iterable (see :func:`wanted_cells_for_line`). Emits one
+    violation per cell that is missing or incomplete:
+
+    - ``source_missing``   — the manifest has no entry for the source at all;
+    - ``tier_missing``     — source present, but the matrix-declared tier is
+      absent from its ``tiers`` map (the ``ktx2-512`` #436 case);
+    - ``tier_incomplete``  — tier present but not marked ``complete``.
+    """
+    sources = (manifest.get("sources") or {}) if manifest else {}
+    violations: list[dict[str, Any]] = []
+    for source, tier in sorted(set(wanted_cells)):
+        src_entry = sources.get(source) or {}
+        tinfo = (src_entry.get("tiers") or {}).get(tier)
+        if tinfo is None:
+            kind = "tier_missing" if source in sources else "source_missing"
+            violations.append({"source": source, "tier": tier, "kind": kind})
+        elif not (tinfo or {}).get("complete"):
+            violations.append({"source": source, "tier": tier, "kind": "tier_incomplete"})
     return violations
 
 
@@ -689,7 +782,24 @@ def _run_from_hf(args: argparse.Namespace) -> int:
     asset_violations = find_manifest_asset_violations(
         api, repo_id=args.repo_id, release_tag=args.release_tag
     )
-    return _report(args, regressions, violations, asset_violations)
+    # #436: matrix-vs-manifest tier completeness — every (source, tier) the
+    # release matrix DECLARES must be present + complete in the manifest.
+    # Reconciles the "wanted" (matrix) side against "got" (manifest), which no
+    # other gate does (see module docstring, gate 4).
+    completeness_violations: list[dict[str, Any]] = []
+    line = _line_for_tag(args.release_tag)
+    if line:
+        wanted = wanted_cells_for_line(line)
+        if wanted:
+            manifest = _fetch_release_manifest(api, args.repo_id, args.release_tag)
+            completeness_violations = find_tier_completeness_violations(manifest, wanted)
+        else:
+            print(
+                f"validate-release: no matrix cells for line {line!r} "
+                f"(tier-completeness gate skipped)",
+                file=sys.stderr,
+            )
+    return _report(args, regressions, violations, asset_violations, completeness_violations)
 
 
 def _report(
@@ -697,12 +807,14 @@ def _report(
     regressions: list[dict[str, Any]],
     violations: list[dict[str, Any]],
     asset_violations: list[dict[str, Any]] | None = None,
+    completeness_violations: list[dict[str, Any]] | None = None,
 ) -> int:
     """Shared output writer + return-code computation. Centralised so
     both --metrics and --from-hf modes emit the same operator-facing
     text format."""
     asset_violations = asset_violations or []
-    if not regressions and not violations and not asset_violations:
+    completeness_violations = completeness_violations or []
+    if not regressions and not violations and not asset_violations and not completeness_violations:
         mode = "from-hf" if args.from_hf else "parquet"
         print(f"validate-release {args.release_tag} ({mode}): clean")
         return 0
@@ -732,6 +844,14 @@ def _report(
             if a.get("tier"):
                 where += f"/{a['tier']}"
             print(f"  {where}: {a['url']}")
+
+    if completeness_violations:
+        print(
+            f"\n=== matrix-declared tiers missing/incomplete in {args.release_tag} "
+            f"(wanted vs got, #436) ==="
+        )
+        for c in completeness_violations:
+            print(f"  {c['source']}/{c['tier']}: {c['kind']}")
 
     return 1
 
