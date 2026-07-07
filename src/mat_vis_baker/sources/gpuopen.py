@@ -206,6 +206,25 @@ def _inject_mtlx_comment(mtlx_bytes: bytes, material_id: str, source_url: str) -
     return comment + text
 
 
+def _rel_under_mtlx(member: str, mtlx_prefix: str) -> str:
+    """Path a texture member should occupy under ``mat_dir`` so the mtlx's
+    ``<image file="...">`` refs resolve at bake time (#461).
+
+    The mtlx is flattened to ``mat_dir/material.mtlx``, so its refs (e.g.
+    ``textures/Foo_baseColor.png``) resolve relative to ``mat_dir``. We strip
+    the mtlx's own zip sub-dir prefix and keep the remainder — so a zip laid
+    out as ``Foo/material.mtlx`` + ``Foo/textures/bar.png`` yields
+    ``mat_dir/textures/bar.png``. Members outside the prefix keep their full
+    relative path. Sanitized against zip-slip (drops ``..`` / absolute parts).
+    """
+    if mtlx_prefix and member.startswith(mtlx_prefix):
+        rel = member[len(mtlx_prefix) :]  # noqa: E203
+    else:
+        rel = member  # mtlx at zip root, or member outside its dir
+    parts = [p for p in rel.replace("\\", "/").split("/") if p not in ("", ".", "..")]
+    return "/".join(parts) or "texture"
+
+
 def _extract_from_zip(
     zip_bytes: bytes,
     material_id: str,
@@ -213,7 +232,17 @@ def _extract_from_zip(
     *,
     mtlx_dir: Path | None = None,
 ) -> tuple[Path | None, dict[str, Path]]:
-    """Extract .mtlx and texture files from a ZIP. Returns (mtlx_path, {channel: path})."""
+    """Extract .mtlx and texture files from a ZIP. Returns (mtlx_path, {channel: path}).
+
+    #461: source images are written at the path the mtlx **references** them by
+    (relative to the mtlx's dir), not renamed to a channel name. TextureBaker
+    resolves ``<image file="textures/Foo_baseColor.png">`` relative to the
+    mtlx's parent (``mat_dir``); the pre-#461 behaviour renamed images to
+    ``color.png`` and dropped non-channel images (masks), so every image-based
+    gpuopen bake failed with "Image file not found" → no output PNGs. The
+    ``{channel: path}`` map is still built (for the neutral-multiplier
+    convention and the no-mtlx flat path), now pointing at the preserved paths.
+    """
     mat_dir = output_dir / material_id
     mat_dir.mkdir(parents=True, exist_ok=True)
     mtlx_path: Path | None = None
@@ -222,18 +251,26 @@ def _extract_from_zip(
     source_url = f"https://matlib.gpuopen.com/main/materials/all?material={material_id}"
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        # Validate before any read — rejects decompression bombs. Output
-        # paths are derived from normalized channel names (not member
-        # names), so zip-slip is already avoided; this check covers the
-        # bomb case where a malicious member has huge uncompressed size.
+        # Validate before any read — rejects decompression bombs. Texture
+        # output paths are sanitized in _rel_under_mtlx (drops ``..``), so
+        # zip-slip stays covered even though we now preserve member paths.
         check_zip_safety(zf)
-        for name in zf.namelist():
-            if name.endswith("/"):
-                continue
+        members = [n for n in zf.namelist() if not n.endswith("/")]
+
+        # Locate the mtlx first: texture members are placed relative to its
+        # dir so its <image file="..."> refs resolve at bake time.
+        mtlx_member = next(
+            (n for n in members if n.rsplit("/", 1)[-1].lower().endswith(".mtlx")), None
+        )
+        mtlx_prefix = (
+            mtlx_member.rsplit("/", 1)[0] + "/" if mtlx_member and "/" in mtlx_member else ""
+        )
+
+        for name in members:
             basename = name.rsplit("/", 1)[-1].lower()
 
-            if basename.endswith(".mtlx"):
-                # Save to working dir for bake pipeline
+            if name == mtlx_member:
+                # Save to working dir for bake pipeline (flattened).
                 mtlx_path = mat_dir / "material.mtlx"
                 raw = zf.read(name)
                 mtlx_path.write_bytes(raw)
@@ -245,19 +282,19 @@ def _extract_from_zip(
                 continue
 
             if _IMG_RE.search(basename):
-                # Try to extract channel from filename
-                stem = basename.rsplit(".", 1)[0]
-                # Common patterns: basecolor.png, *_basecolor.png, *_normal.png
-                parts = re.split(r"[_\-]", stem)
+                # Preserve the mtlx-relative path so <image> refs resolve.
+                out_path = mat_dir / _rel_under_mtlx(name, mtlx_prefix)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_bytes(zf.read(name))
+                # Map to a canonical channel when derivable — used by the
+                # neutral-multiplier convention and the no-mtlx flat path.
+                stem = out_path.stem.lower()
                 channel = None
-                for part in reversed(parts):
+                for part in reversed(re.split(r"[_\-]", stem)):
                     channel = normalize_channel("gpuopen", part)
                     if channel:
                         break
                 if channel and channel not in textures:
-                    ext = basename.rsplit(".", 1)[-1]
-                    out_path = mat_dir / f"{channel}.{ext}"
-                    out_path.write_bytes(zf.read(name))
                     textures[channel] = out_path
 
     return mtlx_path, textures
