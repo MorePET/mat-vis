@@ -399,25 +399,43 @@ def test_material_not_staged_error_direct_uuid_unchanged():
     assert "resolved id" not in msg
 
 
-# ── Hotfix #284: ambientCG/polyhaven flat-v2 name addressability ──
+# ── #291: v3-nested name addressability (retires the #284 flat-v2 fallback) ──
 
 
-def test_resolve_name_falls_back_to_top_level_name_field():
-    """ambientcg/polyhaven catalogs use a flat v2 schema with top-level
-    ``name`` (no ``mat_vis`` envelope). Name lookup must hit those too
-    (#284).
-    """
+def test_resolve_name_uses_mat_vis_envelope():
+    """All sources emit v3-nested entries; name lookup resolves via
+    ``mat_vis.name`` (#291). This is the canonical path the #284 hotfix's
+    flat-v2 fallback was bridging to before the migration completed."""
     from unittest.mock import patch
 
     client = _client_with_index(
         rowmap_materials={"Bricks104": {"color": {"offset": 0, "length": 10}}},
-        # NB: no mat_vis envelope; flat top-level name field.
-        index_entries=[{"id": "Bricks104", "name": "Bricks 104"}],
+        index_entries=[{"id": "Bricks104", "mat_vis": {"name": "Bricks 104"}}],
     )
     with patch.object(client, "fetch_texture", return_value=b"\x89PNG") as ft:
         out = client.fetch_all_textures("gpuopen", "Bricks 104", tier="1k")
     assert out == {"color": b"\x89PNG"}
     ft.assert_called_once_with("gpuopen", "Bricks104", "color", "1k")
+
+
+def test_flat_v2_top_level_name_no_longer_resolvable():
+    """#291 retired the flat-v2 top-level ``name`` fallback. A legacy-shaped
+    entry (top-level ``name``, no ``mat_vis`` envelope) is therefore NOT
+    name-addressable — only its id resolves. Guards the intentional behaviour
+    change so it's documented, not a silent surprise."""
+    from unittest.mock import patch
+
+    client = _client_with_index(
+        rowmap_materials={"Bricks104": {"color": {"offset": 0, "length": 10}}},
+        index_entries=[{"id": "Bricks104", "name": "Bricks 104"}],  # flat-v2 shape
+    )
+    with patch.object(client, "fetch_texture", return_value=b"\x89PNG"):
+        # Top-level name no longer matches.
+        with pytest.raises(MatVisError):
+            client.fetch_all_textures("gpuopen", "Bricks 104", tier="1k")
+        # ...but the canonical id still resolves.
+        out = client.fetch_all_textures("gpuopen", "Bricks104", tier="1k")
+    assert out == {"color": b"\x89PNG"}
 
 
 def test_resolve_name_prefers_mat_vis_name_over_top_level():
@@ -514,9 +532,9 @@ def test_ambiguous_material_error_lists_names():
             "uuid-y": {"color": {"offset": 0, "length": 10}},
         },
         index_entries=[
-            # Two distinct flat-v2 entries that normalize to the same name.
-            {"id": "uuid-x", "name": "Brick Wall"},
-            {"id": "uuid-y", "name": "brick wall"},
+            # Two distinct v3-nested entries that normalize to the same name.
+            {"id": "uuid-x", "mat_vis": {"name": "Brick Wall"}},
+            {"id": "uuid-y", "mat_vis": {"name": "brick wall"}},
         ],
     )
     with pytest.raises(AmbiguousMaterialError) as exc:

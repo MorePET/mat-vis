@@ -1987,13 +1987,14 @@ class MatVisClient:
         by_id: dict | None = None
         by_name: list[dict] = []
 
-        # Per-entry display name. v3 entries carry it under the
-        # ``mat_vis`` envelope; ambientcg/polyhaven flat-v2 entries
-        # carry it at the top level (#284). Fall back to the canonical
-        # id so the name-list never holds an empty string.
+        # Per-entry display name. All sources emit v3-nested entries that
+        # carry the name under the ``mat_vis`` envelope (#291 — the #284
+        # flat-v2 top-level fallback is retired now that no flat-v2 data
+        # ships). Fall back to the canonical id so the name-list never
+        # holds an empty string.
         def _display_name(entry: dict) -> str:
             envelope = entry.get("mat_vis") or {}
-            return envelope.get("name") or entry.get("name") or entry.get("id", "")
+            return envelope.get("name") or entry.get("id", "")
 
         for entry in idx:
             if not isinstance(entry, dict):
