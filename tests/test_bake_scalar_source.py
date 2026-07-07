@@ -100,7 +100,14 @@ class TestBakeScalarSource:
         catalog_call = push_api.create_commit.call_args
         catalog_ops = catalog_call.kwargs["operations"]
         catalog_paths = {op.path_in_repo for op in catalog_ops}
-        assert catalog_paths == {"physicallybased.json"}, catalog_paths
+        # #293: the catalog commit now also carries the `.tier_complete`
+        # sentinel so the manifest's `scalar: complete` declaration is backed
+        # by a probeable marker (was missing → the asset-reachability gate
+        # 404'd on it).
+        assert catalog_paths == {
+            "physicallybased.json",
+            "physicallybased/scalar/.tier_complete",
+        }, catalog_paths
 
         # Manifest commit went via the bake-side HfApi → bake_api.create_commit.
         assert bake_api.create_commit.call_count == 1, (

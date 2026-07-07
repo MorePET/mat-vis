@@ -107,11 +107,20 @@ def bake_scalar_source(
         )
         return {"dry_run": True, "materials": len(index)}
 
-    # 1) Catalog commit — single file, same wholesale-overwrite shape
-    # as before. push_to_hf takes care of branch creation if missing.
+    # 1) Catalog commit — catalog + the `.tier_complete` sentinel. #293: the
+    # scalar path declares `scalar: {complete: True}` in the manifest but
+    # (pre-fix) never wrote the `<source>/scalar/.tier_complete` marker the
+    # textured path writes, so the manifest-asset-reachability gate correctly
+    # 404'd on it. Emit the zero-byte sentinel so "declared" matches "shipped"
+    # and clients can probe scalar completeness in one HEAD like any tier.
+    sentinel_path = work_dir / ".tier_complete"
+    sentinel_path.write_bytes(b"")
     catalog_sha = push_to_hf(
         repo_id=repo_id,
-        files=[(catalog_path, f"{source}.json")],
+        files=[
+            (catalog_path, f"{source}.json"),
+            (sentinel_path, f"{source}/scalar/.tier_complete"),
+        ],
         revision=release_tag,
         commit_message=f"feat(data): {release_tag} — bake {source} (scalar)",
         token=hf_token,
