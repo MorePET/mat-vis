@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mat-vis · bake confirmation</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --fg:#e6e9ef; --dim:#8b94a7;
+          --ok:#2ecc71; --bad:#e74c3c; --maybe:#f1c40f; --accent:#5b9dff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui,sans-serif; }
+  header { position:sticky; top:0; z-index:10; background:#0c0e12ee; backdrop-filter:blur(6px);
+           border-bottom:1px solid var(--line); padding:10px 14px; }
+  h1 { font-size:15px; margin:0 0 8px; font-weight:600; }
+  h1 small { color:var(--dim); font-weight:400; }
+  .controls { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  input, select, button { background:var(--card); color:var(--fg); border:1px solid var(--line);
+           border-radius:6px; padding:6px 9px; font:inherit; }
+  input:focus, select:focus { outline:1px solid var(--accent); }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#0c0e12; border-color:var(--accent); font-weight:600; }
+  .stats { color:var(--dim); margin-left:auto; font-variant-numeric:tabular-nums; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px; padding:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden;
+          display:flex; flex-direction:column; }
+  .card.ok    { border-color:var(--ok); }
+  .card.bad   { border-color:var(--bad); }
+  .card.maybe { border-color:var(--maybe); }
+  .card .head { padding:8px 10px; border-bottom:1px solid var(--line); }
+  .card .name { font-weight:600; }
+  .card .meta { color:var(--dim); font-size:12px; margin-top:2px; word-break:break-all; }
+  .panes { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--line); }
+  .pane { background:var(--card); padding:8px; text-align:center; min-height:180px;
+          display:flex; flex-direction:column; }
+  .pane .label { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px; }
+  .pane img, .pane canvas { width:100%; aspect-ratio:1/1; object-fit:cover; border-radius:6px; background:#0b0d11; }
+  .pane .missing { color:var(--dim); font-size:12px; margin:auto; }
+  .maps { display:flex; gap:4px; padding:6px 8px; }
+  .maps img { width:44px; height:44px; object-fit:cover; border-radius:4px; border:1px solid var(--line); background:#0b0d11; }
+  .maps .cap { color:var(--dim); font-size:10px; text-align:center; }
+  .flags { display:flex; gap:6px; padding:8px 10px; border-top:1px solid var(--line); }
+  .flags button { flex:1; }
+  .flags button.sel-ok    { background:var(--ok);    color:#04140a; border-color:var(--ok); }
+  .flags button.sel-bad   { background:var(--bad);   color:#1a0503; border-color:var(--bad); }
+  .flags button.sel-maybe { background:var(--maybe); color:#191300; border-color:var(--maybe); }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .err { color:var(--bad); padding:14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>mat-vis · bake confirmation <small>— our bake &amp; render next to the source reference; flag each material</small></h1>
+  <div class="controls">
+    <label>repo <input id="repo" size="20" value="gerchowl/mat-vis" /></label>
+    <label>tag <input id="tag" size="24" value="v2026.04.2" /></label>
+    <label>tier
+      <select id="tier"><option>512</option><option>1k</option><option>256</option><option>128</option></select>
+    </label>
+    <label>source
+      <select id="src">
+        <option value="">all</option>
+        <option>gpuopen</option><option>ambientcg</option><option>polyhaven</option><option>physicallybased</option>
+      </select>
+    </label>
+    <label>show
+      <select id="flt">
+        <option value="">all</option>
+        <option value="unflagged">unflagged</option>
+        <option value="ok">✓ working</option>
+        <option value="bad">✗ broken</option>
+        <option value="maybe">? unsure</option>
+      </select>
+    </label>
+    <input id="q" placeholder="search name…" size="16" />
+    <button id="load" class="primary">Load</button>
+    <button id="export">Export flags</button>
+    <span class="stats" id="stats"></span>
+  </div>
+</header>
+<div id="out" class="grid"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const out = $('#out');
+const q = new URLSearchParams(location.search);
+for (const k of ['repo','tag','tier','src','flt','q']) if (q.get(k)) $('#'+k).value = q.get(k);
+
+const SOURCES = ['gpuopen','ambientcg','polyhaven','physicallybased'];
+const SCALAR_ONLY = new Set(['physicallybased']);
+const resolveBase = (repo,tag) => `https://huggingface.co/datasets/${repo}/resolve/${tag}`;
+const mapUrl = (repo,tag,src,tier,id,ch) => `${resolveBase(repo,tag)}/${src}/${tier}/${id}/${ch}.png`;
+
+// Per-source reference: {img, page}. img may be null (→ source link only).
+function sourceRef(src, id, raw) {
+  switch (src) {
+    case 'polyhaven':
+      return { img:`https://cdn.polyhaven.com/asset_img/thumbs/${id}.png?width=256`,
+               page:`https://polyhaven.com/a/${id}` };
+    case 'physicallybased': {
+      const ref = (raw && raw.reference) || [];
+      const img = Array.isArray(ref) ? ref.find(u=>/\.(jpe?g|png)$/i.test(u)) : (typeof ref==='string'?ref:null);
+      return { img: img || `https://raw.githubusercontent.com/AntonPalmqvist/physically-based-api/main/images/renders/cycles/600/${id}.jpeg`,
+               page:`https://physicallybased.info/` };
+    }
+    case 'ambientcg':
+      // ambientcg preview needs a per-asset hashed CDN path we don't carry → link out.
+      return { img:null, page:`https://ambientcg.com/view?id=${id}` };
+    case 'gpuopen':
+      return { img:null, page:`https://matlib.gpuopen.com/main/materials/all?material=${id}` };
+    default: return { img:null, page:null };
+  }
+}
+
+// ── shared single WebGL renderer: render one material → dataURL ──
+const RS = 256;
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true, preserveDrawingBuffer:true });
+renderer.setSize(RS, RS);
+const scene = new THREE.Scene();
+const cam = new THREE.PerspectiveCamera(38, 1, 0.1, 100); cam.position.set(0,0,3.1);
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(2,2,3); scene.add(key);
+const rim = new THREE.DirectionalLight(0x88aaff, 0.7); rim.position.set(-3,-1,-2); scene.add(rim);
+const geo = new THREE.SphereGeometry(1, 64, 48);
+const texLoader = new THREE.TextureLoader(); texLoader.setCrossOrigin('anonymous');
+const loadTex = url => new Promise(res => texLoader.load(url, t=>{ t.colorSpace=THREE.SRGBColorSpace; res(t); }, undefined, ()=>res(null)));
+const loadLinear = url => new Promise(res => texLoader.load(url, t=>res(t), undefined, ()=>res(null)));
+
+async function renderMaps(repo,tag,src,tier,id,pbr) {
+  const [color,normal,rough] = await Promise.all([
+    loadTex(mapUrl(repo,tag,src,tier,id,'color')),
+    loadLinear(mapUrl(repo,tag,src,tier,id,'normal')),
+    loadLinear(mapUrl(repo,tag,src,tier,id,'roughness')),
+  ]);
+  if (!color && !normal && !rough) return null;   // nothing baked → caller shows "missing"
+  const mat = new THREE.MeshStandardMaterial({
+    map: color || null, normalMap: normal || null, roughnessMap: rough || null,
+    metalness: (pbr && typeof pbr.metalness==='number') ? pbr.metalness : (rough?0.0:0.1),
+    roughness: rough ? 1.0 : 0.6, color: color?0xffffff:0x888888,
+  });
+  return renderMesh(mat);
+}
+function renderScalars(pbr) {
+  const c = (pbr && pbr.color_rgb) || [0.6,0.6,0.6];
+  const mat = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(c[0],c[1],c[2]),
+    metalness: typeof pbr?.metalness==='number'?pbr.metalness:0,
+    roughness: typeof pbr?.roughness==='number'?pbr.roughness:0.5,
+    ior: typeof pbr?.ior==='number'?pbr.ior:1.5, reflectivity:0.5,
+  });
+  return renderMesh(mat);
+}
+function renderMesh(mat) {
+  const mesh = new THREE.Mesh(geo, mat); scene.add(mesh);
+  renderer.render(scene, cam);
+  const url = renderer.domElement.toDataURL('image/png');
+  scene.remove(mesh); mat.dispose();
+  return url;
+}
+
+// ── flags (localStorage), keyed by tag:source:id ──
+const flagKey = (tag,src,id) => `flag:${tag}:${src}:${id}`;
+const getFlag = (tag,src,id) => localStorage.getItem(flagKey(tag,src,id)) || '';
+function setFlag(tag,src,id,v){ v?localStorage.setItem(flagKey(tag,src,id),v):localStorage.removeItem(flagKey(tag,src,id)); updateStats(); }
+
+let ALL = [];   // {src,id,name,raw,pbr}
+function updateStats(){
+  const tag=$('#tag').value.trim();
+  let ok=0,bad=0,maybe=0;
+  for(const m of ALL){ const f=getFlag(tag,m.src,m.id); if(f==='ok')ok++; else if(f==='bad')bad++; else if(f==='maybe')maybe++; }
+  $('#stats').textContent = `${ALL.length} materials · ✓${ok} ✗${bad} ?${maybe} · ${ALL.length-ok-bad-maybe} unflagged`;
+}
+
+// lazy render when a card scrolls into view (one WebGL context, sequential)
+const io = new IntersectionObserver(async (entries)=>{
+  for(const e of entries){ if(!e.isIntersecting) continue; io.unobserve(e.target);
+    const c=e.target, {repo,tag,tier,src,id,pbr}=c._d;
+    const img=c.querySelector('.viz-img');
+    try{
+      const url = SCALAR_ONLY.has(src) ? renderScalars(pbr) : await renderMaps(repo,tag,src,tier,id,pbr);
+      if(url){ img.src=url; } else { img.replaceWith(Object.assign(document.createElement('div'),{className:'missing',textContent:'no baked maps'})); }
+    }catch(err){ img.replaceWith(Object.assign(document.createElement('div'),{className:'missing',textContent:'render error'})); }
+  }
+},{rootMargin:'300px'});
+
+function card(m, repo, tag, tier){
+  const {src,id,name,raw,pbr}=m;
+  const ref=sourceRef(src,id,raw);
+  const flag=getFlag(tag,src,id);
+  const el=document.createElement('div');
+  el.className='card'+(flag?' '+flag:'');
+  el._d={repo,tag,tier,src,id,pbr};
+  const refPane = ref.img
+    ? `<img loading="lazy" src="${ref.img}" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'missing',textContent:'reference n/a'}))"/>`
+    : `<div class="missing">no inline reference<br><a href="${ref.page}" target="_blank" rel="noopener">open source ↗</a></div>`;
+  const maps = SCALAR_ONLY.has(src) ? '' : `
+    <div class="maps">
+      ${['color','normal','roughness'].map(ch=>`<div><img loading="lazy" src="${mapUrl(repo,tag,src,tier,id,ch)}" onerror="this.style.visibility='hidden'"/><div class="cap">${ch}</div></div>`).join('')}
+    </div>`;
+  el.innerHTML=`
+    <div class="head">
+      <div class="name">${name||id}</div>
+      <div class="meta">${src} · ${id} · <a href="${ref.page}" target="_blank" rel="noopener">source ↗</a></div>
+    </div>
+    <div class="panes">
+      <div class="pane"><div class="label">source reference</div>${refPane}</div>
+      <div class="pane"><div class="label">our bake (render)</div><img class="viz-img" alt="baked render"/></div>
+    </div>
+    ${maps}
+    <div class="flags">
+      <button data-f="ok"    class="${flag==='ok'?'sel-ok':''}">✓ working</button>
+      <button data-f="bad"   class="${flag==='bad'?'sel-bad':''}">✗ broken</button>
+      <button data-f="maybe" class="${flag==='maybe'?'sel-maybe':''}">? unsure</button>
+    </div>`;
+  el.querySelectorAll('.flags button').forEach(b=>b.onclick=()=>{
+    const cur=getFlag(tag,src,id), v=b.dataset.f===cur?'':b.dataset.f;
+    setFlag(tag,src,id,v);
+    el.className='card'+(v?' '+v:'');
+    el.querySelectorAll('.flags button').forEach(x=>x.className=(x.dataset.f===v?'sel-'+v:''));
+  });
+  io.observe(el);
+  return el;
+}
+
+function applyFilters(){
+  const src=$('#src').value, flt=$('#flt').value, tag=$('#tag').value.trim();
+  const qq=$('#q').value.trim().toLowerCase();
+  const tier=$('#tier').value;
+  const repo=$('#repo').value.trim();
+  out.innerHTML='';
+  const shown = ALL.filter(m=>{
+    if(src && m.src!==src) return false;
+    if(qq && !(m.name||'').toLowerCase().includes(qq) && !m.id.toLowerCase().includes(qq)) return false;
+    const f=getFlag(tag,m.src,m.id);
+    if(flt==='unflagged' && f) return false;
+    if(['ok','bad','maybe'].includes(flt) && f!==flt) return false;
+    return true;
+  });
+  const frag=document.createDocumentFragment();
+  for(const m of shown) frag.appendChild(card(m,repo,tag,tier));
+  out.appendChild(frag);
+  updateStats();
+}
+
+async function load(){
+  const repo=$('#repo').value.trim(), tag=$('#tag').value.trim();
+  out.innerHTML='<div style="padding:14px;color:var(--dim)">loading catalogs…</div>';
+  ALL=[];
+  const wantSrc=$('#src').value;
+  const srcs = wantSrc ? [wantSrc] : SOURCES;
+  const errs=[];
+  await Promise.all(srcs.map(async src=>{
+    try{
+      const r=await fetch(`${resolveBase(repo,tag)}/${src}.json`);
+      if(!r.ok){ errs.push(`${src}.json → ${r.status}`); return; }
+      const cat=await r.json();
+      const entries = Array.isArray(cat) ? cat : (cat.materials||cat.entries||[]);
+      for(const e of entries){
+        const mv=e.mat_vis||{};
+        ALL.push({ src, id:e.id, name:mv.name||e.id, raw:(e.upstream||{}).raw||{}, pbr:mv.pbr||{} });
+      }
+    }catch(err){ errs.push(`${src}: ${err.message}`); }
+  }));
+  ALL.sort((a,b)=>(a.src+a.name).localeCompare(b.src+b.name));
+  if(!ALL.length){ out.innerHTML=`<div class="err">No materials loaded.<br>${errs.join('<br>')||'check repo/tag'}</div>`; return; }
+  // reflect state in URL for shareable views
+  const p=new URLSearchParams({repo,tag,tier:$('#tier').value}); if(wantSrc)p.set('src',wantSrc);
+  history.replaceState(null,'','?'+p);
+  applyFilters();
+}
+
+function exportFlags(){
+  const tag=$('#tag').value.trim();
+  const flags=ALL.map(m=>({source:m.src,id:m.id,name:m.name,flag:getFlag(tag,m.src,m.id)})).filter(x=>x.flag);
+  const blob=new Blob([JSON.stringify({repo:$('#repo').value.trim(),tag,generated:new Date().toISOString(),flags},null,2)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download=`bake-flags-${tag}.json`; a.click();
+}
+
+$('#load').onclick=load;
+$('#export').onclick=exportFlags;
+for(const id of ['src','flt','q','tier']) $('#'+id).addEventListener('change',()=>ALL.length&&applyFilters());
+$('#q').addEventListener('input',()=>ALL.length&&applyFilters());
+load();
+</script>
+</body>
+</html>
