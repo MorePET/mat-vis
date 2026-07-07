@@ -733,3 +733,129 @@ def test_completeness_gate_is_opt_in(monkeypatch):
     rc = vr.main(["--from-hf", "--release-tag", "v2026.04.2", "--repo-id", "r", "--check-completeness"])
     assert rc == 0
     assert calls == [1]
+
+
+# -- #293-P1: pbr coverage regression gate --
+
+
+def test_pbr_populated_detects_real_vs_allnull():
+    from scripts.validate_release import _pbr_populated
+
+    assert _pbr_populated({"color_rgb": [0.5, 0.5, 0.5], "ior": None}) is True
+    assert _pbr_populated({"metalness": 0.0}) is True  # 0.0 is a real value
+    assert _pbr_populated({"is_conductor": False}) is True
+    assert _pbr_populated({"color_rgb": None, "ior": None}) is False  # #290 all-null
+    assert _pbr_populated({}) is False
+    assert _pbr_populated(None) is False
+
+
+def _stub_coverage(monkeypatch, mapping):
+    import scripts.validate_release as vr
+
+    monkeypatch.setattr(
+        vr, "source_pbr_coverage", lambda api, repo, tag: mapping.get(tag, {})
+    )
+
+
+def test_pbr_coverage_flags_collapse(monkeypatch):
+    from scripts.validate_release import find_pbr_coverage_regressions
+
+    _stub_coverage(monkeypatch, {"prev": {"gpuopen": (454, 454)}, "cur": {"gpuopen": (0, 454)}})
+    v = find_pbr_coverage_regressions(None, repo_id="r", current_tag="cur", previous_tag="prev")
+    assert len(v) == 1
+    assert v[0]["source"] == "gpuopen"
+    assert v[0]["ratio"] == 0.0
+    assert v[0]["current_frac"] == 0.0
+
+
+def test_pbr_coverage_stable_is_clean(monkeypatch):
+    from scripts.validate_release import find_pbr_coverage_regressions
+
+    _stub_coverage(monkeypatch, {"prev": {"gpuopen": (454, 454)}, "cur": {"gpuopen": (454, 454)}})
+    assert find_pbr_coverage_regressions(None, repo_id="r", current_tag="cur", previous_tag="prev") == []
+
+
+def test_pbr_coverage_tolerates_single_material_gap(monkeypatch):
+    from scripts.validate_release import find_pbr_coverage_regressions
+
+    # ambientcg 99.9% vs 100% → ratio 0.999 > 0.95 default → clean.
+    _stub_coverage(
+        monkeypatch,
+        {"prev": {"ambientcg": (1957, 1957)}, "cur": {"ambientcg": (1956, 1957)}},
+    )
+    assert find_pbr_coverage_regressions(None, repo_id="r", current_tag="cur", previous_tag="prev") == []
+
+
+def test_pbr_coverage_free_pass_when_prev_zero(monkeypatch):
+    from scripts.validate_release import find_pbr_coverage_regressions
+
+    # Previous release had 0% (e.g. pre-PBR stale) → nothing to regress against.
+    _stub_coverage(monkeypatch, {"prev": {"gpuopen": (0, 454)}, "cur": {"gpuopen": (0, 454)}})
+    assert find_pbr_coverage_regressions(None, repo_id="r", current_tag="cur", previous_tag="prev") == []
+
+
+def test_pbr_coverage_waiver_skips_source(monkeypatch):
+    from scripts.validate_release import find_pbr_coverage_regressions
+
+    _stub_coverage(monkeypatch, {"prev": {"gpuopen": (454, 454)}, "cur": {"gpuopen": (0, 454)}})
+    v = find_pbr_coverage_regressions(
+        None, repo_id="r", current_tag="cur", previous_tag="prev", waivers={"gpuopen"}
+    )
+    assert v == []
+
+
+def test_pbr_coverage_no_previous_is_empty(monkeypatch):
+    from scripts.validate_release import find_pbr_coverage_regressions
+
+    _stub_coverage(monkeypatch, {"cur": {"gpuopen": (0, 454)}})  # no "prev" entry
+    assert find_pbr_coverage_regressions(None, repo_id="r", current_tag="cur", previous_tag="prev") == []
+
+
+# -- #293-P1 review nits: provenance exclusion + transient-safety --
+
+
+def test_pbr_populated_excludes_provenance():
+    from scripts.validate_release import _pbr_populated
+
+    # Only a *_source provenance string set, all measured scalars null → NOT
+    # covered (must not mask an all-scalar-null gap).
+    assert _pbr_populated(
+        {"metalness_source": "graph_estimate", "metalness": None, "color_rgb": None}
+    ) is False
+    # Provenance alongside a real measured value → covered.
+    assert _pbr_populated({"metalness_source": "graph_estimate", "metalness": 0.9}) is True
+
+
+def test_source_pbr_coverage_skips_unfetchable_catalog(monkeypatch):
+    import scripts.validate_release as vr
+
+    monkeypatch.setattr(
+        vr,
+        "_fetch_release_manifest",
+        lambda a, r, t: {
+            "sources": {
+                "gpuopen": {"catalog": "gpuopen.json"},
+                "polyhaven": {"catalog": "polyhaven.json"},
+            }
+        },
+    )
+
+    def fake_cat(api, repo, tag, catalog):
+        # gpuopen catalog blips (transient) → []; polyhaven fetches fine.
+        return [] if catalog == "gpuopen.json" else [{"mat_vis": {"pbr": {"metalness": 0.5}}}]
+
+    monkeypatch.setattr(vr, "_fetch_source_catalog", fake_cat)
+    cov = vr.source_pbr_coverage(None, "r", "t")
+    assert "gpuopen" not in cov  # unmeasurable → skipped, not (0, 0)
+    assert cov["polyhaven"] == (1, 1)
+
+
+def test_pbr_coverage_transient_current_no_false_regression(monkeypatch):
+    from scripts.validate_release import find_pbr_coverage_regressions
+
+    # Current catalog for gpuopen blipped → omitted from cur coverage; prev had
+    # 100%. Must NOT flag a regression (the network-blip-reds-the-cron bug).
+    _stub_coverage(monkeypatch, {"prev": {"gpuopen": (454, 454)}, "cur": {}})
+    assert find_pbr_coverage_regressions(
+        None, repo_id="r", current_tag="cur", previous_tag="prev"
+    ) == []
