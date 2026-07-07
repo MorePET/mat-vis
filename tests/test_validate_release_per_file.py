@@ -31,11 +31,14 @@ from scripts.validate_release import (
     find_manifest_asset_violations,
     find_regressions,
     find_regressions_from_hf,
+    find_tier_completeness_violations,
     find_tier_parity_violations,
     find_tier_parity_violations_from_hf,
     load_aggregated_counts,
     main,
+    wanted_cells_for_line,
 )
+from scripts.validate_release import _line_for_tag
 
 
 # ── helpers ────────────────────────────────────────────────────
@@ -625,3 +628,80 @@ def test_manifest_assets_missing_manifest_is_empty(tmp_path):
     api = MagicMock()
     api.hf_hub_download.side_effect = Exception("404")
     assert find_manifest_asset_violations(api, "r", "v1", head_fn=lambda u: 404) == []
+
+
+# ── #436: tier-completeness (matrix wanted vs manifest got) ──────
+
+
+def test_line_for_tag_extracts_calver_prefix():
+    assert _line_for_tag("v2026.04.3") == "v2026.04"
+    assert _line_for_tag("v2026.04.99-tst-full-369") == "v2026.04"
+    assert _line_for_tag("v2026.12.0") == "v2026.12"
+    assert _line_for_tag("nightly") is None
+    assert _line_for_tag("main") is None
+
+
+def test_tier_completeness_flags_matrix_tier_absent_from_manifest():
+    """The #436 case: matrix declares gpuopen/ktx2-512 but the manifest omits
+    it → tier_missing (invisible to the other three gates)."""
+    manifest = {
+        "sources": {
+            "gpuopen": {"catalog": "gpuopen.json", "tiers": {"1k": {"complete": True}}}
+        }
+    }
+    wanted = {("gpuopen", "1k"), ("gpuopen", "ktx2-512")}
+    vs = find_tier_completeness_violations(manifest, wanted)
+    assert vs == [{"source": "gpuopen", "tier": "ktx2-512", "kind": "tier_missing"}]
+
+
+def test_tier_completeness_flags_incomplete_tier():
+    manifest = {
+        "sources": {"gpuopen": {"tiers": {"1k": {"complete": True}, "512": {"complete": False}}}}
+    }
+    wanted = {("gpuopen", "1k"), ("gpuopen", "512")}
+    vs = find_tier_completeness_violations(manifest, wanted)
+    assert vs == [{"source": "gpuopen", "tier": "512", "kind": "tier_incomplete"}]
+
+
+def test_tier_completeness_flags_source_missing():
+    manifest = {"sources": {"gpuopen": {"tiers": {"1k": {"complete": True}}}}}
+    wanted = {("polyhaven", "1k")}
+    vs = find_tier_completeness_violations(manifest, wanted)
+    assert vs == [{"source": "polyhaven", "tier": "1k", "kind": "source_missing"}]
+
+
+def test_tier_completeness_clean_when_all_declared_complete():
+    manifest = {
+        "sources": {
+            "gpuopen": {"tiers": {"1k": {"complete": True}, "ktx2-512": {"complete": True}}}
+        }
+    }
+    wanted = {("gpuopen", "1k"), ("gpuopen", "ktx2-512")}
+    assert find_tier_completeness_violations(manifest, wanted) == []
+
+
+def test_tier_completeness_empty_manifest_flags_all_wanted():
+    wanted = {("gpuopen", "1k"), ("polyhaven", "ktx2-1k")}
+    vs = find_tier_completeness_violations({}, wanted)
+    assert {(v["source"], v["tier"]) for v in vs} == wanted
+    assert all(v["kind"] == "source_missing" for v in vs)
+
+
+def test_wanted_cells_for_line_spans_all_three_phases():
+    """The wanted set must union bake (release_matrix), derive (derive_matrix)
+    and ktx2 (ktx2_matrix) cells — a gap in any phase would let a whole class
+    of missing tier slip through. Guards the exact #436 tier (ktx2-512) plus a
+    derived PNG tier and the fetched bake tier."""
+    wanted = wanted_cells_for_line("v2026.04")
+    assert wanted, "v2026.04 should be a known release line"
+    # ktx2 phase — the #436 tier.
+    assert ("gpuopen", "ktx2-512") in wanted
+    # derive phase — a downscaled PNG tier (not a fetched/bake tier).
+    derive_tiers = {t for (_s, t) in wanted if t in {"512", "256", "128"}}
+    assert derive_tiers, "derive (downscale) tiers must be part of the wanted set"
+    # bake phase — the fetched tier.
+    assert ("gpuopen", "1k") in wanted
+
+
+def test_wanted_cells_for_unknown_line_is_empty():
+    assert wanted_cells_for_line("v1999.01") == set()
