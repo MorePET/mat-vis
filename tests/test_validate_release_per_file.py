@@ -809,3 +809,53 @@ def test_pbr_coverage_no_previous_is_empty(monkeypatch):
 
     _stub_coverage(monkeypatch, {"cur": {"gpuopen": (0, 454)}})  # no "prev" entry
     assert find_pbr_coverage_regressions(None, repo_id="r", current_tag="cur", previous_tag="prev") == []
+
+
+# -- #293-P1 review nits: provenance exclusion + transient-safety --
+
+
+def test_pbr_populated_excludes_provenance():
+    from scripts.validate_release import _pbr_populated
+
+    # Only a *_source provenance string set, all measured scalars null → NOT
+    # covered (must not mask an all-scalar-null gap).
+    assert _pbr_populated(
+        {"metalness_source": "graph_estimate", "metalness": None, "color_rgb": None}
+    ) is False
+    # Provenance alongside a real measured value → covered.
+    assert _pbr_populated({"metalness_source": "graph_estimate", "metalness": 0.9}) is True
+
+
+def test_source_pbr_coverage_skips_unfetchable_catalog(monkeypatch):
+    import scripts.validate_release as vr
+
+    monkeypatch.setattr(
+        vr,
+        "_fetch_release_manifest",
+        lambda a, r, t: {
+            "sources": {
+                "gpuopen": {"catalog": "gpuopen.json"},
+                "polyhaven": {"catalog": "polyhaven.json"},
+            }
+        },
+    )
+
+    def fake_cat(api, repo, tag, catalog):
+        # gpuopen catalog blips (transient) → []; polyhaven fetches fine.
+        return [] if catalog == "gpuopen.json" else [{"mat_vis": {"pbr": {"metalness": 0.5}}}]
+
+    monkeypatch.setattr(vr, "_fetch_source_catalog", fake_cat)
+    cov = vr.source_pbr_coverage(None, "r", "t")
+    assert "gpuopen" not in cov  # unmeasurable → skipped, not (0, 0)
+    assert cov["polyhaven"] == (1, 1)
+
+
+def test_pbr_coverage_transient_current_no_false_regression(monkeypatch):
+    from scripts.validate_release import find_pbr_coverage_regressions
+
+    # Current catalog for gpuopen blipped → omitted from cur coverage; prev had
+    # 100%. Must NOT flag a regression (the network-blip-reds-the-cron bug).
+    _stub_coverage(monkeypatch, {"prev": {"gpuopen": (454, 454)}, "cur": {}})
+    assert find_pbr_coverage_regressions(
+        None, repo_id="r", current_tag="cur", previous_tag="prev"
+    ) == []

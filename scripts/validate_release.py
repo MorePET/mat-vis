@@ -501,7 +501,15 @@ def _pbr_populated(pbr: Any) -> bool:
     """
     if not isinstance(pbr, dict):
         return False
-    return any(v is not None and v != [] and v != {} for v in pbr.values())
+    # Exclude ``*_source`` provenance strings (e.g. ``metalness_source =
+    # "graph_estimate"``, set WITH ``metalness=None``) — provenance is not a
+    # measured value, so a material with only provenance populated must read as
+    # uncovered, not mask an all-scalar-null gap (#293-P1 review).
+    return any(
+        v is not None and v != [] and v != {}
+        for k, v in pbr.items()
+        if not k.endswith("_source")
+    )
 
 
 def _fetch_source_catalog(api: Any, repo_id: str, release_tag: str, catalog: str) -> list[dict]:
@@ -529,6 +537,14 @@ def source_pbr_coverage(api: Any, repo_id: str, release_tag: str) -> dict[str, t
         if not catalog:
             continue
         entries = _fetch_source_catalog(api, repo_id, release_tag, str(catalog))
+        if not entries:
+            # Catalog missing / unfetchable (transient blip OR definitively
+            # absent) OR legitimately empty → coverage is unmeasurable. SKIP the
+            # source rather than record (0, 0). This mirrors the P0 asset gate's
+            # transient-safety: a network hiccup on one source's catalog must
+            # NOT read as 0% and spuriously red the daily cron (#293-P1 review).
+            # A genuinely-missing catalog is the asset gate's / count gate's job.
+            continue
         total = len(entries)
         populated = sum(
             1 for e in entries if _pbr_populated((e.get("mat_vis") or {}).get("pbr"))
