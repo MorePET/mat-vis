@@ -123,6 +123,21 @@ const cam = new THREE.PerspectiveCamera(38, 1, 0.1, 100); cam.position.set(0,0,3
 scene.add(new THREE.AmbientLight(0xffffff, 0.55));
 const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(2,2,3); scene.add(key);
 const rim = new THREE.DirectionalLight(0x88aaff, 0.7); rim.position.set(-3,-1,-2); scene.add(rim);
+// Gradient studio env → serves as BOTH backdrop and reflection/refraction
+// source, so glass reads as transparent and metals reflect visible structure
+// (a flat colour makes transmission look like an opaque ball).
+const _envC = document.createElement('canvas'); _envC.width = 8; _envC.height = 256;
+const _ectx = _envC.getContext('2d');
+const _grad = _ectx.createLinearGradient(0, 0, 0, 256);
+_grad.addColorStop(0.00, '#cdd8ee'); _grad.addColorStop(0.45, '#5b6579');
+_grad.addColorStop(0.55, '#39404e'); _grad.addColorStop(1.00, '#0b0d11');
+_ectx.fillStyle = _grad; _ectx.fillRect(0, 0, 8, 256);
+const _envTex = new THREE.CanvasTexture(_envC);
+_envTex.mapping = THREE.EquirectangularReflectionMapping;
+_envTex.colorSpace = THREE.SRGBColorSpace;
+scene.environment = _envTex;
+scene.background = _envTex;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
 const geo = new THREE.SphereGeometry(1, 64, 48);
 const texLoader = new THREE.TextureLoader(); texLoader.setCrossOrigin('anonymous');
 const loadTex = url => new Promise(res => texLoader.load(url, t=>{ t.colorSpace=THREE.SRGBColorSpace; res(t); }, undefined, ()=>res(null)));
@@ -143,14 +158,25 @@ async function renderMaps(repo,tag,src,tier,id,pbr) {
   return renderMesh(mat);
 }
 function renderScalars(pbr) {
-  const c = (pbr && pbr.color_rgb) || [0.6,0.6,0.6];
+  const c = (pbr && pbr.color_rgb) || [0.75,0.75,0.75];
+  // #glass: honour transmission → transparent/refractive, not an opaque ball.
+  const tr = typeof pbr?.transmission==='number' ? pbr.transmission : 0;
   const mat = new THREE.MeshPhysicalMaterial({
     color: new THREE.Color(c[0],c[1],c[2]),
     metalness: typeof pbr?.metalness==='number'?pbr.metalness:0,
     roughness: typeof pbr?.roughness==='number'?pbr.roughness:0.5,
-    ior: typeof pbr?.ior==='number'?pbr.ior:1.5, reflectivity:0.5,
+    ior: typeof pbr?.ior==='number'?pbr.ior:1.5,
+    // transmission renders via three's transmission pass — do NOT set
+    // transparent (that switches to alpha-blend and fights the pass).
+    transmission: tr, thickness: tr>0?1.5:0,
+    specularIntensity: typeof pbr?.specular_intensity==='number'?pbr.specular_intensity:1,
   });
   return renderMesh(mat);
+}
+// A pbr block has real coverage if any non-provenance field is populated.
+function pbrHasValues(pbr){
+  return pbr && typeof pbr==='object' && Object.entries(pbr).some(
+    ([k,v]) => !k.endsWith('_source') && v!==null && v!==undefined && !(Array.isArray(v)&&v.length===0));
 }
 function renderMesh(mat) {
   const mesh = new THREE.Mesh(geo, mat); scene.add(mesh);
@@ -173,15 +199,25 @@ function updateStats(){
   $('#stats').textContent = `${ALL.length} materials · ✓${ok} ✗${bad} ?${maybe} · ${ALL.length-ok-bad-maybe} unflagged`;
 }
 
-// lazy render when a card scrolls into view (one WebGL context, sequential)
-const io = new IntersectionObserver(async (entries)=>{
+// Lazy render on scroll-into-view. Renders are SERIALIZED through one chain:
+// the shared WebGL context isn't safe for concurrent renders, and serializing
+// also spreads texture requests so a scroll-burst doesn't get HF-rate-limited
+// (429) — which previously produced spurious "no baked maps".
+let _renderChain = Promise.resolve();
+const io = new IntersectionObserver((entries)=>{
   for(const e of entries){ if(!e.isIntersecting) continue; io.unobserve(e.target);
     const c=e.target, {repo,tag,tier,src,id,pbr}=c._d;
-    const img=c.querySelector('.viz-img');
-    try{
-      const url = SCALAR_ONLY.has(src) ? renderScalars(pbr) : await renderMaps(repo,tag,src,tier,id,pbr);
-      if(url){ img.src=url; } else { img.replaceWith(Object.assign(document.createElement('div'),{className:'missing',textContent:'no baked maps'})); }
-    }catch(err){ img.replaceWith(Object.assign(document.createElement('div'),{className:'missing',textContent:'render error'})); }
+    _renderChain = _renderChain.then(async ()=>{
+      const img=c.querySelector('.viz-img'); if(!img) return;
+      const miss = t => img.replaceWith(Object.assign(document.createElement('div'),{className:'missing',textContent:t}));
+      try{
+        let url = SCALAR_ONLY.has(src) ? renderScalars(pbr) : await renderMaps(repo,tag,src,tier,id,pbr);
+        // Textured source but no maps → if it's a scalar-bearing procedural /
+        // constant material (e.g. gpuopen glass), render from its pbr scalars.
+        if(!url && pbrHasValues(pbr)) url = renderScalars(pbr);
+        if(url){ img.src=url; } else { miss('no baked maps'); }
+      }catch(err){ miss('render error'); }
+    }).catch(()=>{});
   }
 },{rootMargin:'300px'});
 
